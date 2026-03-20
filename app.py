@@ -756,6 +756,23 @@ def _infer_tasa_bs_oper_index(lt: dict[str, Any]) -> int:
     return 0 if d_b <= d_p else 1
 
 
+DOC_TASA_BS_OPTS = ("BCV oficial", "P2P Binance (mercado)")
+
+
+def _tasa_bs_para_documento(t: dict[str, Any], *, usar_bcv: bool) -> float:
+    """Bs por 1 USD para esta venta/compra: BCV o ref. mercado (campo P2P). Los montos USD van 1:1."""
+    tb = _nf(t.get("tasa_bs"))
+    bcv = _nf(t.get("bcv_bs_por_usd")) or tb
+    par = _nf(t.get("paralelo_bs_por_usd")) or tb
+    if usar_bcv:
+        v = bcv if bcv is not None and float(bcv) > 0 else tb
+    else:
+        v = par if par is not None and float(par) > 0 else tb
+    if v is None or float(v) <= 0:
+        raise ValueError("Sin tasa Bs/USD válida; cargá tasas en el Dashboard.")
+    return float(v)
+
+
 def render_tabla_tasas_ui(df: pd.DataFrame) -> None:
     if df.empty:
         st.caption("No hay filas para mostrar.")
@@ -1841,8 +1858,12 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
     if not t:
         st.stop()
 
-    t_bs = float(t["tasa_bs"])
     t_usdt = float(t["tasa_usdt"])
+    st.caption(
+        "Líneas en **USD**: precio unitario y total son **1 USD = 1 USD** en el sistema. "
+        "Si cobrás o referenciás en **bolívares**, elegí la tasa (**BCV** o **P2P Binance**); "
+        "se guarda en la venta para equivalentes en Bs."
+    )
 
     prods = (
         sb.table("productos")
@@ -1874,7 +1895,16 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
         fv = st.date_input("Vencimiento (crédito)", value=date.today() + timedelta(days=30))
         notas = st.text_area("Notas")
 
-        st.caption("Líneas")
+        doc_tasa = st.radio(
+            "Tasa Bs/USD para esta venta (equivalente en bolívares y registro en BD):",
+            options=DOC_TASA_BS_OPTS,
+            index=_infer_tasa_bs_oper_index(t),
+            horizontal=True,
+            key="venta_doc_tasa_bs",
+            help="No cambia los montos en USD de las líneas; solo qué Bs/USD se asocia a la venta.",
+        )
+
+        st.caption("Líneas (montos en USD)")
         new_lines: list[dict[str, Any]] = []
         for i, line in enumerate(st.session_state["venta_lines"]):
             c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
@@ -1890,30 +1920,35 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             new_lines.append({"producto_id": pid, "cantidad": float(qty), "precio_unitario_usd": float(pu)})
 
         if st.form_submit_button("Registrar venta (atómica)"):
-            payload = {
-                "p_usuario_id": erp_uid,
-                "p_cliente": cliente,
-                "p_forma_pago": forma,
-                "p_caja_id": cj[caja_label] if forma == "contado" and caja_label else None,
-                "p_tasa_bs": t_bs,
-                "p_tasa_usdt": t_usdt,
-                "p_fecha_vencimiento": str(fv) if forma == "credito" else None,
-                "p_notas": notas,
-                "p_lineas": new_lines,
-            }
             try:
-                sb.rpc("crear_venta_erp", payload).execute()
-                st.success("Venta registrada.")
-                st.session_state["venta_lines"] = [
-                    {
-                        "producto_id": str(plist[0]["id"]),
-                        "cantidad": 1.0,
-                        "precio_unitario_usd": id_to_price[str(plist[0]["id"])],
-                    }
-                ]
-                st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo registrar: {e}")
+                t_bs_doc = _tasa_bs_para_documento(t, usar_bcv=(doc_tasa == DOC_TASA_BS_OPTS[0]))
+            except ValueError as e:
+                st.error(str(e))
+            else:
+                payload = {
+                    "p_usuario_id": erp_uid,
+                    "p_cliente": cliente,
+                    "p_forma_pago": forma,
+                    "p_caja_id": cj[caja_label] if forma == "contado" and caja_label else None,
+                    "p_tasa_bs": t_bs_doc,
+                    "p_tasa_usdt": t_usdt,
+                    "p_fecha_vencimiento": str(fv) if forma == "credito" else None,
+                    "p_notas": notas,
+                    "p_lineas": new_lines,
+                }
+                try:
+                    sb.rpc("crear_venta_erp", payload).execute()
+                    st.success("Venta registrada.")
+                    st.session_state["venta_lines"] = [
+                        {
+                            "producto_id": str(plist[0]["id"]),
+                            "cantidad": 1.0,
+                            "precio_unitario_usd": id_to_price[str(plist[0]["id"])],
+                        }
+                    ]
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo registrar: {e}")
 
     if st.button("Añadir línea"):
         st.session_state["venta_lines"].append(
@@ -1959,8 +1994,10 @@ def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
     if not t:
         st.stop()
 
-    t_bs = float(t["tasa_bs"])
     t_usdt = float(t["tasa_usdt"])
+    st.caption(
+        "Líneas en **USD** (1:1). Para equivalente en **bolívares** en esta compra, elegí **BCV** o **P2P Binance**."
+    )
 
     prods = (
         sb.table("productos")
@@ -1992,6 +2029,15 @@ def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
         fv = st.date_input("Vencimiento (crédito compra)", value=date.today() + timedelta(days=30), key="fv_compra")
         notas = st.text_area("Notas compra")
 
+        doc_tasa_c = st.radio(
+            "Tasa Bs/USD para esta compra:",
+            options=DOC_TASA_BS_OPTS,
+            index=_infer_tasa_bs_oper_index(t),
+            horizontal=True,
+            key="compra_doc_tasa_bs",
+            help="Montos de línea en USD sin cambio; la tasa queda en el registro de compra.",
+        )
+
         new_lines: list[dict[str, Any]] = []
         for i, line in enumerate(st.session_state["compra_lines"]):
             c1, c2, c3 = st.columns([3, 1, 1])
@@ -2007,30 +2053,35 @@ def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             new_lines.append({"producto_id": pid, "cantidad": float(qty), "costo_unitario_usd": float(cu)})
 
         if st.form_submit_button("Registrar compra (atómica)"):
-            payload = {
-                "p_usuario_id": erp_uid,
-                "p_proveedor": prov,
-                "p_forma_pago": forma,
-                "p_caja_id": cj[caja_label] if forma == "contado" and caja_label else None,
-                "p_tasa_bs": t_bs,
-                "p_tasa_usdt": t_usdt,
-                "p_fecha_vencimiento": str(fv) if forma == "credito" else None,
-                "p_notas": notas,
-                "p_lineas": new_lines,
-            }
             try:
-                sb.rpc("crear_compra_erp", payload).execute()
-                st.success("Compra registrada.")
-                st.session_state["compra_lines"] = [
-                    {
-                        "producto_id": str(plist[0]["id"]),
-                        "cantidad": 1.0,
-                        "costo_unitario_usd": id_to_cost[str(plist[0]["id"])],
-                    }
-                ]
-                st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo registrar: {e}")
+                t_bs_doc = _tasa_bs_para_documento(t, usar_bcv=(doc_tasa_c == DOC_TASA_BS_OPTS[0]))
+            except ValueError as e:
+                st.error(str(e))
+            else:
+                payload = {
+                    "p_usuario_id": erp_uid,
+                    "p_proveedor": prov,
+                    "p_forma_pago": forma,
+                    "p_caja_id": cj[caja_label] if forma == "contado" and caja_label else None,
+                    "p_tasa_bs": t_bs_doc,
+                    "p_tasa_usdt": t_usdt,
+                    "p_fecha_vencimiento": str(fv) if forma == "credito" else None,
+                    "p_notas": notas,
+                    "p_lineas": new_lines,
+                }
+                try:
+                    sb.rpc("crear_compra_erp", payload).execute()
+                    st.success("Compra registrada.")
+                    st.session_state["compra_lines"] = [
+                        {
+                            "producto_id": str(plist[0]["id"]),
+                            "cantidad": 1.0,
+                            "costo_unitario_usd": id_to_cost[str(plist[0]["id"])],
+                        }
+                    ]
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo registrar: {e}")
 
     if st.button("Añadir línea compra"):
         st.session_state["compra_lines"].append(
