@@ -631,16 +631,143 @@ def maybe_auto_sync_tasas_from_web(sb: Client) -> dict[str, Any] | None:
     return latest_tasas(sb)
 
 
+_INV_PRODUCTO_COLS = [
+    "id",
+    "codigo",
+    "sku_oem",
+    "descripcion",
+    "marca_producto",
+    "condicion",
+    "ubicacion",
+    "compatibilidad",
+    "imagen_url",
+    "stock_actual",
+    "stock_minimo",
+    "costo_usd",
+    "precio_v_usd",
+    "precio_v_bs_ref",
+    "costo_bs_ref",
+    "activo",
+    "categoria_id",
+]
+
+
+def _inv_compat_as_dict(raw: Any) -> dict[str, Any]:
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return {}
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return {}
+        try:
+            o = json.loads(s)
+            return o if isinstance(o, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _inv_compat_marcas_str(d: dict[str, Any]) -> str:
+    m = d.get("marcas_vehiculo") if "marcas_vehiculo" in d else d.get("marcas")
+    if isinstance(m, list):
+        return ", ".join(str(x).strip() for x in m if str(x).strip())
+    if isinstance(m, str) and m.strip():
+        return m.strip()
+    return ""
+
+
+def _inv_compat_anos_str(d: dict[str, Any]) -> str:
+    a = d.get("años") if "años" in d else d.get("anos")
+    if a is None or (isinstance(a, float) and pd.isna(a)):
+        return ""
+    return str(a).strip()
+
+
+def _inv_build_compat_dict(marcas_csv: str, anos: str) -> dict[str, Any]:
+    raw = (marcas_csv or "").replace(";", ",")
+    marcas = [x.strip() for x in raw.split(",") if x.strip()]
+    out: dict[str, Any] = {}
+    if marcas:
+        out["marcas_vehiculo"] = marcas
+    a = (anos or "").strip()
+    if a:
+        out["años"] = a
+    return out
+
+
+def _inv_row_matches_query(row: pd.Series, q: str) -> bool:
+    ql = q.lower()
+    for k in ("descripcion", "codigo", "sku_oem", "marca_producto"):
+        if ql in str(row.get(k) or "").lower():
+            return True
+    d = _inv_compat_as_dict(row.get("compatibilidad"))
+    for m in d.get("marcas_vehiculo") or d.get("marcas") or []:
+        if ql in str(m).lower():
+            return True
+    if ql in _inv_compat_anos_str(d).lower():
+        return True
+    return False
+
+
+def _inv_stock_int(x: Any) -> int:
+    try:
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return 0
+        return int(round(float(x)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _line_qty_int(x: Any, *, default: int = 1) -> int:
+    """Cantidad en líneas de venta/compra: entero ≥ 1."""
+    try:
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return max(1, default)
+        v = int(round(float(x)))
+        return max(1, v)
+    except (TypeError, ValueError):
+        return max(1, default)
+
+
+def _inv_enrich_compat_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    df = df.copy()
+    if "compatibilidad" not in df.columns:
+        df["compatibilidad"] = pd.NA
+        df["vehiculos_compat"] = ""
+        df["años_compat"] = ""
+        return df
+    vc: list[str] = []
+    va: list[str] = []
+    for _, row in df.iterrows():
+        d = _inv_compat_as_dict(row.get("compatibilidad"))
+        vc.append(_inv_compat_marcas_str(d))
+        va.append(_inv_compat_anos_str(d))
+    df["vehiculos_compat"] = vc
+    df["años_compat"] = va
+    return df
+
+
 def _fetch_productos_inventario_df(sb: Client) -> pd.DataFrame:
     cols_full = (
+        "id,codigo,sku_oem,descripcion,marca_producto,condicion,ubicacion,compatibilidad,imagen_url,"
+        "stock_actual,stock_minimo,costo_usd,precio_v_usd,precio_v_bs_ref,costo_bs_ref,activo,categoria_id"
+    )
+    cols_base = (
         "id,codigo,descripcion,stock_actual,stock_minimo,costo_usd,precio_v_usd,"
         "precio_v_bs_ref,costo_bs_ref,activo,categoria_id"
     )
-    cols_base = "id,codigo,descripcion,stock_actual,stock_minimo,costo_usd,precio_v_usd,activo,categoria_id"
+    cols_min = "id,codigo,descripcion,stock_actual,stock_minimo,costo_usd,precio_v_usd,activo,categoria_id"
     try:
         r = sb.table("productos").select(cols_full).order("descripcion").execute()
     except Exception:
-        r = sb.table("productos").select(cols_base).order("descripcion").execute()
+        try:
+            r = sb.table("productos").select(cols_base).order("descripcion").execute()
+        except Exception:
+            r = sb.table("productos").select(cols_min).order("descripcion").execute()
     return pd.DataFrame(r.data or [])
 
 
@@ -649,25 +776,20 @@ def _normalize_productos_inventario_df(df: pd.DataFrame) -> pd.DataFrame:
     Si no hay filas, Supabase devuelve [] y pandas crea un DataFrame **sin columnas**.
     Normalizamos al esquema esperado por el editor y los reportes.
     """
-    cols = [
-        "id",
-        "codigo",
-        "descripcion",
-        "stock_actual",
-        "stock_minimo",
-        "costo_usd",
-        "precio_v_usd",
-        "precio_v_bs_ref",
-        "costo_bs_ref",
-        "activo",
-        "categoria_id",
-    ]
     if df.empty and len(df.columns) == 0:
-        return pd.DataFrame(columns=cols)
+        return pd.DataFrame(columns=_INV_PRODUCTO_COLS)
     out = df.copy()
-    for c in cols:
+    for c in _INV_PRODUCTO_COLS:
         if c not in out.columns:
             out[c] = pd.NA
+    if "condicion" in out.columns:
+        out["condicion"] = out["condicion"].apply(
+            lambda x: (
+                "Nuevo"
+                if x is None or (isinstance(x, float) and pd.isna(x)) or str(x).strip() not in ("Nuevo", "Usado")
+                else str(x).strip()
+            )
+        )
     return out
 
 
@@ -777,16 +899,32 @@ def _html_inventario_listado(
     fecha = datetime.now(tz).strftime("%d/%m/%Y %H:%M")
     work = df.copy()
     work["categoria_display"] = work["categoria"].map(_inv_cat_display)
+    if "compatibilidad" in work.columns:
+        work["_veh_rep"] = work["compatibilidad"].map(
+            lambda x: _inv_compat_marcas_str(_inv_compat_as_dict(x))
+        )
+        work["_anos_rep"] = work["compatibilidad"].map(
+            lambda x: _inv_compat_anos_str(_inv_compat_as_dict(x))
+        )
+    else:
+        work["_veh_rep"] = ""
+        work["_anos_rep"] = ""
 
     cols_print: list[tuple[str, str]] = [
         ("codigo", "Código"),
+        ("sku_oem", "OEM"),
         ("descripcion", "Descripción"),
+        ("marca_producto", "Marca rep."),
+        ("condicion", "Cond."),
+        ("_veh_rep", "Marcas carro"),
+        ("_anos_rep", "Años"),
         ("categoria_display", "Categoría"),
         ("stock_actual", "Stock"),
         ("stock_minimo", "Stock mín."),
         ("costo_usd", "Costo USD"),
         ("precio_v_usd", "Precio venta USD"),
     ]
+    cols_print = [(k, lab) for k, lab in cols_print if k in work.columns]
     if "precio_v_bs_ref" in work.columns:
         cols_print.append(("precio_v_bs_ref", "Precio venta Bs (ref.)"))
     if "costo_bs_ref" in work.columns:
@@ -808,7 +946,7 @@ def _html_inventario_listado(
             val = row.get(key)
             if key in ("stock_actual", "stock_minimo"):
                 try:
-                    cell = f"{float(val):,.3f}"
+                    cell = f"{_inv_stock_int(val):,d}"
                 except (TypeError, ValueError):
                     cell = html.escape("" if val is None else str(val))
             elif key in ("costo_usd", "precio_v_usd", "precio_v_bs_ref", "costo_bs_ref"):
@@ -924,17 +1062,31 @@ def _export_cell_txt(val: Any) -> str:
 
 def _df_inventario_export_flat(df: pd.DataFrame) -> pd.DataFrame:
     work = df.copy()
-    out = pd.DataFrame(
-        {
-            "Código": work["codigo"].map(_export_cell_txt),
-            "Descripción": work["descripcion"].map(_export_cell_txt),
-            "Categoría": work["categoria"].map(_inv_cat_display),
-            "Stock": pd.to_numeric(work["stock_actual"], errors="coerce"),
-            "Stock mín.": pd.to_numeric(work["stock_minimo"], errors="coerce"),
-            "Costo USD": pd.to_numeric(work["costo_usd"], errors="coerce"),
-            "Precio venta USD": pd.to_numeric(work["precio_v_usd"], errors="coerce"),
-        }
-    )
+    base: dict[str, Any] = {
+        "Código": work["codigo"].map(_export_cell_txt),
+        "Descripción": work["descripcion"].map(_export_cell_txt),
+        "Categoría": work["categoria"].map(_inv_cat_display),
+        "Stock": work["stock_actual"].map(_inv_stock_int),
+        "Stock mín.": work["stock_minimo"].map(_inv_stock_int),
+        "Costo USD": pd.to_numeric(work["costo_usd"], errors="coerce"),
+        "Precio venta USD": pd.to_numeric(work["precio_v_usd"], errors="coerce"),
+    }
+    if "sku_oem" in work.columns:
+        base["OEM"] = work["sku_oem"].map(_export_cell_txt)
+    if "marca_producto" in work.columns:
+        base["Marca repuesto"] = work["marca_producto"].map(_export_cell_txt)
+    if "condicion" in work.columns:
+        base["Condición"] = work["condicion"].map(_export_cell_txt)
+    if "compatibilidad" in work.columns:
+        base["Marcas carro"] = work["compatibilidad"].map(
+            lambda x: _inv_compat_marcas_str(_inv_compat_as_dict(x))
+        )
+        base["Años"] = work["compatibilidad"].map(
+            lambda x: _inv_compat_anos_str(_inv_compat_as_dict(x))
+        )
+    if "ubicacion" in work.columns:
+        base["Ubicación"] = work["ubicacion"].map(_export_cell_txt)
+    out = pd.DataFrame(base)
     if "precio_v_bs_ref" in work.columns:
         out["Precio venta Bs (ref.)"] = pd.to_numeric(work["precio_v_bs_ref"], errors="coerce")
     if "costo_bs_ref" in work.columns:
@@ -1064,17 +1216,17 @@ def _pdf_inventario_bytes(
         story.append(Paragraph(xml_esc(subtitulo_filtros), sf))
     story.append(Spacer(1, 2.5 * mm))
 
-    headers = ["Cód.", "Descripción", "Cat.", "Stock", "Mín", "C.USD", "P.Venta"]
+    headers = ["Cód.", "OEM", "Descripción", "Cond.", "Vehíc.", "Cat.", "St", "Mín", "C.U.", "P.V."]
     if "precio_v_bs_ref" in df.columns:
-        headers.append("P.Bs ref")
+        headers.append("P.Bs")
     if "costo_bs_ref" in df.columns:
-        headers.append("C.Bs ref")
+        headers.append("C.Bs")
     n_h = len(headers)
     col_ws = _pdf_inventario_col_widths(n_h, tw)
 
-    def fmt3(x: Any) -> str:
+    def fmt_int_st(x: Any) -> str:
         try:
-            return f"{float(x):,.3f}"
+            return f"{_inv_stock_int(x):d}"
         except (TypeError, ValueError):
             return ""
 
@@ -1086,12 +1238,17 @@ def _pdf_inventario_bytes(
 
     def row_cells(r: pd.Series) -> list[str]:
         cd = _inv_cat_display(r.get("categoria"))
+        _dcomp = _inv_compat_as_dict(r.get("compatibilidad"))
+        _veh = _pdf_short_txt(_inv_compat_marcas_str(_dcomp), 14)
         cells = [
-            _pdf_short_txt(r.get("codigo"), 10),
-            _pdf_short_txt(r.get("descripcion"), 32),
-            _pdf_short_txt(cd, 12),
-            fmt3(r.get("stock_actual")),
-            fmt3(r.get("stock_minimo")),
+            _pdf_short_txt(r.get("codigo"), 8),
+            _pdf_short_txt(r.get("sku_oem"), 10),
+            _pdf_short_txt(r.get("descripcion"), 22),
+            _pdf_short_txt(r.get("condicion"), 6),
+            _veh,
+            _pdf_short_txt(cd, 10),
+            fmt_int_st(r.get("stock_actual")),
+            fmt_int_st(r.get("stock_minimo")),
             fmt2(r.get("costo_usd")),
             fmt2(r.get("precio_v_usd")),
         ]
@@ -2727,7 +2884,7 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
     cat_opts = {c["nombre"]: c["id"] for c in cats_list if c.get("nombre")}
     _id_to_nombre_cat, _nombre_a_id_cat, _cat_select_opts = _categoria_maps_from_rows(cats_list)
 
-    df = _normalize_productos_inventario_df(_fetch_productos_inventario_df(sb))
+    df = _inv_enrich_compat_columns(_normalize_productos_inventario_df(_fetch_productos_inventario_df(sb)))
     if not df.empty:
         if "categoria_id" in df.columns:
             df["categoria"] = df["categoria_id"].apply(
@@ -2748,16 +2905,16 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
     st.markdown("##### Buscar y modificar productos")
     st.caption(
         "El **stock** baja con las **ventas** y sube con las **compras** (y cargas nuevas). "
-        "Si cambia el **precio de venta** o hacés un **ajuste de stock**, buscá el producto acá y editá abajo "
-        "(ficha rápida o tabla)."
+        "Repuestos **nuevos y usados**: buscá por código interno, **OEM**, descripción, **marca del repuesto** "
+        "o **marcas de carro** guardadas en compatibilidad."
     )
     _fc1, _fc2 = st.columns([2, 1])
     with _fc1:
         _inv_q = st.text_input(
-            "Buscar por código o nombre del producto",
+            "Buscar (código, OEM, descripción, marca repuesto, marcas de carro…)",
             value="",
             key="inv_prod_filter",
-            placeholder="Escribí parte del código o de la descripción…",
+            placeholder="Ej: filtro, 04465, Toyota, Bosch…",
         )
     with _fc2:
         _nombres_cat_ord = sorted(cat_opts.keys(), key=str.casefold)
@@ -2773,11 +2930,9 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
     df_view = df
     if not df.empty:
         if _inv_q.strip():
-            _q = _inv_q.strip().lower()
-            _m_txt = df_view["descripcion"].astype(str).str.lower().str.contains(_q, na=False) | df_view[
-                "codigo"
-            ].fillna("").astype(str).str.lower().str.contains(_q, na=False)
-            df_view = df_view.loc[_m_txt]
+            _q = _inv_q.strip()
+            _mask = df_view.apply(lambda r: _inv_row_matches_query(r, _q), axis=1)
+            df_view = df_view.loc[_mask]
         if _sel_una_cat == "(Sin categoría)":
             if "categoria_id" in df_view.columns:
                 _m_sin_id = df_view["categoria_id"].isna() | (df_view["categoria_id"].astype(str).str.strip() == "")
@@ -2835,19 +2990,19 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                         with st.form("inv_ficha_prod_form"):
                             st.caption(f"ID interno: `{_pid}` · Stock y precios se guardan en la base.")
                             _ns = st.number_input(
-                                "Stock actual",
-                                min_value=0.0,
-                                value=float(_rw.get("stock_actual") or 0),
-                                step=0.001,
-                                format="%.3f",
-                                help="Las ventas/compras también mueven este valor.",
+                                "Stock actual (unidades)",
+                                min_value=0,
+                                value=_inv_stock_int(_rw.get("stock_actual")),
+                                step=1,
+                                format="%d",
+                                help="Piezas enteras. Las ventas/compras también mueven este valor.",
                             )
                             _nsmin = st.number_input(
                                 "Stock mínimo (alerta)",
-                                min_value=0.0,
-                                value=float(_rw.get("stock_minimo") or 0),
-                                step=0.001,
-                                format="%.3f",
+                                min_value=0,
+                                value=_inv_stock_int(_rw.get("stock_minimo")),
+                                step=1,
+                                format="%d",
                             )
                             _npv = st.number_input(
                                 "Precio venta USD",
@@ -2867,8 +3022,8 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                                 try:
                                     sb.table("productos").update(
                                         {
-                                            "stock_actual": float(_ns),
-                                            "stock_minimo": float(_nsmin),
+                                            "stock_actual": int(_ns),
+                                            "stock_minimo": int(_nsmin),
                                             "precio_v_usd": float(_npv),
                                             "costo_usd": float(_nco),
                                         }
@@ -2878,27 +3033,68 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                                 except Exception as ex:
                                     st.error(str(ex))
 
-        crit_all = df[df["stock_actual"].astype(float) <= df["stock_minimo"].astype(float)]
+        _sa = df["stock_actual"].map(_inv_stock_int)
+        _sm = df["stock_minimo"].map(_inv_stock_int)
+        crit_all = df.loc[_sa <= _sm]
         if len(crit_all):
             st.error(f"Alertas de stock crítico: {len(crit_all)} ítems")
             st.dataframe(crit_all, use_container_width=True, hide_index=True)
 
         st.markdown("**Tabla de productos** (podés editar varias filas y guardar una vez)")
         st.caption(
-            "Columnas **precio_v_bs_ref** y **costo_bs_ref**: referencia en Bs según la última **tasa_bs** "
-            "guardada (se actualizan al guardar tasas o al auto-sync web). Los precios maestros siguen en USD. "
-            "**Categoría** se elige en la lista (vacío = sin categoría)."
+            "**OEM** = código de parte; **marca del repuesto** (ej. Bosch); **vehículos** = marcas de carro separadas por coma. "
+            "Columnas **precio_v_bs_ref** / **costo_bs_ref**: referencia en Bs según **tasa_bs** del Dashboard."
         )
 
-        _editor_cols = [c for c in df_view.columns if c != "categoria_id"]
+        _inv_skip_cols = {"id", "categoria_id", "compatibilidad"}
+        _inv_editor_order = [
+            "codigo",
+            "sku_oem",
+            "descripcion",
+            "marca_producto",
+            "condicion",
+            "vehiculos_compat",
+            "años_compat",
+            "ubicacion",
+            "imagen_url",
+            "stock_actual",
+            "stock_minimo",
+            "costo_usd",
+            "precio_v_usd",
+            "precio_v_bs_ref",
+            "costo_bs_ref",
+            "activo",
+            "categoria",
+        ]
+        _editor_cols = [c for c in _inv_editor_order if c in df_view.columns]
+        for c in df_view.columns:
+            if c not in _editor_cols and c not in _inv_skip_cols:
+                _editor_cols.append(c)
         _ed_df = df_view[_editor_cols].copy()
         _disabled_cols = ["id"]
         if "precio_v_bs_ref" in _ed_df.columns:
             _disabled_cols.extend(["precio_v_bs_ref", "costo_bs_ref"])
-        _inv_col_cfg = {
+        _inv_col_cfg: dict[str, Any] = {
             "categoria": st.column_config.SelectboxColumn(
                 "Categoría",
                 options=_cat_select_opts,
+            ),
+            "condicion": st.column_config.SelectboxColumn(
+                "Condición",
+                options=["Nuevo", "Usado"],
+                required=True,
+            ),
+            "stock_actual": st.column_config.NumberColumn(
+                "Stock",
+                min_value=0,
+                step=1,
+                format="%d",
+            ),
+            "stock_minimo": st.column_config.NumberColumn(
+                "Stock mín.",
+                min_value=0,
+                step=1,
+                format="%d",
             ),
         }
         edited = st.data_editor(
@@ -2916,26 +3112,61 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                     _cv = ""
                 _cv = str(_cv).strip()
                 _cid_up = _nombre_a_id_cat.get(_cv) if _cv else None
-                sb.table("productos").update(
-                    {
-                        "codigo": None
-                        if row.get("codigo") is None
-                        or (isinstance(row.get("codigo"), float) and pd.isna(row.get("codigo")))
-                        else (str(row.get("codigo")).strip() or None),
-                        "descripcion": str(row.get("descripcion") or ""),
-                        "stock_actual": float(row.get("stock_actual", 0)),
-                        "stock_minimo": float(row.get("stock_minimo", 0)),
-                        "costo_usd": float(row.get("costo_usd", 0)),
-                        "precio_v_usd": float(row.get("precio_v_usd", 0)),
-                        "activo": bool(row.get("activo", True)),
-                        "categoria_id": _cid_up,
-                    }
-                ).eq("id", str(row["id"])).execute()
+                _cond = row.get("condicion")
+                if _cond not in ("Nuevo", "Usado"):
+                    _cond = "Nuevo"
+                _sku = row.get("sku_oem")
+                _sku = None if _sku is None or (isinstance(_sku, float) and pd.isna(_sku)) else str(_sku).strip() or None
+                _mprod = row.get("marca_producto")
+                _mprod = (
+                    None
+                    if _mprod is None or (isinstance(_mprod, float) and pd.isna(_mprod))
+                    else str(_mprod).strip() or None
+                )
+                _ubi = row.get("ubicacion")
+                _ubi = None if _ubi is None or (isinstance(_ubi, float) and pd.isna(_ubi)) else str(_ubi).strip() or None
+                _img = row.get("imagen_url")
+                _img = None if _img is None or (isinstance(_img, float) and pd.isna(_img)) else str(_img).strip() or None
+                _compat = _inv_build_compat_dict(
+                    str(row.get("vehiculos_compat") or ""),
+                    str(row.get("años_compat") or ""),
+                )
+                _upd: dict[str, Any] = {
+                    "codigo": None
+                    if row.get("codigo") is None
+                    or (isinstance(row.get("codigo"), float) and pd.isna(row.get("codigo")))
+                    else (str(row.get("codigo")).strip() or None),
+                    "descripcion": str(row.get("descripcion") or ""),
+                    "stock_actual": _inv_stock_int(row.get("stock_actual")),
+                    "stock_minimo": _inv_stock_int(row.get("stock_minimo")),
+                    "costo_usd": float(row.get("costo_usd", 0)),
+                    "precio_v_usd": float(row.get("precio_v_usd", 0)),
+                    "activo": bool(row.get("activo", True)),
+                    "categoria_id": _cid_up,
+                    "condicion": _cond,
+                    "compatibilidad": _compat,
+                }
+                if "sku_oem" in df_view.columns:
+                    _upd["sku_oem"] = _sku
+                if "marca_producto" in df_view.columns:
+                    _upd["marca_producto"] = _mprod
+                if "ubicacion" in df_view.columns:
+                    _upd["ubicacion"] = _ubi
+                if "imagen_url" in df_view.columns:
+                    _upd["imagen_url"] = _img
+                try:
+                    sb.table("productos").update(_upd).eq("id", str(row["id"])).execute()
+                except Exception as ex:
+                    st.error(
+                        f"Error al guardar fila id={row.get('id')}: {ex}. "
+                        "¿Ejecutaste **supabase/patch_011_productos_repuestos.sql** en Supabase?"
+                    )
+                    st.stop()
             st.success("Productos actualizados.")
             st.rerun()
 
     if not df.empty and df_view.empty:
-        crit_all = df[df["stock_actual"].astype(float) <= df["stock_minimo"].astype(float)]
+        crit_all = df.loc[df["stock_actual"].map(_inv_stock_int) <= df["stock_minimo"].map(_inv_stock_int)]
         if len(crit_all):
             st.error(f"Alertas de stock crítico: {len(crit_all)} ítems")
             st.dataframe(crit_all, use_container_width=True, hide_index=True)
@@ -2961,22 +3192,50 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                             )
         with _t_prod:
             with st.form("f_prod"):
-                codigo = st.text_input("Código", key="inv_alta_prod_codigo")
+                a1, a2 = st.columns(2)
+                codigo = a1.text_input("Código interno (tuyo)", key="inv_alta_prod_codigo")
+                sku_oem = a2.text_input("Código OEM / parte / fabricante", key="inv_alta_prod_sku_oem")
                 desc = st.text_input("Descripción", max_chars=500, key="inv_alta_prod_desc")
-                stock = st.number_input("Stock actual", min_value=0.0, value=0.0, step=0.001, format="%.3f")
-                smin = st.number_input("Stock mínimo", min_value=0.0, value=0.0, step=0.001, format="%.3f")
+                b1, b2 = st.columns(2)
+                marca_rep = b1.text_input("Marca del repuesto (ej. Bosch, Denso)", key="inv_alta_marca_prod")
+                cond_alta = b2.selectbox("Condición", ["Nuevo", "Usado"], index=0, key="inv_alta_cond")
+                c1, c2 = st.columns(2)
+                marcas_auto = c1.text_input(
+                    "Marcas de carro (compatibilidad)",
+                    key="inv_alta_marcas_veh",
+                    placeholder="Toyota, Ford, Chevrolet…",
+                    help="Separá con coma. Es lo que después buscás al vender o consultar.",
+                )
+                anos_auto = c2.text_input("Años / rango (opcional)", key="inv_alta_anos", placeholder="2010-2015")
+                u1, u2 = st.columns(2)
+                ubic = u1.text_input("Ubicación en almacén", key="inv_alta_ubic")
+                img_url = u2.text_input("URL imagen (Storage o web)", key="inv_alta_img")
+                stock = st.number_input("Stock actual (unidades)", min_value=0, value=0, step=1, format="%d")
+                smin = st.number_input("Stock mínimo (alerta)", min_value=0, value=0, step=1, format="%d")
                 costo = st.number_input("Costo USD", min_value=0.0, value=0.0, format="%.2f")
-                pv = st.number_input("Precio venta USD", min_value=0.0, value=0.0, format="%.2f")
+                pv = st.number_input("Precio venta USD (precio_v_usd)", min_value=0.0, value=0.0, format="%.2f")
+                if float(costo) > 0:
+                    st.caption(
+                        f"Margen bruto sobre costo: **{((float(pv) - float(costo)) / float(costo) * 100):.1f}%** "
+                        f"· Diferencia USD: **{float(pv) - float(costo):.2f}**"
+                    )
                 cname = st.selectbox("Categoría", options=[""] + list(cat_opts.keys()), key="inv_alta_prod_cat")
                 cid = cat_opts.get(cname) if cname else None
                 if st.form_submit_button("Guardar producto"):
                     try:
+                        _compat_ins = _inv_build_compat_dict(marcas_auto, anos_auto)
                         sb.table("productos").insert(
                             {
                                 "codigo": codigo.strip() or None,
+                                "sku_oem": sku_oem.strip() or None,
                                 "descripcion": desc.strip() or "Sin descripción",
-                                "stock_actual": float(stock),
-                                "stock_minimo": float(smin),
+                                "marca_producto": marca_rep.strip() or None,
+                                "condicion": cond_alta,
+                                "ubicacion": ubic.strip() or None,
+                                "compatibilidad": _compat_ins,
+                                "imagen_url": img_url.strip() or None,
+                                "stock_actual": int(stock),
+                                "stock_minimo": int(smin),
                                 "costo_usd": float(costo),
                                 "precio_v_usd": float(pv),
                                 "categoria_id": cid,
@@ -2986,11 +3245,15 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                         st.success("Producto guardado en la base.")
                         st.rerun()
                     except Exception as ex:
-                        st.error(f"No se pudo guardar el producto (¿código duplicado o permisos en Supabase?): {ex}")
+                        st.error(
+                            f"No se pudo guardar el producto: {ex}. "
+                            "Si falta alguna columna, ejecutá **patch_011_productos_repuestos.sql** en Supabase."
+                        )
 
     st.caption(
-        "Carga masiva (CSV): columnas **codigo**, **descripcion**, **stock_actual**, **stock_minimo**, "
-        "**costo_usd**, **precio_v_usd**; opcional **categoria** (nombre exacto o sin distinguir mayúsculas)."
+        "CSV: obligatorias **codigo**, **descripcion**, **stock_actual**, **stock_minimo**, **costo_usd**, **precio_v_usd**. "
+        "Opcional: **categoria**, **sku_oem**, **marca_producto**, **condicion** (Nuevo/Usado), **ubicacion**, "
+        "**marcas_vehiculo** (Toyota, Ford… separadas por coma), **años**, **imagen_url**."
     )
     up = st.file_uploader("CSV", type=["csv"], key="inv_csv_upload")
     if up is not None:
@@ -3019,18 +3282,47 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                             cid_csv = _resolve_categoria_id_por_nombre(raw_c, _nombre_a_id_cat)
                             if cid_csv is None:
                                 err_cat.append(f"fila {i + 1}: categoría «{raw_c}» no encontrada")
-                    batch_ins.append(
-                        {
-                            "codigo": str(row["codigo"]).strip() or None,
-                            "descripcion": str(row["descripcion"]),
-                            "stock_actual": float(row["stock_actual"]),
-                            "stock_minimo": float(row["stock_minimo"]),
-                            "costo_usd": float(row["costo_usd"]),
-                            "precio_v_usd": float(row["precio_v_usd"]),
-                            "categoria_id": cid_csv,
-                            "activo": True,
-                        }
-                    )
+                    _mv = ""
+                    if "marcas_vehiculo" in df_csv.columns and row.get("marcas_vehiculo") is not None:
+                        _mv = str(row["marcas_vehiculo"])
+                    elif "marcas vehiculo" in df_csv.columns and row.get("marcas vehiculo") is not None:
+                        _mv = str(row["marcas vehiculo"])
+                    _an = ""
+                    if "años" in df_csv.columns and row.get("años") is not None:
+                        _an = str(row["años"])
+                    elif "anos" in df_csv.columns and row.get("anos") is not None:
+                        _an = str(row["anos"])
+                    _compat_csv = _inv_build_compat_dict(_mv, _an)
+                    _cond_csv = "Nuevo"
+                    if "condicion" in df_csv.columns and row.get("condicion") is not None:
+                        cs = str(row["condicion"]).strip()
+                        if cs in ("Nuevo", "Usado"):
+                            _cond_csv = cs
+                    _row_ins: dict[str, Any] = {
+                        "codigo": str(row["codigo"]).strip() or None,
+                        "descripcion": str(row["descripcion"]),
+                        "stock_actual": _inv_stock_int(row["stock_actual"]),
+                        "stock_minimo": _inv_stock_int(row["stock_minimo"]),
+                        "costo_usd": float(row["costo_usd"]),
+                        "precio_v_usd": float(row["precio_v_usd"]),
+                        "categoria_id": cid_csv,
+                        "activo": True,
+                        "condicion": _cond_csv,
+                        "compatibilidad": _compat_csv,
+                    }
+                    if "sku_oem" in df_csv.columns and row.get("sku_oem") is not None:
+                        s = str(row["sku_oem"]).strip()
+                        _row_ins["sku_oem"] = s or None
+                    if "marca_producto" in df_csv.columns and row.get("marca_producto") is not None:
+                        s = str(row["marca_producto"]).strip()
+                        _row_ins["marca_producto"] = s or None
+                    if "ubicacion" in df_csv.columns and row.get("ubicacion") is not None:
+                        s = str(row["ubicacion"]).strip()
+                        _row_ins["ubicacion"] = s or None
+                    if "imagen_url" in df_csv.columns and row.get("imagen_url") is not None:
+                        s = str(row["imagen_url"]).strip()
+                        _row_ins["imagen_url"] = s or None
+                    batch_ins.append(_row_ins)
                 if err_cat:
                     st.error("Revisá el CSV:\n- " + "\n- ".join(err_cat[:12]))
                     if len(err_cat) > 12:
@@ -3073,7 +3365,7 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
 
     if "venta_lines" not in st.session_state:
         st.session_state["venta_lines"] = [
-            {"producto_id": str(plist[0]["id"]), "cantidad": 1.0, "precio_unitario_usd": id_to_price[str(plist[0]["id"])]}
+            {"producto_id": str(plist[0]["id"]), "cantidad": 1, "precio_unitario_usd": id_to_price[str(plist[0]["id"])]}
         ]
 
     st.session_state.setdefault("venta_n_cobros", 1)
@@ -3113,9 +3405,16 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                 key=f"vp_{i}",
                 index=list(id_to_label.keys()).index(line["producto_id"]) if line["producto_id"] in id_to_label else 0,
             )
-            qty = c2.number_input("Cant.", min_value=0.001, value=float(line.get("cantidad", 1)), step=0.001, format="%.3f", key=f"vq_{i}")
+            qty = c2.number_input(
+                "Cant.",
+                min_value=1,
+                value=_line_qty_int(line.get("cantidad"), default=1),
+                step=1,
+                format="%d",
+                key=f"vq_{i}",
+            )
             pu = c3.number_input("P.U. USD", min_value=0.0, value=float(id_to_price.get(pid, 0)), format="%.2f", key=f"vpu_{i}")
-            new_lines.append({"producto_id": pid, "cantidad": float(qty), "precio_unitario_usd": float(pu)})
+            new_lines.append({"producto_id": pid, "cantidad": int(qty), "precio_unitario_usd": float(pu)})
 
         est_total = round(sum(float(l["cantidad"]) * float(l["precio_unitario_usd"]) for l in new_lines), 2)
 
@@ -3194,7 +3493,7 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                                 st.session_state["venta_lines"] = [
                                     {
                                         "producto_id": str(plist[0]["id"]),
-                                        "cantidad": 1.0,
+                                        "cantidad": 1,
                                         "precio_unitario_usd": id_to_price[str(plist[0]["id"])],
                                     }
                                 ]
@@ -3215,7 +3514,7 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                         st.session_state["venta_lines"] = [
                             {
                                 "producto_id": str(plist[0]["id"]),
-                                "cantidad": 1.0,
+                                "cantidad": 1,
                                 "precio_unitario_usd": id_to_price[str(plist[0]["id"])],
                             }
                         ]
@@ -3226,7 +3525,7 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
 
     if st.button("Añadir línea"):
         st.session_state["venta_lines"].append(
-            {"producto_id": str(plist[0]["id"]), "cantidad": 1.0, "precio_unitario_usd": id_to_price[str(plist[0]["id"])]}
+            {"producto_id": str(plist[0]["id"]), "cantidad": 1, "precio_unitario_usd": id_to_price[str(plist[0]["id"])]}
         )
         st.rerun()
 
@@ -3293,7 +3592,7 @@ def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
 
     if "compra_lines" not in st.session_state:
         st.session_state["compra_lines"] = [
-            {"producto_id": str(plist[0]["id"]), "cantidad": 1.0, "costo_unitario_usd": id_to_cost[str(plist[0]["id"])]}
+            {"producto_id": str(plist[0]["id"]), "cantidad": 1, "costo_unitario_usd": id_to_cost[str(plist[0]["id"])]}
         ]
 
     with st.form("f_compra"):
@@ -3322,9 +3621,16 @@ def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                 key=f"cp_{i}",
                 index=list(id_to_label.keys()).index(line["producto_id"]) if line["producto_id"] in id_to_label else 0,
             )
-            qty = c2.number_input("Cant.", min_value=0.001, value=float(line.get("cantidad", 1)), step=0.001, format="%.3f", key=f"cq_{i}")
+            qty = c2.number_input(
+                "Cant.",
+                min_value=1,
+                value=_line_qty_int(line.get("cantidad"), default=1),
+                step=1,
+                format="%d",
+                key=f"cq_{i}",
+            )
             cu = c3.number_input("Costo u. USD", min_value=0.0, value=float(id_to_cost.get(pid, 0)), format="%.2f", key=f"ccu_{i}")
-            new_lines.append({"producto_id": pid, "cantidad": float(qty), "costo_unitario_usd": float(cu)})
+            new_lines.append({"producto_id": pid, "cantidad": int(qty), "costo_unitario_usd": float(cu)})
 
         if st.form_submit_button("Registrar compra (atómica)"):
             try:
@@ -3349,7 +3655,7 @@ def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                     st.session_state["compra_lines"] = [
                         {
                             "producto_id": str(plist[0]["id"]),
-                            "cantidad": 1.0,
+                            "cantidad": 1,
                             "costo_unitario_usd": id_to_cost[str(plist[0]["id"])],
                         }
                     ]
@@ -3359,7 +3665,7 @@ def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
 
     if st.button("Añadir línea compra"):
         st.session_state["compra_lines"].append(
-            {"producto_id": str(plist[0]["id"]), "cantidad": 1.0, "costo_unitario_usd": id_to_cost[str(plist[0]["id"])]}
+            {"producto_id": str(plist[0]["id"]), "cantidad": 1, "costo_unitario_usd": id_to_cost[str(plist[0]["id"])]}
         )
         st.rerun()
 
@@ -3423,7 +3729,7 @@ def panel_reportes_inventario_export(sb: Client, t: dict[str, Any] | None) -> No
     except Exception:
         cats_list_rp = []
     _id_rp, _, _ = _categoria_maps_from_rows(cats_list_rp)
-    df = _normalize_productos_inventario_df(_fetch_productos_inventario_df(sb))
+    df = _inv_enrich_compat_columns(_normalize_productos_inventario_df(_fetch_productos_inventario_df(sb)))
     if not df.empty:
         if "categoria_id" in df.columns:
             df["categoria"] = df["categoria_id"].apply(

@@ -58,9 +58,15 @@ CREATE TABLE IF NOT EXISTS public.categorias (
 CREATE TABLE IF NOT EXISTS public.productos (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   codigo TEXT UNIQUE,
+  sku_oem TEXT,
   descripcion TEXT NOT NULL DEFAULT '',
-  stock_actual NUMERIC(14, 3) NOT NULL DEFAULT 0 CHECK (stock_actual >= 0),
-  stock_minimo NUMERIC(14, 3) NOT NULL DEFAULT 0 CHECK (stock_minimo >= 0),
+  marca_producto TEXT,
+  condicion TEXT NOT NULL DEFAULT 'Nuevo' CHECK (condicion IN ('Nuevo', 'Usado')),
+  ubicacion TEXT,
+  compatibilidad JSONB NOT NULL DEFAULT '{}'::jsonb,
+  imagen_url TEXT,
+  stock_actual INT NOT NULL DEFAULT 0 CHECK (stock_actual >= 0),
+  stock_minimo INT NOT NULL DEFAULT 0 CHECK (stock_minimo >= 0),
   costo_usd NUMERIC(14, 2) NOT NULL DEFAULT 0 CHECK (costo_usd >= 0),
   precio_v_usd NUMERIC(14, 2) NOT NULL DEFAULT 0 CHECK (precio_v_usd >= 0),
   precio_v_bs_ref NUMERIC(18, 4),
@@ -73,6 +79,11 @@ CREATE TABLE IF NOT EXISTS public.productos (
 
 CREATE INDEX IF NOT EXISTS idx_productos_activo ON public.productos (activo);
 CREATE INDEX IF NOT EXISTS idx_productos_codigo ON public.productos (codigo);
+CREATE INDEX IF NOT EXISTS idx_productos_compatibilidad_gin ON public.productos USING GIN (compatibilidad jsonb_path_ops);
+CREATE INDEX IF NOT EXISTS idx_productos_sku_oem_lower ON public.productos (lower(sku_oem))
+  WHERE sku_oem IS NOT NULL AND btrim(sku_oem) <> '';
+CREATE INDEX IF NOT EXISTS idx_productos_marca_prod_lower ON public.productos (lower(marca_producto))
+  WHERE marca_producto IS NOT NULL AND btrim(marca_producto) <> '';
 
 -- -----------------------------------------------------------------------------
 -- Cajas / bancos / wallets
