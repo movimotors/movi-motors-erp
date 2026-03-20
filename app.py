@@ -32,6 +32,7 @@ from zoneinfo import ZoneInfo
 import bcrypt
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from supabase import Client
 
@@ -153,6 +154,62 @@ st.markdown(
     color: #fff8e1 !important;
     font-size: 1.15rem !important;
     font-weight: 700 !important;
+  }
+  /* Dashboard Bento (Tesla / fintech dark) */
+  .dash-bento {
+    background: linear-gradient(145deg, rgba(22, 27, 34, 0.92) 0%, rgba(14, 17, 23, 0.95) 100%);
+    border: 1px solid rgba(0, 229, 255, 0.12);
+    border-radius: 16px;
+    padding: 1rem 1.2rem;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 145, 0, 0.06) inset;
+    margin-bottom: 0.65rem;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+  .dash-bento:hover {
+    border-color: rgba(0, 229, 255, 0.28);
+    box-shadow: 0 12px 48px rgba(0, 229, 255, 0.08), 0 0 0 1px rgba(255, 145, 0, 0.1) inset;
+  }
+  .dash-kpi-label {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: #8b949e;
+    margin-bottom: 0.35rem;
+  }
+  .dash-kpi-value {
+    font-size: 1.55rem;
+    font-weight: 800;
+    color: #f0f6fc;
+    line-height: 1.15;
+  }
+  .dash-kpi-sub {
+    font-size: 0.78rem;
+    color: #7d8590;
+    margin-top: 0.4rem;
+  }
+  .dash-kpi-trend-up { color: #00e5ff !important; font-weight: 700; font-size: 0.85rem; }
+  .dash-kpi-trend-down { color: #ff6b6b !important; font-weight: 700; font-size: 0.85rem; }
+  .dash-kpi-trend-flat { color: #8b949e !important; font-size: 0.85rem; }
+  .dash-header-title {
+    font-size: 1.65rem;
+    font-weight: 800;
+    background: linear-gradient(90deg, #00e5ff, #ff9100);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin: 0 0 0.25rem 0;
+    letter-spacing: -0.02em;
+  }
+  .dash-header-sub { color: #8b949e; font-size: 0.85rem; margin-bottom: 0.5rem; }
+  .dash-live-chip {
+    display: inline-block;
+    background: rgba(0, 229, 255, 0.1);
+    border: 1px solid rgba(0, 229, 255, 0.35);
+    border-radius: 12px;
+    padding: 0.45rem 0.75rem;
+    font-size: 0.78rem;
+    color: #b3f0ff;
+    margin-top: 0.25rem;
   }
 </style>
 """,
@@ -879,60 +936,435 @@ def render_tasas_tiempo_real(*, key_suffix: str, t_guardado: dict[str, Any] | No
     return data
 
 
-def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
-    st.subheader("Panel ejecutivo")
-    st.caption("Resumen de tasas, brechas vs BCV y actividad reciente (caja, ventas y compras).")
+def _plotly_apply_dash_theme(fig: Any, *, title: str | None = None) -> Any:
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(22,27,34,0.55)",
+        font=dict(color="#c9d1d9", family="system-ui, sans-serif"),
+        margin=dict(t=56, b=48, l=24, r=24),
+        hovermode="x unified",
+        title=dict(text=title, font=dict(size=15, color="#00e5ff")) if title else None,
+    )
+    fig.update_xaxes(gridcolor="rgba(255,255,255,0.06)", zeroline=False)
+    fig.update_yaxes(gridcolor="rgba(255,255,255,0.06)", zeroline=False)
+    return fig
 
-    render_tasas_tiempo_real(key_suffix="dash", t_guardado=t)
-    st.divider()
 
-    if not t:
-        st.warning("No hay tasas del día cargadas. Un administrador debe registrarlas en **Tasas del día**.")
+def _dash_liquidity_bucket(*, tipo: str, nombre: str) -> str:
+    n = (nombre or "").lower()
+    if "binance" in n or "usdt" in n or "crypto" in n:
+        return "Binance (crypto)"
+    t = (tipo or "").strip()
+    if t == "Efectivo":
+        return "Caja fuerte"
+    if t == "Banco":
+        return "Bancos nacionales"
+    if t == "Wallet":
+        return "Binance (crypto)"
+    return "Otros"
+
+
+def _dash_trend_pct(curr: float, prev: float) -> float | None:
+    if prev > 1e-9:
+        return (curr - prev) / prev * 100.0
+    if curr > 1e-9:
+        return 100.0
+    return None
+
+
+def _dash_kpi_card(label: str, value: str, trend_pct: float | None = None, sub: str | None = None) -> None:
+    if trend_pct is None:
+        tr = '<span class="dash-kpi-trend-flat">— vs período anterior</span>'
+    elif trend_pct > 0.05:
+        tr = f'<span class="dash-kpi-trend-up">▲ {trend_pct:+.1f}%</span>'
+    elif trend_pct < -0.05:
+        tr = f'<span class="dash-kpi-trend-down">▼ {trend_pct:+.1f}%</span>'
     else:
-        bcv = _nf(t.get("bcv_bs_por_usd")) or _nf(t.get("tasa_bs"))
-        par = _nf(t.get("paralelo_bs_por_usd")) or _nf(t.get("tasa_bs"))
-        p2p_usd = _p2p_bs_equiv_por_usd(t)
+        tr = '<span class="dash-kpi-trend-flat">≈ estable</span>'
+    sub_html = f'<div class="dash-kpi-sub">{html.escape(sub)}</div>' if sub else ""
+    st.markdown(
+        f"""
+<div class="dash-bento">
+  <div class="dash-kpi-label">{html.escape(label)}</div>
+  <div class="dash-kpi-value">{value}</div>
+  <div class="dash-kpi-sub">{tr}</div>
+  {sub_html}
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
-        st.markdown("##### Tasas guardadas: USD×Bs · EUR×VES · USDT×VES (P2P)")
-        st.caption(
-            f"**Fecha del registro:** {t.get('fecha', '—')} · "
-            "**EUR×VES** = (USD×Bs paralelo) × (USD por 1 EUR). **USDT×VES (P2P)** = Bs por 1 USDT."
+
+def _dash_semaforo(*, stock: float, minimo: float, vendido_periodo: float) -> str:
+    """Rojo / amarillo / verde para priorizar liquidación o reposición."""
+    if stock <= minimo:
+        return "🔴 Bajo mínimo"
+    if stock <= minimo * 1.25:
+        return "🟡 Cerca del mínimo"
+    if vendido_periodo < 0.001 and stock > minimo:
+        return "🟡 Baja rotación"
+    return "🟢 OK"
+
+
+def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
+    """Panel ejecutivo estilo Bento (dark + acentos cian/naranja). Streamlit + Plotly."""
+    h1, h2, h3 = st.columns([2.2, 2.2, 1.6])
+    with h1:
+        st.markdown('<p class="dash-header-title">Panel Movi Motors</p>', unsafe_allow_html=True)
+        st.markdown(
+            '<p class="dash-header-sub">ERP automotriz · multimoneda · vista ejecutiva</p>',
+            unsafe_allow_html=True,
         )
-        render_tabla_tasas_ui(build_tasas_tabla_detalle(t))
-
-        names = []
-        vals = []
-        if bcv is not None:
-            names.append("BCV oficial")
-            vals.append(bcv)
-        if par is not None:
-            names.append("Paralelo USD")
-            vals.append(par)
-        if p2p_usd is not None:
-            names.append("P2P → Bs/USD")
-            vals.append(p2p_usd)
-        if len(vals) >= 2:
-            fig_cmp = px.bar(
-                x=names,
-                y=vals,
-                text=[f"{v:,.2f}" for v in vals],
-                title="Comparativo Bs por 1 USD (referencia)",
-                labels={"x": "", "y": "Bs"},
+    with h2:
+        d_a = st.date_input("Desde", value=date.today() - timedelta(days=30), key="dash_d0")
+        d_b = st.date_input("Hasta", value=date.today(), key="dash_d1")
+    with h3:
+        q_search = st.text_input("Buscar", placeholder="Producto, código…", key="dash_global_search", label_visibility="visible")
+        live = get_live_exchange_rates()
+        p2p = live.get("usdt_x_ves_p2p") or live.get("p2p_bs_por_usdt_aprox")
+        ves = live.get("ves_bs_por_usd")
+        if live.get("ok") and p2p is not None and ves is not None:
+            src = "Binance P2P" if live.get("usdt_x_ves_p2p_source") == "binance_p2p_median_buy" else "Ref."
+            st.markdown(
+                f'<div class="dash-live-chip">USDT/VES · {float(p2p):,.2f} Bs <small>({html.escape(src)})</small><br/>'
+                f"USD/VES web · {float(ves):,.2f}</div>",
+                unsafe_allow_html=True,
             )
-            fig_cmp.update_traces(textposition="outside")
-            fig_cmp.update_layout(showlegend=False, yaxis_title="Bolívares")
-            st.plotly_chart(fig_cmp, use_container_width=True)
+        else:
+            st.markdown('<div class="dash-live-chip">Tipo cambio web: sin datos</div>', unsafe_allow_html=True)
+
+    if d_b < d_a:
+        st.error("La fecha *Hasta* debe ser ≥ *Desde*.")
+        st.stop()
+
+    n_days = max(1, (d_b - d_a).days + 1)
+    d_prev_b = d_a - timedelta(days=1)
+    d_prev_a = d_prev_b - timedelta(days=n_days - 1)
+
+    r_fut = f"{d_b.isoformat()}T23:59:59"
+
+    # --- KPIs datos ---
+    v_cur = (
+        sb.table("ventas")
+        .select("id, total_usd, fecha")
+        .gte("fecha", str(d_a))
+        .lte("fecha", r_fut)
+        .execute()
+    )
+    v_prev = (
+        sb.table("ventas")
+        .select("total_usd")
+        .gte("fecha", str(d_prev_a))
+        .lte("fecha", f"{d_prev_b.isoformat()}T23:59:59")
+        .execute()
+    )
+    df_vc = pd.DataFrame(v_cur.data or [])
+    ventas_usd = float(pd.to_numeric(df_vc["total_usd"], errors="coerce").fillna(0).sum()) if not df_vc.empty else 0.0
+    ventas_prev = float(
+        pd.to_numeric(pd.DataFrame(v_prev.data or [])["total_usd"], errors="coerce").fillna(0).sum()
+    ) if (v_prev.data or []) else 0.0
+
+    vids = [str(x["id"]) for x in (v_cur.data or [])]
+    margen_usd = 0.0
+    if vids:
+        det = (
+            sb.table("ventas_detalles")
+            .select("producto_id, cantidad, precio_unitario_usd")
+            .in_("venta_id", vids)
+            .execute()
+        )
+        det_rows = det.data or []
+        pmap = {
+            str(p["id"]): p
+            for p in (sb.table("productos").select("id, costo_usd").execute().data or [])
+        }
+        for row in det_rows:
+            pid = str(row["producto_id"])
+            costo = float(pmap.get(pid, {}).get("costo_usd") or 0)
+            cant = float(row["cantidad"])
+            pu = float(row["precio_unitario_usd"])
+            margen_usd += (pu - costo) * cant
+
+    vids_prev = [
+        str(x["id"])
+        for x in (
+            sb.table("ventas")
+            .select("id")
+            .gte("fecha", str(d_prev_a))
+            .lte("fecha", f"{d_prev_b.isoformat()}T23:59:59")
+            .execute()
+            .data
+            or []
+        )
+    ]
+    margen_prev = 0.0
+    if vids_prev:
+        detp = (
+            sb.table("ventas_detalles")
+            .select("producto_id, cantidad, precio_unitario_usd")
+            .in_("venta_id", vids_prev)
+            .execute()
+        )
+        pmap2 = {
+            str(p["id"]): p
+            for p in (sb.table("productos").select("id, costo_usd").execute().data or [])
+        }
+        for row in detp.data or []:
+            pid = str(row["producto_id"])
+            costo = float(pmap2.get(pid, {}).get("costo_usd") or 0)
+            cant = float(row["cantidad"])
+            pu = float(row["precio_unitario_usd"])
+            margen_prev += (pu - costo) * cant
+
+    prods = sb.table("productos").select("stock_actual, activo").eq("activo", True).execute()
+    unidades_stock = float(
+        sum(float(p.get("stock_actual") or 0) for p in (prods.data or []))
+    )
+    n_sku = len(prods.data or [])
+
+    try:
+        bal = sb.table("v_balance_consolidado_usd").select("total_usd").execute()
+        liquidez = float((bal.data or [{}])[0].get("total_usd") or 0)
+    except Exception:
+        liquidez = 0.0
+
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        _dash_kpi_card(
+            "Ventas totales (USD)",
+            f"US$ {ventas_usd:,.2f}",
+            _dash_trend_pct(ventas_usd, ventas_prev),
+            f"Período {d_a} → {d_b}",
+        )
+    with k2:
+        _dash_kpi_card(
+            "Margen bruto (USD)",
+            f"US$ {margen_usd:,.2f}",
+            _dash_trend_pct(margen_usd, margen_prev),
+            "Sobre costo de productos vendidos",
+        )
+    with k3:
+        _dash_kpi_card(
+            "Unidades en stock",
+            f"{unidades_stock:,.0f}",
+            None,
+            f"{n_sku} SKU activos",
+        )
+    with k4:
+        _dash_kpi_card(
+            "Liquidez total",
+            f"US$ {liquidez:,.2f}",
+            None,
+            "Saldos en cajas / bancos / wallets",
+        )
+
+    row2a, row2b = st.columns([1.15, 1])
+    with row2a:
+        st.markdown('<div class="dash-bento">', unsafe_allow_html=True)
+        st.markdown("**Origen de la liquidez** (USD por tipo de caja)")
+        caj_df = pd.DataFrame(sb.table("cajas_bancos").select("nombre, tipo, saldo_actual_usd").eq("activo", True).execute().data or [])
+        if caj_df.empty:
+            st.caption("No hay cajas activas.")
+        else:
+            caj_df["origen"] = caj_df.apply(
+                lambda r: _dash_liquidity_bucket(tipo=str(r.get("tipo", "")), nombre=str(r.get("nombre", ""))),
+                axis=1,
+            )
+            caj_df["saldo_actual_usd"] = pd.to_numeric(caj_df["saldo_actual_usd"], errors="coerce").fillna(0)
+            agg_l = caj_df.groupby("origen", as_index=False)["saldo_actual_usd"].sum()
+            order = ["Caja fuerte", "Bancos nacionales", "Binance (crypto)", "Otros"]
+            agg_l["origen"] = pd.Categorical(agg_l["origen"], categories=order, ordered=True)
+            agg_l = agg_l.sort_values("origen")
+            agg_l = agg_l[agg_l["saldo_actual_usd"] > 0]
+            if agg_l.empty:
+                st.caption("Saldos en cero en todas las cajas.")
+            else:
+                colors = ["#00e5ff", "#ff9100", "#b388ff", "#78909c"]
+                fig_liq = go.Figure()
+                for idx, (_, row) in enumerate(agg_l.iterrows()):
+                    fig_liq.add_trace(
+                        go.Bar(
+                            name=str(row["origen"]),
+                            x=["Liquidez"],
+                            y=[float(row["saldo_actual_usd"])],
+                            marker_color=colors[idx % len(colors)],
+                            text=[f"{float(row['saldo_actual_usd']):,.2f}"],
+                            textposition="inside",
+                            hovertemplate="%{fullData.name}: %{y:,.2f} USD<extra></extra>",
+                        )
+                    )
+                fig_liq.update_layout(
+                    barmode="stack",
+                    showlegend=True,
+                    legend=dict(orientation="h", yanchor="top", y=-0.2, x=0),
+                )
+                _plotly_apply_dash_theme(fig_liq, title="Composición por origen")
+                fig_liq.update_layout(hoverlabel=dict(bgcolor="#1a1f2e", font_size=12))
+                st.plotly_chart(fig_liq, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with row2b:
+        st.markdown('<div class="dash-bento">', unsafe_allow_html=True)
+        st.markdown("**Compras por categoría** (USD en el período · proxy de gasto / abastecimiento)")
+        cids = [
+            str(x["id"])
+            for x in (
+                sb.table("compras")
+                .select("id")
+                .gte("fecha", str(d_a))
+                .lte("fecha", r_fut)
+                .execute()
+                .data
+                or []
+            )
+        ]
+        if not cids:
+            st.caption("Sin compras en el rango.")
+        else:
+            cdet = sb.table("compras_detalles").select("producto_id, subtotal_usd").in_("compra_id", cids).execute()
+            cdf = pd.DataFrame(cdet.data or [])
+            if cdf.empty:
+                st.caption("Sin líneas de compra.")
+            else:
+                plist = sb.table("productos").select("id, categoria_id, categorias(nombre)").execute().data or []
+                id_cat: dict[str, str] = {}
+                for p in plist:
+                    cid = str(p["id"])
+                    cat = p.get("categorias")
+                    if isinstance(cat, list) and cat:
+                        cat = cat[0]
+                    if isinstance(cat, dict) and cat.get("nombre"):
+                        id_cat[cid] = str(cat["nombre"])
+                    else:
+                        id_cat[cid] = "Sin categoría"
+                cdf["categoria"] = cdf["producto_id"].astype(str).map(lambda x: id_cat.get(x, "Sin categoría"))
+                cdf["subtotal_usd"] = pd.to_numeric(cdf["subtotal_usd"], errors="coerce").fillna(0)
+                gcat = cdf.groupby("categoria", as_index=False)["subtotal_usd"].sum()
+                fig_d = px.pie(
+                    gcat,
+                    names="categoria",
+                    values="subtotal_usd",
+                    hole=0.52,
+                    color_discrete_sequence=px.colors.sequential.Teal_r,
+                )
+                fig_d.update_traces(textposition="inside", textinfo="percent+label", hovertemplate="%{label}<br>%{value:,.2f} USD<extra></extra>")
+                _plotly_apply_dash_theme(fig_d, title="Distribución (donut)")
+                st.plotly_chart(fig_d, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    pinv = (
+        sb.table("productos")
+        .select("id, codigo, descripcion, stock_actual, stock_minimo, costo_usd, precio_v_usd, categorias(nombre)")
+        .eq("activo", True)
+        .execute()
+        .data
+        or []
+    )
+
+    row3a, row3b = st.columns([1.2, 1])
+    with row3a:
+        st.markdown('<div class="dash-bento">', unsafe_allow_html=True)
+        st.markdown("**Productos con baja rotación** · semáforo de inventario")
+        st.caption("🟢 OK · 🟡 revisar · 🔴 bajo mínimo")
+        ventas_qty: dict[str, float] = {}
+        if vids:
+            dq = (
+                sb.table("ventas_detalles")
+                .select("producto_id, cantidad")
+                .in_("venta_id", vids)
+                .execute()
+                .data
+                or []
+            )
+            for r in dq:
+                pid = str(r["producto_id"])
+                ventas_qty[pid] = ventas_qty.get(pid, 0) + float(r.get("cantidad") or 0)
+        rows_inv: list[dict[str, Any]] = []
+        for p in pinv:
+            pid = str(p["id"])
+            st_a = float(p.get("stock_actual") or 0)
+            st_m = float(p.get("stock_minimo") or 0)
+            if st_a <= 0:
+                continue
+            vq = ventas_qty.get(pid, 0.0)
+            cat = p.get("categorias")
+            if isinstance(cat, list) and cat:
+                cat = cat[0]
+            cat_n = cat.get("nombre") if isinstance(cat, dict) else "—"
+            rows_inv.append(
+                {
+                    "Semáforo": _dash_semaforo(stock=st_a, minimo=st_m, vendido_periodo=vq),
+                    "Producto": str(p.get("descripcion", ""))[:80],
+                    "Código": str(p.get("codigo") or "—"),
+                    "Categoría": str(cat_n or "—")[:40],
+                    "Stock": st_a,
+                    "Mín.": st_m,
+                    "Vendido (período)": vq,
+                    "Valor inv. USD": round(st_a * float(p.get("costo_usd") or 0), 2),
+                }
+            )
+        dfi = pd.DataFrame(rows_inv)
+        if dfi.empty:
+            st.info("No hay stock positivo para analizar.")
+        else:
+
+            def _sem_prio(s: str) -> int:
+                if str(s).startswith("🔴"):
+                    return 0
+                if str(s).startswith("🟡"):
+                    return 1
+                return 2
+
+            dfi["_prio"] = dfi["Semáforo"].map(_sem_prio)
+            dfi = dfi.sort_values(["_prio", "Valor inv. USD"], ascending=[True, False]).drop(columns=["_prio"])
+            if q_search and q_search.strip():
+                qs = q_search.strip().lower()
+                mask = dfi["Producto"].str.lower().str.contains(qs, na=False) | dfi["Código"].str.lower().str.contains(
+                    qs, na=False
+                )
+                dfi = dfi[mask]
+            st.dataframe(dfi, use_container_width=True, hide_index=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with row3b:
+        st.markdown('<div class="dash-bento">', unsafe_allow_html=True)
+        st.markdown("**Valor de inventario por categoría** (costo × stock)")
+        if not pinv:
+            st.caption("Sin productos.")
+        else:
+            rows_cat: list[dict[str, Any]] = []
+            for p in pinv:
+                cat = p.get("categorias")
+                if isinstance(cat, list) and cat:
+                    cat = cat[0]
+                cn = str(cat.get("nombre")) if isinstance(cat, dict) and cat.get("nombre") else "Sin categoría"
+                rows_cat.append(
+                    {
+                        "categoria": cn,
+                        "valor_usd": float(p.get("stock_actual") or 0) * float(p.get("costo_usd") or 0),
+                    }
+                )
+            dfc2 = pd.DataFrame(rows_cat).groupby("categoria", as_index=False)["valor_usd"].sum()
+            dfc2 = dfc2[dfc2["valor_usd"] > 0]
+            if dfc2.empty:
+                st.caption("Sin valor de inventario (costos en cero o sin stock).")
+            else:
+                fig_iv = px.bar(
+                    dfc2.sort_values("valor_usd", ascending=True),
+                    x="valor_usd",
+                    y="categoria",
+                    orientation="h",
+                    labels={"valor_usd": "USD", "categoria": ""},
+                )
+                fig_iv.update_traces(marker_color="#00e5ff", hovertemplate="%{y}: %{x:,.2f} USD<extra></extra>")
+                _plotly_apply_dash_theme(fig_iv, title="Inventario por categoría")
+                st.plotly_chart(fig_iv, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
     st.divider()
-    bal = sb.table("v_balance_consolidado_usd").select("total_usd").execute()
-    total = float((bal.data or [{}])[0].get("total_usd") or 0)
-    st.metric("Balance consolidado en cajas (USD)", f"{total:,.2f}")
-
-    days = 30
-    d0 = date.today() - timedelta(days=days)
-    dsl = d0.isoformat()
-
-    st.markdown(f"##### Caja: ingresos y egresos (últimos {days} días)")
+    st.markdown("##### Flujo de caja y ventas (detalle)")
+    dsl = d_a.isoformat()
     mh = (
         sb.table("movimientos_caja")
         .select("created_at, tipo, monto_usd")
@@ -941,41 +1373,37 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
     )
     dfm = pd.DataFrame(mh.data or [])
     if dfm.empty:
-        st.info("No hay movimientos de caja en este período.")
+        st.caption("Sin movimientos de caja en el rango seleccionado.")
     else:
         ts = pd.to_datetime(dfm["created_at"], errors="coerce")
         dfm["dia"] = ts.dt.strftime("%Y-%m-%d")
         dfm["monto_usd"] = pd.to_numeric(dfm["monto_usd"], errors="coerce").fillna(0)
-        ing = dfm[dfm["tipo"] == "Ingreso"].groupby("dia", as_index=False)["monto_usd"].sum()
-        egr = dfm[dfm["tipo"] == "Egreso"].groupby("dia", as_index=False)["monto_usd"].sum()
-        ing = ing.rename(columns={"monto_usd": "Ingreso"})
-        egr = egr.rename(columns={"monto_usd": "Egreso"})
+        ing = dfm[dfm["tipo"] == "Ingreso"].groupby("dia", as_index=False)["monto_usd"].sum().rename(columns={"monto_usd": "Ingreso"})
+        egr = dfm[dfm["tipo"] == "Egreso"].groupby("dia", as_index=False)["monto_usd"].sum().rename(columns={"monto_usd": "Egreso"})
         merged_ie = pd.merge(
             pd.DataFrame({"dia": sorted(dfm["dia"].unique())}),
             ing,
             on="dia",
             how="left",
         )
-        merged_ie = pd.merge(merged_ie, egr, on="dia", how="left")
-        merged_ie = merged_ie.fillna(0)
+        merged_ie = pd.merge(merged_ie, egr, on="dia", how="left").fillna(0)
         fig_ie = px.bar(
             merged_ie,
             x="dia",
             y=["Ingreso", "Egreso"],
             barmode="group",
-            title="Movimientos de caja por día (USD)",
             labels={"value": "USD", "dia": "Día", "variable": ""},
         )
-        fig_ie.update_layout(legend_title_text="")
+        fig_ie.update_traces(marker_line_width=0)
+        _plotly_apply_dash_theme(fig_ie, title="Ingresos y egresos por día")
         st.plotly_chart(fig_ie, use_container_width=True)
 
-    st.markdown(f"##### Ventas vs compras (USD, últimos {days} días)")
-    vrows = sb.table("ventas").select("fecha, total_usd").gte("fecha", dsl).execute()
-    crows = sb.table("compras").select("fecha, total_usd").gte("fecha", dsl).execute()
+    vrows = sb.table("ventas").select("fecha, total_usd").gte("fecha", str(d_a)).lte("fecha", r_fut).execute()
+    crows = sb.table("compras").select("fecha, total_usd").gte("fecha", str(d_a)).lte("fecha", r_fut).execute()
     dfv = pd.DataFrame(vrows.data or [])
-    dfc = pd.DataFrame(crows.data or [])
-    if dfv.empty and dfc.empty:
-        st.info("No hay ventas ni compras registradas en este período.")
+    dfc_v = pd.DataFrame(crows.data or [])
+    if dfv.empty and dfc_v.empty:
+        st.caption("Sin ventas ni compras en el rango.")
     else:
         vsum = (
             dfv.assign(
@@ -989,14 +1417,14 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
             else pd.DataFrame(columns=["dia", "Ventas USD"])
         )
         csum = (
-            dfc.assign(
-                dia=pd.to_datetime(dfc["fecha"], errors="coerce").dt.strftime("%Y-%m-%d"),
-                total_usd=pd.to_numeric(dfc["total_usd"], errors="coerce").fillna(0),
+            dfc_v.assign(
+                dia=pd.to_datetime(dfc_v["fecha"], errors="coerce").dt.strftime("%Y-%m-%d"),
+                total_usd=pd.to_numeric(dfc_v["total_usd"], errors="coerce").fillna(0),
             )
             .groupby("dia", as_index=False)["total_usd"]
             .sum()
             .rename(columns={"total_usd": "Compras USD"})
-            if not dfc.empty
+            if not dfc_v.empty
             else pd.DataFrame(columns=["dia", "Compras USD"])
         )
         dias = sorted(
@@ -1009,10 +1437,19 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
             x="dia",
             y=["Ventas USD", "Compras USD"],
             markers=True,
-            title="Ventas y compras por día",
             labels={"value": "USD", "dia": "Día"},
         )
+        fig_vc.update_traces(line=dict(width=2))
+        _plotly_apply_dash_theme(fig_vc, title="Ventas vs compras (USD)")
         st.plotly_chart(fig_vc, use_container_width=True)
+
+    with st.expander("Tasas en vivo y tabla guardada (BCV / paralelo / P2P)", expanded=False):
+        render_tasas_tiempo_real(key_suffix="dash", t_guardado=t)
+        if t:
+            st.caption(f"Registro tasas **{t.get('fecha', '—')}**")
+            render_tabla_tasas_ui(build_tasas_tabla_detalle(t))
+        else:
+            st.warning("Sin tasas del día en base de datos.")
 
     st.divider()
     st.markdown("##### Últimos movimientos de caja")
