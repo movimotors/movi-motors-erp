@@ -23,6 +23,13 @@ CREATE TABLE IF NOT EXISTS public.erp_users (
 
 CREATE INDEX IF NOT EXISTS idx_erp_users_username ON public.erp_users (lower(username));
 
+CREATE TABLE IF NOT EXISTS public.erp_kv (
+  key text PRIMARY KEY,
+  value text NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE public.erp_kv ENABLE ROW LEVEL SECURITY;
+
 -- -----------------------------------------------------------------------------
 -- Tasas del día: operativas (facturación) + referencia BCV / paralelo / EUR / P2P
 -- -----------------------------------------------------------------------------
@@ -807,6 +814,30 @@ $$;
 
 REVOKE ALL ON FUNCTION public.cobrar_cxc_erp(UUID, UUID, UUID, NUMERIC, JSONB) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.cobrar_cxc_erp(UUID, UUID, UUID, NUMERIC, JSONB) TO service_role;
+
+-- -----------------------------------------------------------------------------
+-- Alinear secuencias de número de venta/compra tras importación
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.sync_erp_sequences()
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  PERFORM setval(
+    'public.ventas_numero_seq',
+    GREATEST((SELECT COALESCE(MAX(numero), 0) FROM public.ventas), 1)
+  );
+  PERFORM setval(
+    'public.compras_numero_seq',
+    GREATEST((SELECT COALESCE(MAX(numero), 0) FROM public.compras), 1)
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.sync_erp_sequences() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.sync_erp_sequences() TO service_role;
 
 -- -----------------------------------------------------------------------------
 -- Vista: saldo consolidado (suma de cajas)

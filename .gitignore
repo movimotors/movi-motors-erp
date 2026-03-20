@@ -8,3 +8,4 @@ venv/
 auth_state.json
 .DS_Store
 Thumbs.db
+auto_backups/

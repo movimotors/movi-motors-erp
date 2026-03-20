@@ -18,6 +18,7 @@ que pulses **Salir** o venza la vigencia (p. ej. 90 días).
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
 import hmac
 import html
@@ -25,6 +26,7 @@ import json
 import secrets
 import time
 from datetime import date, datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -34,6 +36,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 from supabase import Client
 
 
@@ -43,6 +46,23 @@ BRAND_LOGO_PATH = _APP_DIR / "assets" / "logo_movimotors.png"
 
 def brand_logo_file() -> str | None:
     return str(BRAND_LOGO_PATH) if BRAND_LOGO_PATH.is_file() else None
+
+
+def _brand_logo_data_uri() -> str | None:
+    """PNG/JPEG del logo para incrustar en HTML de impresión."""
+    p = BRAND_LOGO_PATH
+    if not p.is_file():
+        return None
+    try:
+        raw = p.read_bytes()
+        if not raw:
+            return None
+        suf = p.suffix.lower()
+        mime = "image/jpeg" if suf in (".jpg", ".jpeg") else "image/png"
+        b64 = base64.standard_b64encode(raw).decode("ascii")
+        return f"data:{mime};base64,{b64}"
+    except OSError:
+        return None
 
 
 def render_brand_logo(*, use_column_width: bool = True) -> None:
@@ -614,14 +634,485 @@ def maybe_auto_sync_tasas_from_web(sb: Client) -> dict[str, Any] | None:
 def _fetch_productos_inventario_df(sb: Client) -> pd.DataFrame:
     cols_full = (
         "id,codigo,descripcion,stock_actual,stock_minimo,costo_usd,precio_v_usd,"
-        "precio_v_bs_ref,costo_bs_ref,activo"
+        "precio_v_bs_ref,costo_bs_ref,activo,categoria_id"
     )
-    cols_base = "id,codigo,descripcion,stock_actual,stock_minimo,costo_usd,precio_v_usd,activo"
+    cols_base = "id,codigo,descripcion,stock_actual,stock_minimo,costo_usd,precio_v_usd,activo,categoria_id"
     try:
         r = sb.table("productos").select(cols_full).order("descripcion").execute()
     except Exception:
         r = sb.table("productos").select(cols_base).order("descripcion").execute()
     return pd.DataFrame(r.data or [])
+
+
+def _categoria_maps_from_rows(
+    cat_rows: list[dict[str, Any]],
+) -> tuple[dict[str, str], dict[str, str], list[str]]:
+    """id->nombre, nombre->id, opciones selectbox ('' = sin categoría)."""
+    id_to_n: dict[str, str] = {}
+    n_to_id: dict[str, str] = {}
+    for c in cat_rows:
+        cid = str(c.get("id") or "").strip()
+        nom = str(c.get("nombre") or "").strip()
+        if cid and nom:
+            id_to_n[cid] = nom
+            n_to_id[nom] = cid
+    opts = [""] + sorted(n_to_id.keys(), key=str.casefold)
+    return id_to_n, n_to_id, opts
+
+
+def _resolve_categoria_id_por_nombre(nombre: str, n_to_id: dict[str, str]) -> str | None:
+    s = nombre.strip()
+    if not s:
+        return None
+    if s in n_to_id:
+        return n_to_id[s]
+    sl = s.lower()
+    for k, vid in n_to_id.items():
+        if k.lower() == sl:
+            return vid
+    return None
+
+
+def _inv_cat_display(celda: Any) -> str:
+    if celda is None or (isinstance(celda, float) and pd.isna(celda)):
+        return "(Sin categoría)"
+    s = str(celda).strip()
+    return s if s else "(Sin categoría)"
+
+
+def _df_inventario_filtrado_impresion(
+    df: pd.DataFrame,
+    *,
+    categorias_sel: list[str],
+    costo_min: float,
+    costo_max: float,
+    precio_min: float,
+    precio_max: float,
+    solo_activos: bool,
+) -> pd.DataFrame:
+    out = df.copy()
+    if solo_activos and "activo" in out.columns:
+        out = out[out["activo"] == True]  # noqa: E712
+    if categorias_sel:
+        disp = out["categoria"].map(_inv_cat_display)
+        out = out[disp.isin(categorias_sel)]
+    c_usd = pd.to_numeric(out["costo_usd"], errors="coerce").fillna(0.0)
+    p_usd = pd.to_numeric(out["precio_v_usd"], errors="coerce").fillna(0.0)
+    m = pd.Series(True, index=out.index)
+    if costo_min > 0:
+        m &= c_usd >= float(costo_min)
+    if costo_max > 0:
+        m &= c_usd <= float(costo_max)
+    if precio_min > 0:
+        m &= p_usd >= float(precio_min)
+    if precio_max > 0:
+        m &= p_usd <= float(precio_max)
+    return out.loc[m]
+
+
+def _df_inventario_orden_impresion(df: pd.DataFrame, orden_key: str, *, agrupar_categoria: bool) -> pd.DataFrame:
+    keys: list[tuple[str, bool]] = []
+    if orden_key == "codigo":
+        keys = [("codigo", True)]
+    elif orden_key == "costo_asc":
+        keys = [("costo_usd", True)]
+    elif orden_key == "costo_desc":
+        keys = [("costo_usd", False)]
+    elif orden_key == "precio_asc":
+        keys = [("precio_v_usd", True)]
+    elif orden_key == "precio_desc":
+        keys = [("precio_v_usd", False)]
+    else:
+        keys = [("descripcion", True)]
+    if agrupar_categoria:
+        keys = [("categoria", True)] + keys
+    work = df.copy()
+    for col, _asc in keys:
+        if col not in work.columns:
+            continue
+        if work[col].dtype == object or str(work[col].dtype) == "object":
+            work[col] = work[col].fillna("").astype(str)
+    col_names = [k[0] for k in keys if k[0] in work.columns]
+    ascending = [k[1] for k in keys if k[0] in work.columns]
+    if not col_names:
+        return work
+    return work.sort_values(by=col_names, ascending=ascending, kind="mergesort")
+
+
+def _html_inventario_listado(
+    df: pd.DataFrame,
+    t: dict[str, Any] | None,
+    *,
+    agrupar_categoria: bool,
+    subtitulo_filtros: str,
+) -> str:
+    tz = ZoneInfo("America/Caracas")
+    fecha = datetime.now(tz).strftime("%d/%m/%Y %H:%M")
+    work = df.copy()
+    work["categoria_display"] = work["categoria"].map(_inv_cat_display)
+
+    cols_print: list[tuple[str, str]] = [
+        ("codigo", "Código"),
+        ("descripcion", "Descripción"),
+        ("categoria_display", "Categoría"),
+        ("stock_actual", "Stock"),
+        ("stock_minimo", "Stock mín."),
+        ("costo_usd", "Costo USD"),
+        ("precio_v_usd", "Precio venta USD"),
+    ]
+    if "precio_v_bs_ref" in work.columns:
+        cols_print.append(("precio_v_bs_ref", "Precio venta Bs (ref.)"))
+    if "costo_bs_ref" in work.columns:
+        cols_print.append(("costo_bs_ref", "Costo Bs (ref.)"))
+
+    ths = "".join(f"<th>{html.escape(lab)}</th>" for _k, lab in cols_print)
+    body_rows: list[str] = []
+    current_cat: str | None = None
+    for _, row in work.iterrows():
+        if agrupar_categoria:
+            cd = str(row["categoria_display"])
+            if cd != current_cat:
+                current_cat = cd
+                body_rows.append(
+                    f'<tr class="catgrp"><td colspan="{len(cols_print)}">{html.escape(cd)}</td></tr>'
+                )
+        tds: list[str] = []
+        for key, _lab in cols_print:
+            val = row.get(key)
+            if key in ("stock_actual", "stock_minimo"):
+                try:
+                    cell = f"{float(val):,.3f}"
+                except (TypeError, ValueError):
+                    cell = html.escape("" if val is None else str(val))
+            elif key in ("costo_usd", "precio_v_usd", "precio_v_bs_ref", "costo_bs_ref"):
+                try:
+                    cell = f"{float(val):,.2f}"
+                except (TypeError, ValueError):
+                    cell = html.escape("" if val is None else str(val))
+            else:
+                if val is None or (isinstance(val, float) and pd.isna(val)):
+                    cell = ""
+                else:
+                    cell = html.escape(str(val))
+            tds.append(f"<td>{cell}</td>")
+        body_rows.append("<tr>" + "".join(tds) + "</tr>")
+
+    n = len(work)
+    tasa_note = ""
+    if t and _nf(t.get("tasa_bs")) is not None:
+        tasa_note = f"<p class=\"sub\">Tasa Bs/USD de referencia en sistema: <strong>{float(t['tasa_bs']):,.2f}</strong></p>"
+
+    filt_html = f"<p class=\"sub\">{html.escape(subtitulo_filtros)}</p>" if subtitulo_filtros.strip() else ""
+
+    _logo_uri = _brand_logo_data_uri()
+    _logo_block = (
+        f'<div class="logo-wrap"><img class="logo" src="{_logo_uri}" alt="Movi Motors"/></div>'
+        if _logo_uri
+        else '<div class="logo-wrap logo-missing">Movi Motor\'s Importadora</div>'
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8"/>
+<title>Inventario — Movi Motors</title>
+<style>
+  @page {{
+    size: A4 portrait;
+    margin: 14mm 16mm 16mm 16mm;
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    font-family: Segoe UI, Roboto, Arial, sans-serif;
+    margin: 0;
+    padding: 1rem 1.25rem;
+    max-width: 210mm;
+    margin-left: auto;
+    margin-right: auto;
+    color: #111;
+  }}
+  .logo-wrap {{
+    text-align: center;
+    margin: 0 0 0.6rem 0;
+  }}
+  .logo {{
+    max-height: 22mm;
+    max-width: 52mm;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+  }}
+  .logo-missing {{
+    font-weight: 800;
+    font-size: 1rem;
+    color: #5c2d91;
+    letter-spacing: 0.02em;
+  }}
+  h1 {{ font-size: 1.1rem; margin: 0 0 0.35rem 0; text-align: center; color: #2a1f45; }}
+  .meta {{ color: #444; font-size: 0.82rem; margin-bottom: 0.65rem; text-align: center; }}
+  .sub {{ font-size: 0.78rem; color: #333; margin: 0.3rem 0; text-align: center; }}
+  table {{ border-collapse: collapse; width: 100%; font-size: 0.72rem; }}
+  th, td {{ border: 1px solid #bbb; padding: 0.3rem 0.4rem; text-align: left; vertical-align: top; word-break: break-word; }}
+  th {{ background: #2a1f45; color: #fff; font-weight: 600; }}
+  tr.catgrp td {{ background: #fff3e0; font-weight: 700; color: #e65100; border-color: #ffcc80; }}
+  tr:nth-child(even) td {{ background: #fafafa; }}
+  .foot {{ margin-top: 0.85rem; font-size: 0.75rem; color: #555; text-align: center; }}
+  .print-actions {{ margin-top: 0.75rem; text-align: center; }}
+  @media print {{
+    body {{ padding: 0; max-width: none; }}
+    .print-actions {{ display: none !important; }}
+    tr.catgrp td {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    th {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    table {{ font-size: 0.68rem; }}
+  }}
+</style>
+</head>
+<body>
+  {_logo_block}
+  <h1>Listado de inventario</h1>
+  <div class="meta">Generado: {html.escape(fecha)} (America/Caracas) · <strong>{n}</strong> ítem(s)</div>
+  {tasa_note}
+  {filt_html}
+  <table>
+    <thead><tr>{ths}</tr></thead>
+    <tbody>
+      {''.join(body_rows)}
+    </tbody>
+  </table>
+  <p class="foot">Precios y costos en USD son los maestros del sistema. Columnas Bs (ref.) dependen de la tasa guardada al momento del reporte.</p>
+  <div class="print-actions">
+    <script>function imprimir(){{ window.print(); }}</script>
+    <button type="button" onclick="imprimir()" style="padding:0.5rem 1.2rem;font-size:1rem;cursor:pointer;background:#2a1f45;color:#fff;border:none;border-radius:6px;">Imprimir</button>
+  </div>
+</body>
+</html>"""
+
+
+def _export_cell_txt(val: Any) -> str:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return ""
+    s = str(val).strip()
+    return "" if s.lower() == "nan" else s
+
+
+def _df_inventario_export_flat(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy()
+    out = pd.DataFrame(
+        {
+            "Código": work["codigo"].map(_export_cell_txt),
+            "Descripción": work["descripcion"].map(_export_cell_txt),
+            "Categoría": work["categoria"].map(_inv_cat_display),
+            "Stock": pd.to_numeric(work["stock_actual"], errors="coerce"),
+            "Stock mín.": pd.to_numeric(work["stock_minimo"], errors="coerce"),
+            "Costo USD": pd.to_numeric(work["costo_usd"], errors="coerce"),
+            "Precio venta USD": pd.to_numeric(work["precio_v_usd"], errors="coerce"),
+        }
+    )
+    if "precio_v_bs_ref" in work.columns:
+        out["Precio venta Bs (ref.)"] = pd.to_numeric(work["precio_v_bs_ref"], errors="coerce")
+    if "costo_bs_ref" in work.columns:
+        out["Costo Bs (ref.)"] = pd.to_numeric(work["costo_bs_ref"], errors="coerce")
+    if "activo" in work.columns:
+        out["Activo"] = work["activo"].astype(bool)
+    return out
+
+
+def _xlsx_inventario_bytes(df_flat: pd.DataFrame) -> bytes:
+    from openpyxl.utils import get_column_letter
+
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df_flat.to_excel(writer, index=False, sheet_name="Inventario")
+        ws = writer.sheets["Inventario"]
+        for i, col in enumerate(df_flat.columns, start=1):
+            lens = df_flat[col].astype(str).map(len)
+            m = max(int(lens.max()) if len(lens) > 0 else 0, len(str(col)))
+            ws.column_dimensions[get_column_letter(i)].width = float(min(48, max(10, m + 2)))
+    return buf.getvalue()
+
+
+def _pdf_short_txt(val: Any, max_len: int) -> str:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        s = ""
+    else:
+        s = str(val).strip()
+    if len(s) > max_len:
+        return s[: max_len - 1] + "…"
+    return s
+
+
+def _pdf_inventario_col_widths(n_cols: int, total_w: float) -> list[float]:
+    """Proporciones para **A4 vertical** (ancho útil ≈ 210 mm − márgenes)."""
+    if n_cols == 7:
+        parts = [0.09, 0.30, 0.14, 0.09, 0.09, 0.145, 0.145]
+    elif n_cols == 8:
+        parts = [0.08, 0.26, 0.12, 0.08, 0.08, 0.13, 0.13, 0.13]
+    elif n_cols == 9:
+        parts = [0.07, 0.22, 0.11, 0.07, 0.07, 0.12, 0.12, 0.12, 0.12]
+    else:
+        parts = [1.0 / n_cols] * n_cols
+    return [total_w * p for p in parts]
+
+
+def _pdf_inventario_bytes(
+    df: pd.DataFrame,
+    t: dict[str, Any] | None,
+    *,
+    agrupar_categoria: bool,
+    subtitulo_filtros: str,
+) -> bytes:
+    from copy import deepcopy
+
+    from xml.sax.saxutils import escape as xml_esc
+
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.lib.utils import ImageReader
+    from reportlab.platypus import Image as RLImage
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    buf = BytesIO()
+    page = A4
+    lm = 18 * mm
+    rm = 18 * mm
+    tm = 15 * mm
+    bm = 18 * mm
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=page,
+        leftMargin=lm,
+        rightMargin=rm,
+        topMargin=tm,
+        bottomMargin=bm,
+    )
+    styles = getSampleStyleSheet()
+    story: list[Any] = []
+    tw = float(page[0] - lm - rm)
+
+    if BRAND_LOGO_PATH.is_file():
+        try:
+            ir = ImageReader(str(BRAND_LOGO_PATH))
+            iw, ih = ir.getSize()
+            if iw > 0 and ih > 0:
+                target_w = 44 * mm
+                target_h = target_w * (float(ih) / float(iw))
+                max_h = 22 * mm
+                if target_h > max_h:
+                    target_h = max_h
+                    target_w = target_h * (float(iw) / float(ih))
+                lg = RLImage(str(BRAND_LOGO_PATH), width=target_w, height=target_h)
+                lg.hAlign = "CENTER"
+                story.append(lg)
+                story.append(Spacer(1, 2.5 * mm))
+        except Exception:
+            pass
+
+    tz = ZoneInfo("America/Caracas")
+    fecha = datetime.now(tz).strftime("%d/%m/%Y %H:%M")
+    tit = deepcopy(styles["Title"])
+    tit.fontSize = 13
+    tit.leading = 15
+    tit.textColor = colors.HexColor("#2a1f45")
+    tit.alignment = TA_CENTER
+    story.append(Paragraph(xml_esc("Listado de inventario"), tit))
+    meta = deepcopy(styles["Normal"])
+    meta.fontSize = 8.5
+    meta.alignment = TA_CENTER
+    story.append(
+        Paragraph(
+            xml_esc(f"Movi Motor's Importadora · Generado: {fecha} (America/Caracas) · {len(df)} ítem(s)"),
+            meta,
+        )
+    )
+    tbs = _nf(t.get("tasa_bs")) if t else None
+    if tbs is not None:
+        story.append(Paragraph(xml_esc(f"Tasa Bs/USD ref.: {tbs:,.2f}"), meta))
+    if subtitulo_filtros.strip():
+        sf = deepcopy(styles["BodyText"])
+        sf.fontSize = 8
+        sf.alignment = TA_CENTER
+        story.append(Paragraph(xml_esc(subtitulo_filtros), sf))
+    story.append(Spacer(1, 2.5 * mm))
+
+    headers = ["Cód.", "Descripción", "Cat.", "Stock", "Mín", "C.USD", "P.Venta"]
+    if "precio_v_bs_ref" in df.columns:
+        headers.append("P.Bs ref")
+    if "costo_bs_ref" in df.columns:
+        headers.append("C.Bs ref")
+    n_h = len(headers)
+    col_ws = _pdf_inventario_col_widths(n_h, tw)
+
+    def fmt3(x: Any) -> str:
+        try:
+            return f"{float(x):,.3f}"
+        except (TypeError, ValueError):
+            return ""
+
+    def fmt2(x: Any) -> str:
+        try:
+            return f"{float(x):,.2f}"
+        except (TypeError, ValueError):
+            return ""
+
+    def row_cells(r: pd.Series) -> list[str]:
+        cd = _inv_cat_display(r.get("categoria"))
+        cells = [
+            _pdf_short_txt(r.get("codigo"), 10),
+            _pdf_short_txt(r.get("descripcion"), 32),
+            _pdf_short_txt(cd, 12),
+            fmt3(r.get("stock_actual")),
+            fmt3(r.get("stock_minimo")),
+            fmt2(r.get("costo_usd")),
+            fmt2(r.get("precio_v_usd")),
+        ]
+        if "precio_v_bs_ref" in df.columns:
+            cells.append(fmt2(r.get("precio_v_bs_ref")))
+        if "costo_bs_ref" in df.columns:
+            cells.append(fmt2(r.get("costo_bs_ref")))
+        return [xml_esc(c) for c in cells]
+
+    tbl_style = TableStyle(
+        [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2a1f45")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 6.5),
+            ("LEADING", (0, 0), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f7f7")]),
+        ]
+    )
+
+    work = df.copy()
+    work["_cdisp"] = work["categoria"].map(_inv_cat_display)
+
+    if agrupar_categoria:
+        h4_base = deepcopy(styles["Heading4"])
+        h4_base.fontSize = 9.5
+        h4_base.textColor = colors.HexColor("#e65100")
+        for cat_name, grp in work.groupby("_cdisp", sort=False):
+            story.append(Paragraph(f"<b>{xml_esc(str(cat_name))}</b>", h4_base))
+            data: list[list[str]] = [headers]
+            for _, r in grp.iterrows():
+                data.append(row_cells(r))
+            tbl = Table(data, colWidths=col_ws, repeatRows=1)
+            tbl.setStyle(tbl_style)
+            story.append(tbl)
+            story.append(Spacer(1, 2 * mm))
+    else:
+        data = [headers]
+        for _, r in work.iterrows():
+            data.append(row_cells(r))
+        tbl = Table(data, colWidths=col_ws, repeatRows=1)
+        tbl.setStyle(tbl_style)
+        story.append(tbl)
+
+    doc.build(story)
+    return buf.getvalue()
 
 
 def _backup_file_timestamp() -> str:
@@ -630,6 +1121,190 @@ def _backup_file_timestamp() -> str:
 
 def _json_backup_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, indent=2, default=str).encode("utf-8")
+
+
+def _json_backup_bytes_compact_gzip(payload: dict[str, Any]) -> bytes:
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+    return gzip.compress(raw, compresslevel=9)
+
+
+def decode_backup_upload_bytes(raw: bytes) -> dict[str, Any]:
+    if len(raw) >= 2 and raw[0] == 0x1F and raw[1] == 0x8B:
+        raw = gzip.decompress(raw)
+    return json.loads(raw.decode("utf-8"))
+
+
+_ERP_KV_KEY_AUTO_DAY = "movi_auto_backup_day_v1"
+
+
+def _auto_backup_config() -> dict[str, Any]:
+    defaults: dict[str, Any] = {"enabled": True, "retain_days": 14, "storage_bucket": ""}
+    try:
+        ab = st.secrets.get("auto_backup")
+    except Exception:
+        return defaults
+    if ab is None:
+        return defaults
+    try:
+        rd = int(ab.get("retain_days", 14))
+        rd = max(1, min(365, rd))
+        return {
+            "enabled": bool(ab.get("enabled", True)),
+            "retain_days": rd,
+            "storage_bucket": str(ab.get("storage_bucket") or "").strip(),
+        }
+    except Exception:
+        return defaults
+
+
+def _auto_backup_dir() -> Path:
+    return _APP_DIR / "auto_backups"
+
+
+def _local_auto_backup_day_path() -> Path:
+    return _auto_backup_dir() / ".last_auto_day_v1"
+
+
+def _read_local_auto_backup_day() -> str | None:
+    try:
+        s = _local_auto_backup_day_path().read_text(encoding="utf-8").strip()
+        return s or None
+    except Exception:
+        return None
+
+
+def _write_local_auto_backup_day(day: str) -> None:
+    d = _auto_backup_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    _local_auto_backup_day_path().write_text(day, encoding="utf-8")
+
+
+def _erp_kv_get(sb: Client, key: str) -> str | None:
+    try:
+        r = sb.table("erp_kv").select("value").eq("key", key).limit(1).execute()
+        row = (r.data or [{}])[0]
+        s = str(row.get("value") or "").strip()
+        return s or None
+    except Exception:
+        return None
+
+
+def _erp_kv_set(sb: Client, key: str, value: str) -> bool:
+    try:
+        sb.table("erp_kv").upsert({"key": key, "value": value}).execute()
+        return True
+    except Exception:
+        return False
+
+
+def _prune_old_auto_backups(*, retain_days: int) -> None:
+    dir_path = _auto_backup_dir()
+    if not dir_path.is_dir():
+        return
+    today_c = _today_caracas()
+    cutoff = today_c - timedelta(days=max(1, retain_days))
+    for p in dir_path.glob("movi_erp_auto_*.json.gz"):
+        if not p.is_file():
+            continue
+        name = p.name
+        if not name.startswith("movi_erp_auto_") or not name.endswith(".json.gz"):
+            continue
+        mid = name[len("movi_erp_auto_") : -len(".json.gz")]
+        try:
+            d = date.fromisoformat(mid)
+        except ValueError:
+            continue
+        if d < cutoff:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+def _storage_auto_backup_exists(sb: Client, bucket: str, day_str: str) -> bool:
+    needle = f"movi_erp_auto_{day_str}.json.gz"
+    try:
+        items = sb.storage.from_(bucket).list("auto")
+        for it in items or []:
+            if str(it.get("name") or "") == needle:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _try_storage_auto_backup(sb: Client, bucket: str, day_str: str, data: bytes) -> bool:
+    if not bucket:
+        return False
+    path = f"auto/movi_erp_auto_{day_str}.json.gz"
+    try:
+        sb.storage.from_(bucket).upload(
+            path,
+            data,
+            file_options={"content-type": "application/gzip", "upsert": "true"},
+        )
+        return True
+    except Exception:
+        return False
+
+
+def maybe_run_daily_auto_backup(sb: Client, rol: str) -> None:
+    """
+    Una vez al día (America/Caracas), si entra un superusuario: genera el mismo JSON
+    que el respaldo completo pero compacto + gzip. Guarda en `auto_backups/` y/o
+    Storage (secrets). Coordina con `erp_kv` o archivo local para no repetir.
+    """
+    if rol != "superuser":
+        return
+    cfg = _auto_backup_config()
+    if not cfg["enabled"]:
+        return
+    today_str = _today_caracas().isoformat()
+
+    if _erp_kv_get(sb, _ERP_KV_KEY_AUTO_DAY) == today_str:
+        st.session_state["_movi_auto_backup_session_day"] = today_str
+        return
+    if _read_local_auto_backup_day() == today_str:
+        st.session_state["_movi_auto_backup_session_day"] = today_str
+        return
+    bucket = str(cfg.get("storage_bucket") or "")
+    if bucket and _storage_auto_backup_exists(sb, bucket, today_str):
+        st.session_state["_movi_auto_backup_session_day"] = today_str
+        return
+    if st.session_state.get("_movi_auto_backup_session_day") == today_str:
+        return
+    if st.session_state.get("_movi_auto_backup_busy"):
+        return
+
+    st.session_state["_movi_auto_backup_busy"] = True
+    try:
+        payload = build_backup_erp_completo(sb)
+        gz = _json_backup_bytes_compact_gzip(payload)
+        ok_any = False
+        bdir = _auto_backup_dir()
+        try:
+            bdir.mkdir(parents=True, exist_ok=True)
+            (bdir / f"movi_erp_auto_{today_str}.json.gz").write_bytes(gz)
+            ok_any = True
+        except OSError:
+            pass
+
+        if bucket and _try_storage_auto_backup(sb, bucket, today_str, gz):
+            ok_any = True
+
+        if not ok_any:
+            return
+
+        _prune_old_auto_backups(retain_days=int(cfg["retain_days"]))
+        if not _erp_kv_set(sb, _ERP_KV_KEY_AUTO_DAY, today_str):
+            _write_local_auto_backup_day(today_str)
+        st.session_state["_movi_auto_backup_session_day"] = today_str
+        kb = max(1, len(gz) // 1024)
+        st.session_state["_movi_auto_backup_toast"] = f"Respaldo automático del día guardado (~{kb} KB gzip)."
+    except Exception as ex:
+        st.session_state["_movi_auto_backup_toast_err"] = str(ex)
+    finally:
+        st.session_state["_movi_auto_backup_busy"] = False
 
 
 def build_backup_inventario(sb: Client) -> dict[str, Any]:
@@ -684,6 +1359,123 @@ def build_backup_erp_completo(sb: Client) -> dict[str, Any]:
     if errs:
         payload["meta"]["errores_al_exportar"] = errs
     return payload
+
+
+_PHONY_UUID = "00000000-0000-0000-0000-000000000000"
+
+
+def _delete_all_rows(sb: Client, table: str) -> None:
+    sb.table(table).delete().neq("id", _PHONY_UUID).execute()
+
+
+def _insert_rows_batched(sb: Client, table: str, rows: list[dict[str, Any]], *, batch: int = 75) -> None:
+    if not rows:
+        return
+    for i in range(0, len(rows), batch):
+        chunk = rows[i : i + batch]
+        sb.table(table).insert(chunk).execute()
+
+
+def _merge_erp_users_from_backup(sb: Client, rows: list[dict[str, Any]]) -> list[str]:
+    """Actualiza usuarios existentes; crea faltantes con contraseña temporal."""
+    notes: list[str] = []
+    for row in rows:
+        uid = str(row.get("id") or "").strip()
+        un = (row.get("username") or "").strip()
+        if not uid or not un:
+            continue
+        ex = sb.table("erp_users").select("id").eq("id", uid).limit(1).execute()
+        base = {
+            "username": un.lower(),
+            "nombre": (row.get("nombre") or un).strip(),
+            "email": (row.get("email") or "").strip() or None,
+            "rol": row.get("rol") or "vendedor",
+            "activo": bool(row.get("activo", True)),
+        }
+        if ex.data:
+            sb.table("erp_users").update(base).eq("id", uid).execute()
+        else:
+            try:
+                sb.table("erp_users").insert(
+                    {**base, "id": uid, "password_hash": _hash_password("Restaurar2025!")}
+                ).execute()
+                notes.append(
+                    f"Usuario **{un}** creado desde respaldo — contraseña temporal: **Restaurar2025!** (cambiar en Usuarios)."
+                )
+            except Exception as ex:
+                notes.append(f"No se pudo crear usuario `{un}`: {ex}")
+    return notes
+
+
+def restore_erp_completo_desde_json(sb: Client, payload: dict[str, Any]) -> tuple[bool, str, list[str]]:
+    """
+    Reemplaza datos operativos desde un JSON generado por *Descargar respaldo completo*.
+    Orden: borra hijos primero; inserta categorías → … → movimientos.
+    """
+    meta = payload.get("meta") or {}
+    if meta.get("tipo") != "erp_completo":
+        return False, "El archivo no es un respaldo **erp_completo** (usá el JSON de Mantenimiento).", []
+    if int(meta.get("version") or 0) < 1:
+        return False, "Versión de respaldo no soportada.", []
+
+    warns: list[str] = []
+    try:
+        _delete_all_rows(sb, "movimientos_caja")
+        _delete_all_rows(sb, "ventas")
+        _delete_all_rows(sb, "compras")
+        _delete_all_rows(sb, "productos")
+        _delete_all_rows(sb, "categorias")
+        _delete_all_rows(sb, "tasas_dia")
+        _delete_all_rows(sb, "cajas_bancos")
+
+        _insert_rows_batched(sb, "categorias", list(payload.get("categorias") or []))
+        _insert_rows_batched(sb, "productos", list(payload.get("productos") or []))
+        _insert_rows_batched(sb, "tasas_dia", list(payload.get("tasas_dia") or []))
+        _insert_rows_batched(sb, "cajas_bancos", list(payload.get("cajas_bancos") or []))
+
+        urows = list(payload.get("erp_users") or [])
+        if urows:
+            warns.extend(_merge_erp_users_from_backup(sb, urows))
+
+        _insert_rows_batched(sb, "ventas", list(payload.get("ventas") or []))
+        _insert_rows_batched(sb, "ventas_detalles", list(payload.get("ventas_detalles") or []))
+        _insert_rows_batched(sb, "compras", list(payload.get("compras") or []))
+        _insert_rows_batched(sb, "compras_detalles", list(payload.get("compras_detalles") or []))
+        _insert_rows_batched(sb, "cuentas_por_cobrar", list(payload.get("cuentas_por_cobrar") or []))
+        _insert_rows_batched(sb, "cuentas_por_pagar", list(payload.get("cuentas_por_pagar") or []))
+        _insert_rows_batched(sb, "movimientos_caja", list(payload.get("movimientos_caja") or []))
+
+        try:
+            sb.rpc("sync_erp_sequences").execute()
+        except Exception:
+            warns.append(
+                "Ejecutá en Supabase `supabase/patch_009_sync_sequences.sql` para alinear números de venta/compra."
+            )
+
+        return True, "Restauración completa aplicada. Revisá avisos abajo si los hay.", warns
+    except Exception as e:
+        return False, f"Error durante la restauración (la base puede quedar incompleta): {e}", warns
+
+
+def restore_inventario_desde_json(sb: Client, payload: dict[str, Any]) -> tuple[bool, str]:
+    meta = payload.get("meta") or {}
+    if meta.get("tipo") != "inventario":
+        return False, "El archivo no es un respaldo de **inventario**."
+    try:
+        _delete_all_rows(sb, "productos")
+        _delete_all_rows(sb, "categorias")
+        _insert_rows_batched(sb, "categorias", list(payload.get("categorias") or []))
+        _insert_rows_batched(sb, "productos", list(payload.get("productos") or []))
+        return True, "Inventario restaurado desde el JSON."
+    except Exception as e:
+        err = str(e).lower()
+        if "foreign key" in err or "23503" in err:
+            return (
+                False,
+                "No se puede borrar productos: hay **ventas o compras** que los referencian. "
+                "Usá **Mantenimiento → Restaurar todo** con el JSON completo, o depurá operaciones primero.",
+            )
+        return False, str(e)
 
 
 def fmt_tri(usd: float, t_bs: float, t_usdt: float) -> str:
@@ -1898,10 +2690,11 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
     if not t:
         st.warning("Registre tasas en **Dashboard** (expander *Cargar / editar tasas en base de datos*) para ver equivalentes.")
 
-    with st.expander("Respaldo de inventario (antes de cambios masivos)", expanded=False):
+    with st.expander("Respaldo y restauración de inventario", expanded=False):
         st.caption(
-            "Descarga un **JSON** con **categorías** y **productos** tal como están en Supabase ahora. "
-            "Guardalo en tu PC o nube. La restauración es manual (SQL Editor / importación); ante dudas conservá varias copias fechadas."
+            "Descargá un **JSON** con categorías y productos. Para **volver atrás**, subí ese archivo y pulsá restaurar "
+            "(un paso). Si hay ventas/compras que usan productos, la restauración de solo inventario puede fallar: "
+            "en ese caso usá el **respaldo completo** en Mantenimiento."
         )
         try:
             inv_payload = build_backup_inventario(sb)
@@ -1913,14 +2706,45 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                 mime="application/json",
                 key="dl_backup_inventario",
             )
+            st.download_button(
+                label=f"Mismo respaldo (liviano .json.gz) — movi_inventario_{ts}.json.gz",
+                data=_json_backup_bytes_compact_gzip(inv_payload),
+                file_name=f"movi_inventario_{ts}.json.gz",
+                mime="application/gzip",
+                key="dl_backup_inventario_gz",
+            )
             n_cat = len(inv_payload.get("categorias") or [])
             n_prod = len(inv_payload.get("productos") or [])
             st.caption(f"Incluye **{n_cat}** categorías y **{n_prod}** productos.")
         except Exception as e:
             st.error(f"No se pudo generar el respaldo: {e}")
 
+        st.divider()
+        st.markdown("**Restaurar inventario (1 clic)**")
+        up_inv = st.file_uploader("JSON o gzip de inventario", type=["json", "gz"], key="restore_inv_json")
+        c_inv = st.text_input("Escribe **RESTAURAR_INVENTARIO** para confirmar", key="restore_inv_ok")
+        if st.button("Restaurar inventario desde archivo", key="btn_restore_inv"):
+            if up_inv is None:
+                st.error("Subí el archivo JSON o .json.gz.")
+            elif c_inv.strip() != "RESTAURAR_INVENTARIO":
+                st.error("Confirmación incorrecta.")
+            else:
+                try:
+                    data_inv = decode_backup_upload_bytes(up_inv.getvalue())
+                except Exception as ex:
+                    st.error(f"Archivo inválido: {ex}")
+                else:
+                    ok_i, msg_i = restore_inventario_desde_json(sb, data_inv)
+                    if ok_i:
+                        st.success(msg_i)
+                        st.rerun()
+                    else:
+                        st.error(msg_i)
+
     cats = sb.table("categorias").select("id,nombre").order("nombre").execute()
-    cat_opts = {c["nombre"]: c["id"] for c in (cats.data or [])}
+    cats_list = cats.data or []
+    cat_opts = {c["nombre"]: c["id"] for c in cats_list}
+    _id_to_nombre_cat, _nombre_a_id_cat, _cat_select_opts = _categoria_maps_from_rows(cats_list)
 
     with st.expander("Nueva categoría"):
         with st.form("f_cat"):
@@ -1956,10 +2780,13 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                 st.success("Producto creado.")
                 st.rerun()
 
-    st.caption("Carga masiva (CSV): columnas codigo,descripcion,stock_actual,stock_minimo,costo_usd,precio_v_usd")
+    st.caption(
+        "Carga masiva (CSV): columnas **codigo**, **descripcion**, **stock_actual**, **stock_minimo**, "
+        "**costo_usd**, **precio_v_usd**; opcional **categoria** (nombre exacto o sin distinguir mayúsculas)."
+    )
     up = st.file_uploader("CSV", type=["csv"])
     if up is not None:
-        df = pd.read_csv(up)
+        df_csv = pd.read_csv(up)
         required = {
             "codigo",
             "descripcion",
@@ -1968,14 +2795,23 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
             "costo_usd",
             "precio_v_usd",
         }
-        if not required.issubset(set(df.columns.str.lower())):
+        if not required.issubset(set(df_csv.columns.str.lower())):
             st.error(f"Faltan columnas. Requeridas: {required}")
         else:
-            df.columns = [c.lower() for c in df.columns]
+            df_csv.columns = [c.lower() for c in df_csv.columns]
             if st.button("Insertar filas"):
-                rows = df.to_dict(orient="records")
-                for row in rows:
-                    sb.table("productos").insert(
+                rows_csv = df_csv.to_dict(orient="records")
+                batch_ins: list[dict[str, Any]] = []
+                err_cat: list[str] = []
+                for i, row in enumerate(rows_csv):
+                    cid_csv: str | None = None
+                    if "categoria" in df_csv.columns and row.get("categoria") is not None:
+                        raw_c = str(row["categoria"]).strip()
+                        if raw_c and raw_c.lower() not in ("nan", "none"):
+                            cid_csv = _resolve_categoria_id_por_nombre(raw_c, _nombre_a_id_cat)
+                            if cid_csv is None:
+                                err_cat.append(f"fila {i + 1}: categoría «{raw_c}» no encontrada")
+                    batch_ins.append(
                         {
                             "codigo": str(row["codigo"]).strip() or None,
                             "descripcion": str(row["descripcion"]),
@@ -1983,47 +2819,232 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                             "stock_minimo": float(row["stock_minimo"]),
                             "costo_usd": float(row["costo_usd"]),
                             "precio_v_usd": float(row["precio_v_usd"]),
+                            "categoria_id": cid_csv,
                             "activo": True,
                         }
-                    ).execute()
-                st.success(f"Insertados {len(rows)} productos.")
-                st.rerun()
+                    )
+                if err_cat:
+                    st.error("Revisá el CSV:\n- " + "\n- ".join(err_cat[:12]))
+                    if len(err_cat) > 12:
+                        st.caption(f"… y {len(err_cat) - 12} errores más.")
+                else:
+                    _insert_rows_batched(sb, "productos", batch_ins)
+                    st.success(f"Insertados {len(batch_ins)} productos.")
+                    st.rerun()
 
     df = _fetch_productos_inventario_df(sb)
     if df.empty:
         st.info("No hay productos.")
         return
 
+    if "categoria_id" in df.columns:
+        df["categoria"] = df["categoria_id"].apply(
+            lambda x: _id_to_nombre_cat.get(str(x).strip(), "")
+            if x is not None and not (isinstance(x, float) and pd.isna(x)) and str(x).strip()
+            else ""
+        )
+    else:
+        df["categoria"] = ""
+
+    with st.expander("Imprimir / exportar listado", expanded=True):
+        st.caption(
+            "Elegí **categorías**, **rangos de costo y precio** (USD) y el **orden**. "
+            "Descargá **Excel (.xlsx)**, **PDF** o **HTML** (navegador → Ctrl+P). "
+            "Requiere `openpyxl` y `reportlab` (`py -m pip install -r requirements.txt`)."
+        )
+        _lab_cat = sorted(df["categoria"].map(_inv_cat_display).unique().tolist(), key=str.casefold)
+        _pick_cat = st.multiselect(
+            "Categorías a incluir",
+            options=_lab_cat,
+            default=_lab_cat,
+            help="Quitá marcas para excluir categorías. Dejá todas marcadas para el catálogo completo.",
+            key="inv_print_cats",
+        )
+        _use_cats = _pick_cat if _pick_cat else _lab_cat
+        _ic1, _ic2 = st.columns(2)
+        with _ic1:
+            _solo_act = st.checkbox("Solo productos activos", value=True, key="inv_print_activos")
+        with _ic2:
+            _agrup_cat = st.checkbox("Agrupar por categoría en el impreso", value=True, key="inv_print_group")
+        _oc1, _oc2 = st.columns(2)
+        with _oc1:
+            st.markdown("**Costo USD**")
+            _cmin = st.number_input("Desde (0 = sin mínimo)", min_value=0.0, value=0.0, step=0.01, key="inv_print_cmin")
+            _cmax = st.number_input("Hasta (0 = sin máximo)", min_value=0.0, value=0.0, step=0.01, key="inv_print_cmax")
+        with _oc2:
+            st.markdown("**Precio venta USD**")
+            _pmin = st.number_input("Desde (0 = sin mínimo)", min_value=0.0, value=0.0, step=0.01, key="inv_print_pmin")
+            _pmax = st.number_input("Hasta (0 = sin máximo)", min_value=0.0, value=0.0, step=0.01, key="inv_print_pmax")
+        _orden_lbl = st.selectbox(
+            "Ordenar por",
+            options=[
+                "Descripción (A-Z)",
+                "Código (A-Z)",
+                "Costo USD: menor → mayor",
+                "Costo USD: mayor → menor",
+                "Precio venta USD: menor → mayor",
+                "Precio venta USD: mayor → menor",
+            ],
+            key="inv_print_sort",
+        )
+        _orden_map = {
+            "Descripción (A-Z)": "descripcion",
+            "Código (A-Z)": "codigo",
+            "Costo USD: menor → mayor": "costo_asc",
+            "Costo USD: mayor → menor": "costo_desc",
+            "Precio venta USD: menor → mayor": "precio_asc",
+            "Precio venta USD: mayor → menor": "precio_desc",
+        }
+        _orden_key = _orden_map[_orden_lbl]
+
+        _df_p = _df_inventario_filtrado_impresion(
+            df,
+            categorias_sel=_use_cats,
+            costo_min=float(_cmin),
+            costo_max=float(_cmax),
+            precio_min=float(_pmin),
+            precio_max=float(_pmax),
+            solo_activos=bool(_solo_act),
+        )
+        _parts_sub: list[str] = []
+        if _pick_cat and len(_pick_cat) < len(_lab_cat):
+            _parts_sub.append(f"categorías: {len(_pick_cat)} seleccionadas")
+        if _cmin > 0 or _cmax > 0:
+            _parts_sub.append(
+                f"costo USD {_cmin if _cmin > 0 else '…'} — {_cmax if _cmax > 0 else '…'}"
+            )
+        if _pmin > 0 or _pmax > 0:
+            _parts_sub.append(
+                f"precio USD {_pmin if _pmin > 0 else '…'} — {_pmax if _pmax > 0 else '…'}"
+            )
+        _parts_sub.append(_orden_lbl)
+        if _agrup_cat:
+            _parts_sub.append("agrupado por categoría")
+        _sub_f = " · ".join(_parts_sub)
+
+        if _df_p.empty:
+            st.warning("No hay productos con esos filtros.")
+        else:
+            _df_out = _df_inventario_orden_impresion(
+                _df_p, _orden_key, agrupar_categoria=bool(_agrup_cat)
+            )
+            _html_inv = _html_inventario_listado(
+                _df_out,
+                t,
+                agrupar_categoria=bool(_agrup_cat),
+                subtitulo_filtros=_sub_f,
+            )
+            _df_flat = _df_inventario_export_flat(_df_out)
+            _ts_p = _backup_file_timestamp()
+            _bx, _bp = st.columns(2)
+            with _bx:
+                try:
+                    _xlsx_b = _xlsx_inventario_bytes(_df_flat)
+                except ImportError:
+                    st.caption("Instalá **openpyxl** para exportar Excel.")
+                else:
+                    st.download_button(
+                        label=f"Excel — inventario_{_ts_p}.xlsx",
+                        data=_xlsx_b,
+                        file_name=f"inventario_{_ts_p}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_inv_print_xlsx",
+                        use_container_width=True,
+                    )
+            with _bp:
+                try:
+                    _pdf_b = _pdf_inventario_bytes(
+                        _df_out,
+                        t,
+                        agrupar_categoria=bool(_agrup_cat),
+                        subtitulo_filtros=_sub_f,
+                    )
+                except ImportError:
+                    st.caption("Instalá **reportlab** para exportar PDF.")
+                else:
+                    st.download_button(
+                        label=f"PDF — inventario_{_ts_p}.pdf",
+                        data=_pdf_b,
+                        file_name=f"inventario_{_ts_p}.pdf",
+                        mime="application/pdf",
+                        key="dl_inv_print_pdf",
+                        use_container_width=True,
+                    )
+            st.download_button(
+                label=f"HTML (imprimir en navegador) — inventario_{_ts_p}.html",
+                data=_html_inv.encode("utf-8"),
+                file_name=f"inventario_{_ts_p}.html",
+                mime="text/html",
+                key="dl_inv_print_html",
+            )
+            st.caption("Vista previa HTML (iframe; Ctrl+P o botón *Imprimir* si el navegador lo permite).")
+            components.html(_html_inv, height=520, scrolling=True)
+
+    _inv_q = st.text_input(
+        "Filtrar por código o descripción",
+        value="",
+        key="inv_prod_filter",
+        placeholder="Ej. filtro, SKU…",
+    )
+    df_view = df
+    if _inv_q.strip():
+        _q = _inv_q.strip().lower()
+        _m = df["descripcion"].astype(str).str.lower().str.contains(_q, na=False) | df["codigo"].fillna(
+            ""
+        ).astype(str).str.lower().str.contains(_q, na=False)
+        df_view = df.loc[_m]
+    if df_view.empty:
+        st.info("No hay productos con ese filtro.")
+        return
+
     st.caption(
         "Columnas **precio_v_bs_ref** y **costo_bs_ref**: referencia en Bs según la última **tasa_bs** "
-        "guardada (se actualizan al guardar tasas o al auto-sync web). Los precios maestros siguen en USD."
+        "guardada (se actualizan al guardar tasas o al auto-sync web). Los precios maestros siguen en USD. "
+        "**Categoría** se elige en la lista (vacío = sin categoría)."
     )
-    crit = df[df["stock_actual"].astype(float) <= df["stock_minimo"].astype(float)]
-    if len(crit):
-        st.error(f"Alertas de stock crítico: {len(crit)} ítems")
-        st.dataframe(crit, use_container_width=True, hide_index=True)
+    crit_all = df[df["stock_actual"].astype(float) <= df["stock_minimo"].astype(float)]
+    if len(crit_all):
+        st.error(f"Alertas de stock crítico: {len(crit_all)} ítems")
+        st.dataframe(crit_all, use_container_width=True, hide_index=True)
 
+    _editor_cols = [c for c in df_view.columns if c != "categoria_id"]
+    _ed_df = df_view[_editor_cols].copy()
     _disabled_cols = ["id"]
-    if "precio_v_bs_ref" in df.columns:
+    if "precio_v_bs_ref" in _ed_df.columns:
         _disabled_cols.extend(["precio_v_bs_ref", "costo_bs_ref"])
+    _inv_col_cfg: dict[str, Any] = {
+        "categoria": st.column_config.SelectboxColumn(
+            "Categoría",
+            options=_cat_select_opts,
+        ),
+    }
     edited = st.data_editor(
-        df,
+        _ed_df,
         num_rows="fixed",
         disabled=_disabled_cols,
+        column_config=_inv_col_cfg,
         use_container_width=True,
         key="editor_prod",
     )
     if st.button("Guardar cambios de inventario"):
         for _, row in edited.iterrows():
+            _cv = row.get("categoria")
+            if _cv is None or (isinstance(_cv, float) and pd.isna(_cv)):
+                _cv = ""
+            _cv = str(_cv).strip()
+            _cid_up = _nombre_a_id_cat.get(_cv) if _cv else None
             sb.table("productos").update(
                 {
-                    "codigo": row.get("codigo"),
-                    "descripcion": row.get("descripcion"),
+                    "codigo": None
+                    if row.get("codigo") is None or (isinstance(row.get("codigo"), float) and pd.isna(row.get("codigo")))
+                    else (str(row.get("codigo")).strip() or None),
+                    "descripcion": str(row.get("descripcion") or ""),
                     "stock_actual": float(row.get("stock_actual", 0)),
                     "stock_minimo": float(row.get("stock_minimo", 0)),
                     "costo_usd": float(row.get("costo_usd", 0)),
                     "precio_v_usd": float(row.get("precio_v_usd", 0)),
                     "activo": bool(row.get("activo", True)),
+                    "categoria_id": _cid_up,
                 }
             ).eq("id", str(row["id"])).execute()
         st.success("Productos actualizados.")
@@ -2657,12 +3678,61 @@ def module_mantenimiento(sb: Client) -> None:
             mime="application/json",
             key="dl_backup_erp_completo",
         )
+        st.download_button(
+            label=f"Descargar mismo respaldo (liviano .json.gz) — movi_erp_completo_{ts}.json.gz",
+            data=_json_backup_bytes_compact_gzip(full_payload),
+            file_name=f"movi_erp_completo_{ts}.json.gz",
+            mime="application/gzip",
+            key="dl_backup_erp_completo_gz",
+        )
+        st.caption(
+            "**Respaldo automático diario** (superusuario): al abrir la app se guarda "
+            f"`auto_backups/movi_erp_auto_YYYY-MM-DD.json.gz` (JSON sin indentar + gzip). "
+            "Ejecutá `supabase/patch_010_erp_kv.sql` para coordinar el día en la nube. "
+            "Opcional: en `secrets.toml`, `[auto_backup]` → `storage_bucket` = bucket privado en Supabase Storage (carpeta `auto/`). "
+            "Los archivos locales antiguos se borran pasado `retain_days` (default 14). "
+            "Podés **restaurar** subiendo `.json` o `.json.gz`."
+        )
         err_part = full_payload.get("meta", {}).get("errores_al_exportar")
         if err_part:
             st.warning("Algunas tablas fallaron al exportar (revisá permisos o columnas en Supabase).")
             st.json(err_part)
     except Exception as e:
         st.error(f"No se pudo generar el respaldo completo: {e}")
+
+    st.divider()
+    st.markdown("#### Restaurar todo desde respaldo (1 clic)")
+    st.warning(
+        "**Sobrescribe** movimientos, ventas, compras, CXC/CXP, productos, categorías, tasas del día y cajas con el contenido del JSON. "
+        "**No borra** filas de `erp_users`: actualiza datos básicos y crea usuarios faltantes con clave **Restaurar2025!** (cambiar después). "
+        "Hacé un respaldo reciente antes."
+    )
+    up_full = st.file_uploader(
+        "Archivo **movi_erp_completo_*.json** o **.json.gz**", type=["json", "gz"], key="restore_full_json"
+    )
+    c_full = st.text_input("Confirmación: escribe **RESTAURAR_TODO**", key="restore_full_ok")
+    if st.button("Restaurar todo ahora", type="primary", key="btn_restore_full"):
+        if up_full is None:
+            st.error("Subí el archivo JSON del respaldo completo.")
+        elif c_full.strip() != "RESTAURAR_TODO":
+            st.error("Escribí exactamente RESTAURAR_TODO para confirmar.")
+        else:
+            try:
+                blob = decode_backup_upload_bytes(up_full.getvalue())
+            except Exception as ex:
+                st.error(f"Archivo inválido (JSON o gzip+JSON): {ex}")
+            else:
+                ok_r, msg_r, warns_r = restore_erp_completo_desde_json(sb, blob)
+                if ok_r:
+                    st.success(msg_r)
+                    for w in warns_r:
+                        st.warning(w)
+                    st.balloons()
+                    st.rerun()
+                else:
+                    st.error(msg_r)
+                    for w in warns_r:
+                        st.warning(w)
 
     st.divider()
     st.markdown("#### Depuración (peligroso)")
@@ -2707,6 +3777,11 @@ def main() -> None:
     erp_uid = str(erp["id"])
     username = str(erp.get("username", ""))
 
+    maybe_run_daily_auto_backup(sb, rol)
+    _bk_err = st.session_state.pop("_movi_auto_backup_toast_err", None)
+    if _bk_err:
+        st.toast(f"Respaldo automático no aplicado: {_bk_err}")
+
     t = latest_tasas(sb)
     t_synced = maybe_auto_sync_tasas_from_web(sb)
     if t_synced is not None:
@@ -2714,6 +3789,9 @@ def main() -> None:
     _auto_msg = st.session_state.pop("_tasas_auto_sync_msg", None)
     if _auto_msg:
         st.toast(_auto_msg)
+    _bk_ok = st.session_state.pop("_movi_auto_backup_toast", None)
+    if _bk_ok:
+        st.toast(_bk_ok)
 
     with st.sidebar:
         render_brand_logo()
