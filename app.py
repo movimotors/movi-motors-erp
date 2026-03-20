@@ -624,6 +624,68 @@ def _fetch_productos_inventario_df(sb: Client) -> pd.DataFrame:
     return pd.DataFrame(r.data or [])
 
 
+def _backup_file_timestamp() -> str:
+    return datetime.now(ZoneInfo("America/Caracas")).strftime("%Y%m%d_%H%M%S")
+
+
+def _json_backup_bytes(payload: dict[str, Any]) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, indent=2, default=str).encode("utf-8")
+
+
+def build_backup_inventario(sb: Client) -> dict[str, Any]:
+    """Snapshot lógico: categorías + productos (todo el maestro de inventario)."""
+    return {
+        "meta": {
+            "tipo": "inventario",
+            "version": 1,
+            "exportado_en_utc": datetime.now(timezone.utc).isoformat(),
+            "app": "Movi Motors ERP",
+        },
+        "categorias": (sb.table("categorias").select("*").order("nombre").execute().data or []),
+        "productos": (sb.table("productos").select("*").order("descripcion").execute().data or []),
+    }
+
+
+def build_backup_erp_completo(sb: Client) -> dict[str, Any]:
+    """
+    Snapshot amplio para recuperación ante fallos o antes de depuración.
+    No exporta password_hash (seguridad); reasignar claves tras restaurar usuarios.
+    """
+    payload: dict[str, Any] = {
+        "meta": {
+            "tipo": "erp_completo",
+            "version": 1,
+            "exportado_en_utc": datetime.now(timezone.utc).isoformat(),
+            "app": "Movi Motors ERP",
+            "nota_usuarios": "erp_users sin password_hash. Restauración: volver a definir contraseñas en el módulo Usuarios o en Supabase.",
+        },
+    }
+    specs: list[tuple[str, str]] = [
+        ("categorias", "*"),
+        ("productos", "*"),
+        ("tasas_dia", "*"),
+        ("cajas_bancos", "*"),
+        ("erp_users", "id,username,nombre,email,rol,activo,created_at"),
+        ("ventas", "*"),
+        ("ventas_detalles", "*"),
+        ("compras", "*"),
+        ("compras_detalles", "*"),
+        ("cuentas_por_cobrar", "*"),
+        ("cuentas_por_pagar", "*"),
+        ("movimientos_caja", "*"),
+    ]
+    errs: list[dict[str, str]] = []
+    for tbl, cols in specs:
+        try:
+            payload[tbl] = sb.table(tbl).select(cols).execute().data or []
+        except Exception as ex:
+            errs.append({"tabla": tbl, "error": str(ex)})
+            payload[tbl] = []
+    if errs:
+        payload["meta"]["errores_al_exportar"] = errs
+    return payload
+
+
 def fmt_tri(usd: float, t_bs: float, t_usdt: float) -> str:
     usd = float(usd)
     return (
@@ -1836,6 +1898,27 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
     if not t:
         st.warning("Registre tasas en **Dashboard** (expander *Cargar / editar tasas en base de datos*) para ver equivalentes.")
 
+    with st.expander("Respaldo de inventario (antes de cambios masivos)", expanded=False):
+        st.caption(
+            "Descarga un **JSON** con **categorías** y **productos** tal como están en Supabase ahora. "
+            "Guardalo en tu PC o nube. La restauración es manual (SQL Editor / importación); ante dudas conservá varias copias fechadas."
+        )
+        try:
+            inv_payload = build_backup_inventario(sb)
+            ts = _backup_file_timestamp()
+            st.download_button(
+                label=f"Descargar respaldo inventario — movi_inventario_{ts}.json",
+                data=_json_backup_bytes(inv_payload),
+                file_name=f"movi_inventario_{ts}.json",
+                mime="application/json",
+                key="dl_backup_inventario",
+            )
+            n_cat = len(inv_payload.get("categorias") or [])
+            n_prod = len(inv_payload.get("productos") or [])
+            st.caption(f"Incluye **{n_cat}** categorías y **{n_prod}** productos.")
+        except Exception as e:
+            st.error(f"No se pudo generar el respaldo: {e}")
+
     cats = sb.table("categorias").select("id,nombre").order("nombre").execute()
     cat_opts = {c["nombre"]: c["id"] for c in (cats.data or [])}
 
@@ -2558,8 +2641,35 @@ def render_cambiar_mi_password(sb: Client, erp_uid: str) -> None:
 
 
 def module_mantenimiento(sb: Client) -> None:
-    st.subheader("Mantenimiento (peligroso)")
-    st.warning("Elimina movimientos, ventas y compras. Reinicia saldos de cajas a 0. No borra productos ni usuarios.")
+    st.subheader("Mantenimiento")
+    st.markdown("#### Respaldo de seguridad")
+    st.caption(
+        "Generá un archivo **JSON** con las tablas principales del ERP (ventas, compras, caja, productos, tasas, etc.). "
+        "**No** incluye `password_hash` de usuarios: si restaurás en otra base, tendrás que **reasignar contraseñas**."
+    )
+    try:
+        full_payload = build_backup_erp_completo(sb)
+        ts = _backup_file_timestamp()
+        st.download_button(
+            label=f"Descargar respaldo completo — movi_erp_completo_{ts}.json",
+            data=_json_backup_bytes(full_payload),
+            file_name=f"movi_erp_completo_{ts}.json",
+            mime="application/json",
+            key="dl_backup_erp_completo",
+        )
+        err_part = full_payload.get("meta", {}).get("errores_al_exportar")
+        if err_part:
+            st.warning("Algunas tablas fallaron al exportar (revisá permisos o columnas en Supabase).")
+            st.json(err_part)
+    except Exception as e:
+        st.error(f"No se pudo generar el respaldo completo: {e}")
+
+    st.divider()
+    st.markdown("#### Depuración (peligroso)")
+    st.warning(
+        "Elimina movimientos, ventas y compras. Reinicia saldos de cajas a 0. **No borra productos ni usuarios.** "
+        "**Descargá antes el respaldo completo** de arriba."
+    )
     palabra = st.text_input('Escribe ELIMINAR para confirmar')
     if st.button("Ejecutar depuración") and palabra.strip().upper() == "ELIMINAR":
         try:
