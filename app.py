@@ -2778,13 +2778,13 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
     cat_opts = {c["nombre"]: c["id"] for c in cats_list if c.get("nombre")}
     _id_to_nombre_cat, _nombre_a_id_cat, _cat_select_opts = _categoria_maps_from_rows(cats_list)
 
-    st.markdown("##### Categorías en base de datos")
-    st.caption("Lista leída directamente de la tabla `categorias` en Supabase (se actualiza al recargar la página).")
-    if cats_list:
-        st.dataframe(pd.DataFrame(cats_list), use_container_width=True, hide_index=True)
-        st.caption(f"**{len(cats_list)}** categoría(s).")
-    else:
-        st.info("Todavía no hay categorías en la base, o no se pudieron cargar. Creá la primera con el formulario de abajo.")
+    _n_cat_msg = len(cats_list)
+    st.caption(
+        f"Hay **{_n_cat_msg}** categoría(s) guardadas en la base. "
+        "Cuando tengas productos, más abajo podés elegir **una** en el menú para filtrar la tabla (o *Todas*)."
+    )
+    if _n_cat_msg == 0:
+        st.info("Todavía no hay categorías. Creá la primera con *Nueva categoría*.")
 
     with st.expander("Nueva categoría"):
         with st.form("f_cat"):
@@ -3053,10 +3053,35 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
     if df.empty:
         st.markdown("##### Productos")
         st.info(
-            "No hay **productos** en la base todavía. Las **categorías** arriba sí se listan desde `categorias`. "
-            "Cuando agregues productos (*Nuevo producto* o CSV), aparecerán el filtro y la grilla editable."
+            "No hay **productos** en la base todavía. Cuando agregues alguno (*Nuevo producto* o CSV), "
+            "vas a ver el menú para filtrar por categoría y la grilla para editar."
         )
         return
+
+    st.markdown("##### Productos")
+    _nombres_cat_ord = sorted(cat_opts.keys(), key=str.casefold)
+    _opts_filtro_cat = ["Todas las categorías"] + _nombres_cat_ord + ["(Sin categoría)"]
+    _sel_una_cat = st.selectbox(
+        "Mostrar productos de…",
+        options=_opts_filtro_cat,
+        index=0,
+        key="inv_filtro_una_categoria",
+        help="Una categoría a la vez. *Todas* muestra todo; *(Sin categoría)* solo los que no tienen categoría.",
+    )
+    df_view = df
+    if _sel_una_cat == "(Sin categoría)":
+        if "categoria_id" in df.columns:
+            _m_sin_id = df["categoria_id"].isna() | (df["categoria_id"].astype(str).str.strip() == "")
+        else:
+            _m_sin_id = pd.Series(True, index=df.index)
+        _m_sin_nom = df["categoria"].fillna("").astype(str).str.strip() == ""
+        df_view = df.loc[_m_sin_id | _m_sin_nom]
+    elif _sel_una_cat != "Todas las categorías":
+        _cid_f = cat_opts.get(_sel_una_cat)
+        if _cid_f is not None and "categoria_id" in df.columns:
+            df_view = df.loc[df["categoria_id"].astype(str) == str(_cid_f)]
+        else:
+            df_view = df.loc[df["categoria"].fillna("").astype(str).str.strip() == _sel_una_cat]
 
     _inv_q = st.text_input(
         "Filtrar por código o descripción",
@@ -3064,15 +3089,14 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
         key="inv_prod_filter",
         placeholder="Ej. filtro, SKU…",
     )
-    df_view = df
     if _inv_q.strip():
         _q = _inv_q.strip().lower()
-        _m = df["descripcion"].astype(str).str.lower().str.contains(_q, na=False) | df["codigo"].fillna(
-            ""
-        ).astype(str).str.lower().str.contains(_q, na=False)
-        df_view = df.loc[_m]
+        _m = df_view["descripcion"].astype(str).str.lower().str.contains(_q, na=False) | df_view[
+            "codigo"
+        ].fillna("").astype(str).str.lower().str.contains(_q, na=False)
+        df_view = df_view.loc[_m]
     if df_view.empty:
-        st.info("No hay productos con ese filtro.")
+        st.info("No hay productos con esa categoría o con ese texto de búsqueda.")
         return
 
     st.caption(
