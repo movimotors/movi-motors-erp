@@ -518,8 +518,9 @@ def _refresh_productos_bs_equiv_note(sb: Client, t_oper: float) -> str:
 def maybe_auto_sync_tasas_from_web(sb: Client) -> dict[str, Any] | None:
     """
     Si el USD×Bs web difiere del guardado (abs ≥ AUTO_TASA_ABS_MIN_BS y/o rel ≥ AUTO_TASA_SYNC_REL_MIN),
-    hace upsert del día (Caracas): paralelo, tasa_bs, P2P, EUR; **no modifica BCV manual**.
-    Tras guardar tasas, llama `refresh_productos_bs_equiv` para actualizar precio_v_bs_ref y costo_bs_ref.
+    hace upsert del día (Caracas): actualiza **mercado (paralelo)** desde web; **no pisa el BCV** que tengas guardado.
+    `tasa_bs` sigue **BCV** si en el último guardado estabas operando con BCV; si operabas con mercado, sigue el paralelo web.
+    Tras guardar, llama `refresh_productos_bs_equiv` con esa `tasa_bs`.
     """
     t_latest = latest_tasas(sb)
     if not t_latest:
@@ -569,7 +570,21 @@ def maybe_auto_sync_tasas_from_web(sb: Client) -> dict[str, Any] | None:
         p2p = _nf(base.get("p2p_bs_por_usdt")) or _nf(t_latest.get("p2p_bs_por_usdt")) or float(ves)
 
     par = float(ves)
-    t_oper = par
+    prev_tb = _nf(base.get("tasa_bs"))
+    prev_bcv = _nf(base.get("bcv_bs_por_usd")) or prev_tb
+    prev_par = _nf(base.get("paralelo_bs_por_usd")) or prev_tb
+    if (
+        prev_tb is not None
+        and prev_bcv is not None
+        and prev_par is not None
+        and float(prev_bcv) > 0
+        and float(prev_par) > 0
+    ):
+        d_b = abs(float(prev_tb) - float(prev_bcv))
+        d_p = abs(float(prev_tb) - float(prev_par))
+        t_oper = float(bcv) if d_b <= d_p else par
+    else:
+        t_oper = par
     row = {
         "fecha": str(hoy),
         "tasa_bs": float(t_oper),
@@ -583,8 +598,13 @@ def maybe_auto_sync_tasas_from_web(sb: Client) -> dict[str, Any] | None:
         sb.table("tasas_dia").upsert(row, on_conflict="fecha").execute()
         st.session_state["_auto_tasas_sync_mono"] = now
         prod_note = _refresh_productos_bs_equiv_note(sb, float(t_oper))
+        modo = (
+            "tasa_bs = BCV guardado"
+            if abs(float(t_oper) - float(bcv)) < 1e-6
+            else "tasa_bs = mercado (paralelo web)"
+        )
         st.session_state["_tasas_auto_sync_msg"] = (
-            f"Tasas auto: Bs/USD {par:,.2f} (antes {saved_par:,.2f}).{prod_note}"
+            f"Tasas auto: paralelo web {par:,.2f} Bs/USD (antes {saved_par:,.2f}). {modo}.{prod_note}"
         )
     except Exception:
         pass
@@ -661,14 +681,24 @@ def build_tasas_tabla_detalle(t: dict[str, Any]) -> pd.DataFrame:
         )
 
     if bcv is not None:
-        add_row("USD × Bs — BCV oficial", bcv, "Bolívares por 1 USD (oficial)", None)
+        add_row(
+            "USD × Bs — oficial BCV",
+            bcv,
+            "Bolívares por 1 USD — Banco Central de Venezuela (no es paralelo)",
+            None,
+        )
     if par is not None:
-        add_row("USD × Bs — paralelo", par, "Bolívares por 1 USD (mercado)", _pct_vs_bcv(par, bcv))
+        add_row(
+            "USD × Bs — mercado (paralelo)",
+            par,
+            "Bolívares por 1 USD — cotización alternativa al BCV (no es tasa oficial)",
+            _pct_vs_bcv(par, bcv),
+        )
     if t_bs_oper is not None:
         add_row(
             "USD × Bs — operativa (facturación)",
             t_bs_oper,
-            "La que usa el sistema en ventas/compras (tasa_bs)",
+            "Valor guardado como `tasa_bs` (elegiste BCV o mercado al guardar)",
             _pct_vs_bcv(t_bs_oper, bcv),
         )
     if eur_x_ves_bcv is not None:
@@ -685,9 +715,9 @@ def build_tasas_tabla_detalle(t: dict[str, Any]) -> pd.DataFrame:
             else None
         )
         add_row(
-            "EUR × VES — paralelo",
+            "EUR × VES — vía mercado (paralelo)",
             eur_x_ves_par,
-            f"Bs por 1 EUR = (USD×Bs paralelo) × ({float(usd_eur):.6f} USD por 1 EUR)",
+            f"Bs por 1 EUR = (USD×Bs mercado) × ({float(usd_eur):.6f} USD por 1 EUR)",
             pv_ev,
         )
     if p2p is not None:
@@ -710,6 +740,20 @@ def build_tasas_tabla_detalle(t: dict[str, Any]) -> pd.DataFrame:
         add_row("Ref. USD por 1 EUR", usd_eur, "1 EUR = X USD (dato para armar EUR×VES)", None)
 
     return pd.DataFrame(rows)
+
+
+def _infer_tasa_bs_oper_index(lt: dict[str, Any]) -> int:
+    """0 = operar con BCV; 1 = operar con mercado — según último `tasa_bs` guardado."""
+    if not lt:
+        return 0
+    tb = _nf(lt.get("tasa_bs"))
+    b0 = _nf(lt.get("bcv_bs_por_usd")) or tb
+    p0 = _nf(lt.get("paralelo_bs_por_usd")) or tb
+    if tb is None or b0 is None or p0 is None:
+        return 0
+    d_b = abs(float(tb) - float(b0))
+    d_p = abs(float(tb) - float(p0))
+    return 0 if d_b <= d_p else 1
 
 
 def render_tabla_tasas_ui(df: pd.DataFrame) -> None:
@@ -808,9 +852,8 @@ def render_sidebar_cotizaciones(t: dict[str, Any] | None) -> None:
 
     with st.expander("Facturación · última cotización web", expanded=True):
         st.caption(
-            "Aquí la **referencia principal** es la **última cotización web**. "
-            "Ventas y compras siguen usando el valor **guardado en BD** hasta que lo actualices "
-            "en **Dashboard** (guardar tasas en BD) o el **auto-sync** lo ajuste (si el mercado se aleja ≥0,5 %)."
+            "La **web** muestra **mercado** (no BCV oficial). Ventas/compras usan **`tasa_bs` en BD** "
+            "(BCV o mercado, según elegiste al guardar) hasta que actualices tasas o corra el **auto-sync**."
         )
         if live.get("ok") and ves is not None:
             st.metric(
@@ -1471,7 +1514,7 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
         _plotly_apply_dash_theme(fig_vc, title="Ventas vs compras (USD)")
         st.plotly_chart(fig_vc, use_container_width=True)
 
-    with st.expander("Tasas en vivo y tabla guardada (BCV / paralelo / P2P)", expanded=False):
+    with st.expander("Tasas en vivo y tabla guardada (BCV oficial · mercado · P2P)", expanded=False):
         render_tasas_tiempo_real(key_suffix="dash", t_guardado=t)
         if t:
             st.caption(f"Registro tasas **{t.get('fecha', '—')}**")
@@ -1481,7 +1524,7 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
 
     rol_dash = str(st.session_state.get("erp_rol", ""))
     if role_can(rol_dash, "tasas"):
-        with st.expander("Cargar / editar tasas en base de datos (BCV, paralelo, P2P)", expanded=False):
+        with st.expander("Cargar / editar tasas (BCV oficial, mercado, P2P)", expanded=False):
             module_tasas(sb, embedded=True)
 
     st.divider()
@@ -1507,12 +1550,14 @@ def module_tasas(sb: Client, *, embedded: bool = False) -> None:
     if not embedded:
         st.subheader("Tasas del día")
         st.caption(
-            "Guardas los cruces **USD×Bs**, **EUR×VES** (con *USD por 1 EUR*), **USDT×VES (P2P)** y la referencia **USDT por USD**. "
-            "La **tasa operativa** (`tasa_bs`) en ventas/compras es el **paralelo** (o BCV si no hay paralelo). "
-            "**Auto-actualización:** si el paralelo web cambia respecto al guardado "
-            f"(mín. **{AUTO_TASA_ABS_MIN_BS}** Bs/USD"
+            "Guardás **BCV oficial** (referencia legal), **mercado / paralelo** (cotización distinta al BCV), "
+            "**EUR** (vía *USD por 1 EUR*), **USDT×VES (P2P)** y **USDT por USD**. "
+            "En **Operativo** elegís si ventas/compras usan **BCV** o **mercado** para `tasa_bs`. "
+            "**Auto-sync web:** actualiza el campo mercado; **no cambia el BCV** que cargaste; "
+            "`tasa_bs` sigue en BCV si venías operando con BCV."
+            f" Dispara si el paralelo web se mueve ≥ **{AUTO_TASA_ABS_MIN_BS}** Bs/USD"
             + (f" o **≥{AUTO_TASA_SYNC_REL_MIN*100:.1f} %**" if AUTO_TASA_SYNC_REL_MIN > 0 else "")
-            + "), guarda el día (Caracas), recalcula equivalentes Bs en productos y **no modifica el BCV**."
+            + "."
         )
         st.info(
             "Si al guardar ves error de columna inexistente, ejecuta en Supabase el archivo "
@@ -1520,8 +1565,8 @@ def module_tasas(sb: Client, *, embedded: bool = False) -> None:
         )
     else:
         st.caption(
-            f"**tasa_bs** = paralelo (o BCV). Auto-sync web (~cada {int(AUTO_TASA_SYNC_MIN_SECONDS)}s si cambia ≥{AUTO_TASA_ABS_MIN_BS} Bs/USD) no modifica BCV. "
-            "Cotizaciones en vivo: expander *Tasas en vivo y tabla guardada* arriba en este panel."
+            f"Elegís **BCV** o **mercado** para `tasa_bs`. Auto-sync (~cada {int(AUTO_TASA_SYNC_MIN_SECONDS)}s, "
+            f"≥{AUTO_TASA_ABS_MIN_BS} Bs/USD) actualiza **mercado**; **no pisa BCV**; respeta si operabas con BCV."
         )
 
     lt = latest_tasas(sb) or {}
@@ -1534,9 +1579,9 @@ def module_tasas(sb: Client, *, embedded: bool = False) -> None:
     if not embedded:
         render_tasas_tiempo_real(key_suffix="tasas_mod", t_guardado=lt or None)
         if st.button(
-            "Aplicar tasas web al formulario (paralelo, EUR, P2P y USDT)",
+            "Aplicar tasas web al formulario (mercado, EUR, P2P y USDT)",
             key="apply_live_to_form",
-            help="No modifica el BCV oficial: debes cargarlo tú (p. ej. desde el BCV).",
+            help="Rellena **mercado (paralelo)** y cruces web. El **BCV oficial** lo cargás vos a mano.",
         ):
             snap = get_live_exchange_rates()
             if snap.get("ok"):
@@ -1547,9 +1592,9 @@ def module_tasas(sb: Client, *, embedded: bool = False) -> None:
         st.divider()
     else:
         if st.button(
-            "Rellenar formulario con tasas web (paralelo, EUR, P2P, USDT)",
+            "Rellenar formulario con tasas web (mercado, EUR, P2P, USDT)",
             key="apply_live_to_form_embed",
-            help="No cambia el BCV del formulario; solo trae datos web a los campos.",
+            help="Solo **mercado** y cruces web; el **BCV oficial** no se toca.",
         ):
             snap = get_live_exchange_rates()
             if snap.get("ok"):
@@ -1592,27 +1637,38 @@ def module_tasas(sb: Client, *, embedded: bool = False) -> None:
     )
 
     _form_id = "f_tasa_embed" if embedded else "f_tasa"
+    _oper_opts = ("BCV oficial (campo 1)", "Mercado / paralelo (campo 2)")
     with st.form(_form_id):
         f = st.date_input("Fecha", value=date.today())
-        st.markdown("**Cruces (lo que ves en tablas y dashboard)**")
+        st.markdown("**1 · Tasa oficial BCV**")
+        st.caption(
+            "Tipo de cambio **legal** del **Banco Central de Venezuela**. "
+            "No es el paralelo: el mercado va en el bloque siguiente."
+        )
         bcv = st.number_input(
-            "USD × Bs — BCV oficial (Bs por 1 USD)",
+            "Bs por 1 USD — oficial BCV",
             min_value=0.00000001,
             value=dv("bcv_bs_por_usd", dv("tasa_bs", 36.5)),
             format="%.8f",
         )
+        st.markdown("**2 · Mercado (paralelo)**")
+        st.caption(
+            "Cotización **alternativa al BCV** (paralelo, referencia web, etc.). "
+            "Si solo facturás con BCV, podés dejar el mismo valor que arriba."
+        )
         par = st.number_input(
-            "USD × Bs — paralelo (Bs por 1 USD)",
+            "Bs por 1 USD — mercado / paralelo",
             min_value=0.00000001,
             value=par_def,
             format="%.8f",
         )
+        st.markdown("**3 · Otros cruces (tablas y dashboard)**")
         usd_eur = st.number_input(
-            "USD por 1 EUR (para calcular EUR×VES = paralelo × este valor)",
+            "USD por 1 EUR (referencia para EUR×VES en el detalle)",
             min_value=0.00000001,
             value=eur_def,
             format="%.8f",
-            help="Ej. 1 EUR = 1,08 USD → 1.08. Con el paralelo armas EUR×VES.",
+            help="En el detalle verás EUR×VES calculado con BCV y otro con mercado, según estos campos.",
         )
         p2p = st.number_input(
             "USDT × VES — P2P (Bs por 1 USDT)",
@@ -1620,7 +1676,7 @@ def module_tasas(sb: Client, *, embedded: bool = False) -> None:
             value=p2p_def,
             format="%.8f",
         )
-        st.markdown("**Operativo (facturación / sistema)**")
+        st.markdown("**4 · Operativo (facturación / sistema)**")
         t_usdt = st.number_input(
             "USDT por 1 USD (referencia)",
             min_value=0.00000001,
@@ -1628,8 +1684,16 @@ def module_tasas(sb: Client, *, embedded: bool = False) -> None:
             format="%.8f",
             help="Para USD↔USDT en pantallas y el equivalente USD×Bs vía P2P.",
         )
-        t_oper = par if par > 0 else bcv
-        st.caption(f"Tasa **tasa_bs** guardada para documentos: **{t_oper:,.4f}** Bs/USD (paralelo o BCV).")
+        oper_sel = st.radio(
+            "Para ventas, compras y campo `tasa_bs` en base de datos, usar:",
+            options=_oper_opts,
+            index=_infer_tasa_bs_oper_index(lt),
+            horizontal=True,
+            help="Elegí explícitamente si los documentos usan el BCV oficial o la tasa de mercado.",
+        )
+        t_oper = float(bcv) if oper_sel == _oper_opts[0] else float(par)
+        _lbl = "BCV oficial" if oper_sel == _oper_opts[0] else "mercado / paralelo"
+        st.caption(f"Se guardará **tasa_bs** = **{t_oper:,.4f}** Bs/USD (**{_lbl}**).")
         if st.form_submit_button("Guardar / actualizar"):
             if bcv <= 0 or par <= 0 or t_usdt <= 0 or usd_eur <= 0 or p2p <= 0:
                 st.error("Todos los valores deben ser mayores que cero.")
