@@ -721,21 +721,46 @@ def render_sidebar_cotizaciones(t: dict[str, Any] | None) -> None:
         else:
             st.caption("Sin P2P hasta que carguen datos web.")
 
-    with st.expander("Facturación (base de datos)", expanded=True):
-        st.caption("Lo que usan ventas y compras hasta que guardes nuevas tasas")
-        if t:
+    with st.expander("Facturación · última cotización web", expanded=True):
+        st.caption(
+            "Aquí la **referencia principal** es la **última cotización web**. "
+            "Ventas y compras siguen usando el valor **guardado en BD** hasta que lo actualices "
+            "en *Tasas del día* o el **auto-sync** lo ajuste (si el mercado se aleja ≥0,5 %)."
+        )
+        if live.get("ok") and ves is not None:
             st.metric(
-                "Bs por 1 USD (operativo)",
-                f"{float(t['tasa_bs']):,.2f}",
+                "Bs por 1 USD (última web)",
+                f"{float(ves):,.2f}",
                 delta_color="off",
             )
             st.metric(
-                "USDT por 1 USD",
+                "USDT por 1 USD (última web)",
+                f"{float(ut_ref):,.6f}",
+                delta_color="off",
+            )
+        else:
+            st.warning("Sin cotización web ahora. Revisa conexión o **Mercado en vivo**.")
+
+        st.divider()
+        st.caption("**En documentos hoy** (Supabase · `tasa_bs` / `tasa_usdt`)")
+        if t:
+            tb = float(t["tasa_bs"])
+            delta_bd = None
+            if live.get("ok") and ves is not None:
+                delta_bd = f"{tb - float(ves):+,.2f} vs última web"
+            st.metric(
+                "Bs por 1 USD (guardado)",
+                f"{tb:,.2f}",
+                delta=delta_bd,
+                delta_color="off",
+            )
+            st.metric(
+                "USDT por 1 USD (guardado)",
                 f"{float(t['tasa_usdt']):,.6f}",
                 delta_color="off",
             )
         else:
-            st.warning("Aún no hay tasas cargadas. Entra a **Tasas del día**.")
+            st.info("No hay tasas en base de datos. Entra a **Tasas del día**.")
 
 
 def render_tasas_tiempo_real(*, key_suffix: str, t_guardado: dict[str, Any] | None) -> dict[str, Any]:
