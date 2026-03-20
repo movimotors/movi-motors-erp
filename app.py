@@ -759,6 +759,18 @@ def _infer_tasa_bs_oper_index(lt: dict[str, Any]) -> int:
 DOC_TASA_BS_OPTS = ("BCV oficial", "P2P Binance (mercado)")
 
 
+def _monto_nativo_a_usd(mon: str, monto: float, t_bs: float, t_usdt: float) -> float:
+    """Convierte monto cobrado en VES / USD / USDT a equivalente USD (tasas de la venta)."""
+    u = (mon or "").strip().upper()
+    if u == "USD":
+        return float(monto)
+    if u == "USDT":
+        return float(monto) / float(t_usdt) if t_usdt else 0.0
+    if u in ("VES", "BS"):
+        return float(monto) / float(t_bs) if t_bs else 0.0
+    return 0.0
+
+
 def _tasa_bs_para_documento(t: dict[str, Any], *, usar_bcv: bool) -> float:
     """Bs por 1 USD para esta venta/compra: BCV o ref. mercado (campo P2P). Los montos USD van 1:1."""
     tb = _nf(t.get("tasa_bs"))
@@ -1093,6 +1105,85 @@ def _dash_semaforo(*, stock: float, minimo: float, vendido_periodo: float) -> st
     if vendido_periodo < 0.001 and stock > minimo:
         return "🟡 Baja rotación"
     return "🟢 OK"
+
+
+def _dashboard_resumen_cobros_por_moneda(sb: Client, *, d_a: date, r_fut: str) -> None:
+    """Ingresos a caja en el período: totales VES / USD / USDT y detalle por cuenta."""
+    dsl = d_a.isoformat()
+    try:
+        mh = (
+            sb.table("movimientos_caja")
+            .select("caja_id, monto_usd, moneda, monto_moneda, concepto, created_at")
+            .eq("tipo", "Ingreso")
+            .gte("created_at", dsl)
+            .lte("created_at", r_fut)
+            .execute()
+        )
+    except Exception:
+        st.caption(
+            "Para ver cobros en **Bs / USD / USDT** por caja, ejecutá en Supabase "
+            "`supabase/patch_008_movimientos_moneda_cobros.sql`."
+        )
+        return
+
+    rows = mh.data or []
+    if not rows:
+        st.caption("Sin ingresos de caja en el período.")
+        return
+
+    caj_map = {
+        str(c["id"]): f"{c.get('nombre', '')} ({c.get('tipo', '')})"
+        for c in (sb.table("cajas_bancos").select("id,nombre,tipo").execute().data or [])
+    }
+
+    recs: list[dict[str, Any]] = []
+    tot_ves = tot_usdt = tot_usd_cash = 0.0
+    sum_equiv_usd = 0.0
+    for r in rows:
+        mon = (r.get("moneda") or "USD").strip().upper()
+        mm = r.get("monto_moneda")
+        mu = float(r.get("monto_usd") or 0)
+        sum_equiv_usd += mu
+        native = float(mm) if mm is not None else mu
+        if mon == "VES":
+            tot_ves += native
+        elif mon == "USDT":
+            tot_usdt += native
+        else:
+            tot_usd_cash += native
+        recs.append(
+            {
+                "Fecha": str(r.get("created_at", ""))[:19],
+                "Caja": caj_map.get(str(r.get("caja_id")), str(r.get("caja_id"))),
+                "Moneda": mon,
+                "Monto moneda": native,
+                "Equiv. USD": mu,
+                "Concepto": (r.get("concepto") or "")[:80],
+            }
+        )
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("Cobrado VES (Bs)", f"{tot_ves:,.2f}")
+    with m2:
+        st.metric("Cobrado USDT", f"{tot_usdt:,.4f}")
+    with m3:
+        st.metric("Cobrado USD", f"US$ {tot_usd_cash:,.2f}")
+    with m4:
+        st.metric("Ingresos (equiv. USD)", f"US$ {sum_equiv_usd:,.2f}")
+
+    st.caption(
+        "Equiv. USD es lo que suma al **saldo de cada caja** (VES y USDT convertidos con la tasa de la venta / cobro)."
+    )
+    st.dataframe(
+        pd.DataFrame(recs).sort_values("Fecha", ascending=False),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Monto moneda": st.column_config.NumberColumn(format="%.4f"),
+            "Equiv. USD": st.column_config.NumberColumn(format="%.2f"),
+        },
+    )
 
 
 def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
@@ -1485,6 +1576,9 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
         fig_ie.update_traces(marker_line_width=0)
         _plotly_apply_dash_theme(fig_ie, title="Ingresos y egresos por día")
         st.plotly_chart(fig_ie, use_container_width=True)
+
+    st.markdown("##### Resumen: qué entró en Bs, USD y USDT (y en qué cuenta)")
+    _dashboard_resumen_cobros_por_moneda(sb, d_a=d_a, r_fut=r_fut)
 
     vrows = sb.table("ventas").select("fecha, total_usd").gte("fecha", str(d_a)).lte("fecha", r_fut).execute()
     crows = sb.table("compras").select("fecha, total_usd").gte("fecha", str(d_a)).lte("fecha", r_fut).execute()
@@ -1888,10 +1982,20 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             {"producto_id": str(plist[0]["id"]), "cantidad": 1.0, "precio_unitario_usd": id_to_price[str(plist[0]["id"])]}
         ]
 
+    st.session_state.setdefault("venta_n_cobros", 1)
+    b1, b2 = st.columns([1, 3])
+    with b1:
+        if st.button("➕ Otro medio de cobro", help="Suma una fila VES / USD / USDT en la misma venta al contado"):
+            st.session_state["venta_n_cobros"] = min(10, int(st.session_state.get("venta_n_cobros", 1)) + 1)
+            st.rerun()
+    with b2:
+        if st.button("↺ Una sola fila de cobro", help="Vuelve a un solo medio de pago"):
+            st.session_state["venta_n_cobros"] = 1
+            st.rerun()
+
     with st.form("f_venta"):
         cliente = st.text_input("Cliente")
         forma = st.selectbox("Forma de pago", ["contado", "credito"])
-        caja_label = st.selectbox("Caja (solo contado)", options=list(cj.keys())) if cj else None
         fv = st.date_input("Vencimiento (crédito)", value=date.today() + timedelta(days=30))
         notas = st.text_area("Notas")
 
@@ -1901,7 +2005,7 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             index=_infer_tasa_bs_oper_index(t),
             horizontal=True,
             key="venta_doc_tasa_bs",
-            help="No cambia los montos en USD de las líneas; solo qué Bs/USD se asocia a la venta.",
+            help="Sirve para convertir VES en equivalente USD al cuadrar cobros y para el registro de la venta.",
         )
 
         st.caption("Líneas (montos en USD)")
@@ -1919,36 +2023,112 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             pu = c3.number_input("P.U. USD", min_value=0.0, value=float(id_to_price.get(pid, 0)), format="%.2f", key=f"vpu_{i}")
             new_lines.append({"producto_id": pid, "cantidad": float(qty), "precio_unitario_usd": float(pu)})
 
+        est_total = round(sum(float(l["cantidad"]) * float(l["precio_unitario_usd"]) for l in new_lines), 2)
+
+        cobros_pl: list[dict[str, Any]] = []
+        if forma == "contado":
+            st.markdown("**Cobro al contado — por moneda y cuenta**")
+            st.caption(
+                f"Total venta **US$ {est_total:,.2f}**. La suma en USD equivalente de las filas debe coincidir (±0,05). "
+                "**VES** = bolívares cobrados; **USDT** = unidades USDT; **USD** = dólares en efectivo/banco."
+            )
+            if not cj:
+                st.error("No hay cajas activas. Cree una en el módulo Cajas.")
+            n_cob = int(st.session_state.get("venta_n_cobros", 1))
+            for i in range(n_cob):
+                r1, r2, r3 = st.columns([2, 1, 1])
+                ck = r1.selectbox(f"Caja cobro {i + 1}", options=list(cj.keys()), key=f"vcb_ck_{i}")
+                mon = r2.selectbox(
+                    "Moneda",
+                    options=["USD", "VES", "USDT"],
+                    key=f"vcb_mon_{i}",
+                    help="Monto en la moneda elegida (no en USD salvo que elija USD).",
+                )
+                default_m = float(est_total) if (n_cob == 1 and i == 0 and mon == "USD") else 0.0
+                mval = r3.number_input(
+                    f"Monto ({mon})",
+                    min_value=0.0,
+                    value=default_m,
+                    format="%.4f" if mon != "USD" else "%.2f",
+                    key=f"vcb_mv_{i}",
+                )
+                cobros_pl.append({"caja_key": ck, "moneda": mon, "monto": float(mval)})
+
         if st.form_submit_button("Registrar venta (atómica)"):
             try:
                 t_bs_doc = _tasa_bs_para_documento(t, usar_bcv=(doc_tasa == DOC_TASA_BS_OPTS[0]))
             except ValueError as e:
                 st.error(str(e))
             else:
-                payload = {
+                payload: dict[str, Any] = {
                     "p_usuario_id": erp_uid,
                     "p_cliente": cliente,
                     "p_forma_pago": forma,
-                    "p_caja_id": cj[caja_label] if forma == "contado" and caja_label else None,
+                    "p_caja_id": None,
                     "p_tasa_bs": t_bs_doc,
                     "p_tasa_usdt": t_usdt,
                     "p_fecha_vencimiento": str(fv) if forma == "credito" else None,
                     "p_notas": notas,
                     "p_lineas": new_lines,
                 }
-                try:
-                    sb.rpc("crear_venta_erp", payload).execute()
-                    st.success("Venta registrada.")
-                    st.session_state["venta_lines"] = [
-                        {
-                            "producto_id": str(plist[0]["id"]),
-                            "cantidad": 1.0,
-                            "precio_unitario_usd": id_to_price[str(plist[0]["id"])],
-                        }
-                    ]
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"No se pudo registrar: {e}")
+                if forma == "contado":
+                    if not cj:
+                        st.error("Sin cajas.")
+                    else:
+                        p_cobros = [
+                            {"caja_id": str(cj[row["caja_key"]]), "moneda": row["moneda"], "monto": row["monto"]}
+                            for row in cobros_pl
+                        ]
+                        sum_eq = round(
+                            sum(
+                                _monto_nativo_a_usd(r["moneda"], r["monto"], t_bs_doc, t_usdt) for r in p_cobros
+                            ),
+                            2,
+                        )
+                        if any(r["monto"] <= 0 for r in p_cobros):
+                            st.error("Cada línea de cobro debe tener monto > 0.")
+                        elif abs(sum_eq - est_total) > 0.05:
+                            st.error(
+                                f"Los cobros equivalen a ~**US$ {sum_eq:,.2f}**; el total de la venta es **US$ {est_total:,.2f}**."
+                            )
+                        else:
+                            payload["p_caja_id"] = str(p_cobros[0]["caja_id"])
+                            payload["p_cobros"] = p_cobros
+                            try:
+                                sb.rpc("crear_venta_erp", payload).execute()
+                                st.success("Venta registrada.")
+                                st.session_state["venta_lines"] = [
+                                    {
+                                        "producto_id": str(plist[0]["id"]),
+                                        "cantidad": 1.0,
+                                        "precio_unitario_usd": id_to_price[str(plist[0]["id"])],
+                                    }
+                                ]
+                                st.session_state["venta_n_cobros"] = 1
+                                st.rerun()
+                            except Exception as e:
+                                err = str(e)
+                                if "p_cobros" in err or "could not find" in err.lower():
+                                    st.error(
+                                        f"{err} · Si falta el parámetro en BD, ejecutá `supabase/patch_008_movimientos_moneda_cobros.sql`."
+                                    )
+                                else:
+                                    st.error(f"No se pudo registrar: {e}")
+                else:
+                    try:
+                        sb.rpc("crear_venta_erp", payload).execute()
+                        st.success("Venta registrada.")
+                        st.session_state["venta_lines"] = [
+                            {
+                                "producto_id": str(plist[0]["id"]),
+                                "cantidad": 1.0,
+                                "precio_unitario_usd": id_to_price[str(plist[0]["id"])],
+                            }
+                        ]
+                        st.session_state["venta_n_cobros"] = 1
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo registrar: {e}")
 
     if st.button("Añadir línea"):
         st.session_state["venta_lines"].append(
