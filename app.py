@@ -2717,57 +2717,6 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
     if not t:
         st.warning("Registre tasas en **Dashboard** (expander *Cargar / editar tasas en base de datos*) para ver equivalentes.")
 
-    with st.expander("Respaldo y restauración de inventario", expanded=False):
-        st.caption(
-            "Descargá un **JSON** con categorías y productos. Para **volver atrás**, subí ese archivo y pulsá restaurar "
-            "(un paso). Si hay ventas/compras que usan productos, la restauración de solo inventario puede fallar: "
-            "en ese caso usá el **respaldo completo** en Mantenimiento."
-        )
-        try:
-            inv_payload = build_backup_inventario(sb)
-            ts = _backup_file_timestamp()
-            st.download_button(
-                label=f"Descargar respaldo inventario — movi_inventario_{ts}.json",
-                data=_json_backup_bytes(inv_payload),
-                file_name=f"movi_inventario_{ts}.json",
-                mime="application/json",
-                key="dl_backup_inventario",
-            )
-            st.download_button(
-                label=f"Mismo respaldo (liviano .json.gz) — movi_inventario_{ts}.json.gz",
-                data=_json_backup_bytes_compact_gzip(inv_payload),
-                file_name=f"movi_inventario_{ts}.json.gz",
-                mime="application/gzip",
-                key="dl_backup_inventario_gz",
-            )
-            n_cat = len(inv_payload.get("categorias") or [])
-            n_prod = len(inv_payload.get("productos") or [])
-            st.caption(f"Incluye **{n_cat}** categorías y **{n_prod}** productos.")
-        except Exception as e:
-            st.error(f"No se pudo generar el respaldo: {e}")
-
-        st.divider()
-        st.markdown("**Restaurar inventario (1 clic)**")
-        up_inv = st.file_uploader("JSON o gzip de inventario", type=["json", "gz"], key="restore_inv_json")
-        c_inv = st.text_input("Escribe **RESTAURAR_INVENTARIO** para confirmar", key="restore_inv_ok")
-        if st.button("Restaurar inventario desde archivo", key="btn_restore_inv"):
-            if up_inv is None:
-                st.error("Subí el archivo JSON o .json.gz.")
-            elif c_inv.strip() != "RESTAURAR_INVENTARIO":
-                st.error("Confirmación incorrecta.")
-            else:
-                try:
-                    data_inv = decode_backup_upload_bytes(up_inv.getvalue())
-                except Exception as ex:
-                    st.error(f"Archivo inválido: {ex}")
-                else:
-                    ok_i, msg_i = restore_inventario_desde_json(sb, data_inv)
-                    if ok_i:
-                        st.success(msg_i)
-                        st.rerun()
-                    else:
-                        st.error(msg_i)
-
     try:
         cats = sb.table("categorias").select("id,nombre").order("nombre").execute()
         cats_list = cats.data or []
@@ -2778,65 +2727,272 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
     cat_opts = {c["nombre"]: c["id"] for c in cats_list if c.get("nombre")}
     _id_to_nombre_cat, _nombre_a_id_cat, _cat_select_opts = _categoria_maps_from_rows(cats_list)
 
-    _n_cat_msg = len(cats_list)
-    st.caption(
-        f"Hay **{_n_cat_msg}** categoría(s) guardadas en la base. "
-        "Cuando tengas productos, más abajo podés elegir **una** en el menú para filtrar la tabla (o *Todas*)."
-    )
-    if _n_cat_msg == 0:
-        st.info("Todavía no hay categorías. Creá la primera con *Nueva categoría*.")
+    df = _normalize_productos_inventario_df(_fetch_productos_inventario_df(sb))
+    if not df.empty:
+        if "categoria_id" in df.columns:
+            df["categoria"] = df["categoria_id"].apply(
+                lambda x: _id_to_nombre_cat.get(str(x).strip(), "")
+                if x is not None and not (isinstance(x, float) and pd.isna(x)) and str(x).strip()
+                else ""
+            )
+        else:
+            df["categoria"] = ""
+    else:
+        df["categoria"] = pd.Series(dtype=object)
 
-    with st.expander("Nueva categoría"):
-        with st.form("f_cat"):
-            cn = st.text_input("Nombre categoría")
-            submitted_cat = st.form_submit_button("Crear categoría")
-            if submitted_cat:
-                if not cn.strip():
-                    st.error("Escribí un nombre para la categoría.")
-                else:
+    st.caption(
+        f"**{len(cats_list)}** categoría(s) en la base. "
+        "Respaldo solo inventario y listados en PDF/Excel: **Mantenimiento** y **Reportes**."
+    )
+
+    st.markdown("##### Buscar y modificar productos")
+    st.caption(
+        "El **stock** baja con las **ventas** y sube con las **compras** (y cargas nuevas). "
+        "Si cambia el **precio de venta** o hacés un **ajuste de stock**, buscá el producto acá y editá abajo "
+        "(ficha rápida o tabla)."
+    )
+    _fc1, _fc2 = st.columns([2, 1])
+    with _fc1:
+        _inv_q = st.text_input(
+            "Buscar por código o nombre del producto",
+            value="",
+            key="inv_prod_filter",
+            placeholder="Escribí parte del código o de la descripción…",
+        )
+    with _fc2:
+        _nombres_cat_ord = sorted(cat_opts.keys(), key=str.casefold)
+        _opts_filtro_cat = ["Todas las categorías"] + _nombres_cat_ord + ["(Sin categoría)"]
+        _sel_una_cat = st.selectbox(
+            "Solo categoría",
+            options=_opts_filtro_cat,
+            index=0,
+            key="inv_filtro_una_categoria",
+            help="Filtrá por una categoría. Combinado con la búsqueda de texto.",
+        )
+
+    df_view = df
+    if not df.empty:
+        if _inv_q.strip():
+            _q = _inv_q.strip().lower()
+            _m_txt = df_view["descripcion"].astype(str).str.lower().str.contains(_q, na=False) | df_view[
+                "codigo"
+            ].fillna("").astype(str).str.lower().str.contains(_q, na=False)
+            df_view = df_view.loc[_m_txt]
+        if _sel_una_cat == "(Sin categoría)":
+            if "categoria_id" in df_view.columns:
+                _m_sin_id = df_view["categoria_id"].isna() | (df_view["categoria_id"].astype(str).str.strip() == "")
+            else:
+                _m_sin_id = pd.Series(True, index=df_view.index)
+            _m_sin_nom = df_view["categoria"].fillna("").astype(str).str.strip() == ""
+            df_view = df_view.loc[_m_sin_id | _m_sin_nom]
+        elif _sel_una_cat != "Todas las categorías":
+            _cid_f = cat_opts.get(_sel_una_cat)
+            if _cid_f is not None and "categoria_id" in df_view.columns:
+                df_view = df_view.loc[df_view["categoria_id"].astype(str) == str(_cid_f)]
+            else:
+                df_view = df_view.loc[df_view["categoria"].fillna("").astype(str).str.strip() == _sel_una_cat]
+
+    if df.empty:
+        st.info(
+            "No hay **productos** en la base. Más abajo podés **crear categorías y productos** o importar un **CSV**."
+        )
+    elif df_view.empty:
+        st.info("No hay productos que coincidan con la búsqueda o la categoría elegida.")
+    else:
+        with st.expander("Ficha rápida: cambiar precio o stock de **un** producto", expanded=False):
+            _max_ficha = 200
+            if len(df_view) > _max_ficha:
+                st.caption(
+                    f"Hay **{len(df_view)}** productos en pantalla. Afiná la búsqueda o la categoría "
+                    f"(menos de {_max_ficha}) para usar la ficha rápida."
+                )
+            else:
+                _labels: dict[str, str] = {}
+                for _, _r in df_view.iterrows():
+                    _cod = _export_cell_txt(_r.get("codigo")) or "—"
+                    _desc = _export_cell_txt(_r.get("descripcion")) or "—"
+                    _lid = str(_r.get("id") or "").strip()
+                    if not _lid:
+                        continue
+                    _lab = f"{_cod} · {_desc[:48]}" + ("" if len(_desc) <= 48 else "…")
+                    if _lab in _labels:
+                        _lab = f"{_lab} [{_lid[:8]}]"
+                    _labels[_lab] = _lid
+                _pick_labs = sorted(_labels.keys(), key=str.casefold)
+                _sel_lab = st.selectbox(
+                    "Elegí el producto",
+                    options=["—"] + _pick_labs,
+                    index=0,
+                    key="inv_ficha_producto_pick",
+                )
+                if _sel_lab != "—" and _sel_lab in _labels:
+                    _pid = _labels[_sel_lab]
+                    _row = df_view[df_view["id"].astype(str) == _pid]
+                    if len(_row) != 1:
+                        st.error("No se encontró el producto.")
+                    else:
+                        _rw = _row.iloc[0]
+                        with st.form("inv_ficha_prod_form"):
+                            st.caption(f"ID interno: `{_pid}` · Stock y precios se guardan en la base.")
+                            _ns = st.number_input(
+                                "Stock actual",
+                                min_value=0.0,
+                                value=float(_rw.get("stock_actual") or 0),
+                                step=0.001,
+                                format="%.3f",
+                                help="Las ventas/compras también mueven este valor.",
+                            )
+                            _nsmin = st.number_input(
+                                "Stock mínimo (alerta)",
+                                min_value=0.0,
+                                value=float(_rw.get("stock_minimo") or 0),
+                                step=0.001,
+                                format="%.3f",
+                            )
+                            _npv = st.number_input(
+                                "Precio venta USD",
+                                min_value=0.0,
+                                value=float(_rw.get("precio_v_usd") or 0),
+                                step=0.01,
+                                format="%.2f",
+                            )
+                            _nco = st.number_input(
+                                "Costo USD",
+                                min_value=0.0,
+                                value=float(_rw.get("costo_usd") or 0),
+                                step=0.01,
+                                format="%.2f",
+                            )
+                            if st.form_submit_button("Guardar este producto"):
+                                try:
+                                    sb.table("productos").update(
+                                        {
+                                            "stock_actual": float(_ns),
+                                            "stock_minimo": float(_nsmin),
+                                            "precio_v_usd": float(_npv),
+                                            "costo_usd": float(_nco),
+                                        }
+                                    ).eq("id", _pid).execute()
+                                    st.success("Cambios guardados.")
+                                    st.rerun()
+                                except Exception as ex:
+                                    st.error(str(ex))
+
+        crit_all = df[df["stock_actual"].astype(float) <= df["stock_minimo"].astype(float)]
+        if len(crit_all):
+            st.error(f"Alertas de stock crítico: {len(crit_all)} ítems")
+            st.dataframe(crit_all, use_container_width=True, hide_index=True)
+
+        st.markdown("**Tabla de productos** (podés editar varias filas y guardar una vez)")
+        st.caption(
+            "Columnas **precio_v_bs_ref** y **costo_bs_ref**: referencia en Bs según la última **tasa_bs** "
+            "guardada (se actualizan al guardar tasas o al auto-sync web). Los precios maestros siguen en USD. "
+            "**Categoría** se elige en la lista (vacío = sin categoría)."
+        )
+
+        _editor_cols = [c for c in df_view.columns if c != "categoria_id"]
+        _ed_df = df_view[_editor_cols].copy()
+        _disabled_cols = ["id"]
+        if "precio_v_bs_ref" in _ed_df.columns:
+            _disabled_cols.extend(["precio_v_bs_ref", "costo_bs_ref"])
+        _inv_col_cfg = {
+            "categoria": st.column_config.SelectboxColumn(
+                "Categoría",
+                options=_cat_select_opts,
+            ),
+        }
+        edited = st.data_editor(
+            _ed_df,
+            num_rows="fixed",
+            disabled=_disabled_cols,
+            column_config=_inv_col_cfg,
+            use_container_width=True,
+            key="editor_prod",
+        )
+        if st.button("Guardar cambios de inventario"):
+            for _, row in edited.iterrows():
+                _cv = row.get("categoria")
+                if _cv is None or (isinstance(_cv, float) and pd.isna(_cv)):
+                    _cv = ""
+                _cv = str(_cv).strip()
+                _cid_up = _nombre_a_id_cat.get(_cv) if _cv else None
+                sb.table("productos").update(
+                    {
+                        "codigo": None
+                        if row.get("codigo") is None
+                        or (isinstance(row.get("codigo"), float) and pd.isna(row.get("codigo")))
+                        else (str(row.get("codigo")).strip() or None),
+                        "descripcion": str(row.get("descripcion") or ""),
+                        "stock_actual": float(row.get("stock_actual", 0)),
+                        "stock_minimo": float(row.get("stock_minimo", 0)),
+                        "costo_usd": float(row.get("costo_usd", 0)),
+                        "precio_v_usd": float(row.get("precio_v_usd", 0)),
+                        "activo": bool(row.get("activo", True)),
+                        "categoria_id": _cid_up,
+                    }
+                ).eq("id", str(row["id"])).execute()
+            st.success("Productos actualizados.")
+            st.rerun()
+
+    if not df.empty and df_view.empty:
+        crit_all = df[df["stock_actual"].astype(float) <= df["stock_minimo"].astype(float)]
+        if len(crit_all):
+            st.error(f"Alertas de stock crítico: {len(crit_all)} ítems")
+            st.dataframe(crit_all, use_container_width=True, hide_index=True)
+
+    st.divider()
+    with st.expander("Alta de productos (categorías y productos nuevos)", expanded=False):
+        _t_cat, _t_prod = st.tabs(["Nueva categoría", "Nuevo producto"])
+        with _t_cat:
+            with st.form("f_cat"):
+                cn = st.text_input("Nombre categoría", key="inv_alta_cat_nombre")
+                submitted_cat = st.form_submit_button("Crear categoría")
+                if submitted_cat:
+                    if not cn.strip():
+                        st.error("Escribí un nombre para la categoría.")
+                    else:
+                        try:
+                            sb.table("categorias").insert({"nombre": cn.strip()}).execute()
+                            st.success("Categoría guardada en la base.")
+                            st.rerun()
+                        except Exception as ex:
+                            st.error(
+                                f"No se pudo guardar. Si el nombre ya existe, elegí otro (las categorías son únicas). Detalle: {ex}"
+                            )
+        with _t_prod:
+            with st.form("f_prod"):
+                codigo = st.text_input("Código", key="inv_alta_prod_codigo")
+                desc = st.text_input("Descripción", max_chars=500, key="inv_alta_prod_desc")
+                stock = st.number_input("Stock actual", min_value=0.0, value=0.0, step=0.001, format="%.3f")
+                smin = st.number_input("Stock mínimo", min_value=0.0, value=0.0, step=0.001, format="%.3f")
+                costo = st.number_input("Costo USD", min_value=0.0, value=0.0, format="%.2f")
+                pv = st.number_input("Precio venta USD", min_value=0.0, value=0.0, format="%.2f")
+                cname = st.selectbox("Categoría", options=[""] + list(cat_opts.keys()), key="inv_alta_prod_cat")
+                cid = cat_opts.get(cname) if cname else None
+                if st.form_submit_button("Guardar producto"):
                     try:
-                        sb.table("categorias").insert({"nombre": cn.strip()}).execute()
-                        st.success("Categoría guardada en la base.")
+                        sb.table("productos").insert(
+                            {
+                                "codigo": codigo.strip() or None,
+                                "descripcion": desc.strip() or "Sin descripción",
+                                "stock_actual": float(stock),
+                                "stock_minimo": float(smin),
+                                "costo_usd": float(costo),
+                                "precio_v_usd": float(pv),
+                                "categoria_id": cid,
+                                "activo": True,
+                            }
+                        ).execute()
+                        st.success("Producto guardado en la base.")
                         st.rerun()
                     except Exception as ex:
-                        st.error(
-                            f"No se pudo guardar. Si el nombre ya existe, elegí otro (las categorías son únicas). Detalle: {ex}"
-                        )
-
-    with st.expander("Nuevo producto"):
-        with st.form("f_prod"):
-            codigo = st.text_input("Código")
-            desc = st.text_input("Descripción", max_chars=500)
-            stock = st.number_input("Stock actual", min_value=0.0, value=0.0, step=0.001, format="%.3f")
-            smin = st.number_input("Stock mínimo", min_value=0.0, value=0.0, step=0.001, format="%.3f")
-            costo = st.number_input("Costo USD", min_value=0.0, value=0.0, format="%.2f")
-            pv = st.number_input("Precio venta USD", min_value=0.0, value=0.0, format="%.2f")
-            cname = st.selectbox("Categoría", options=[""] + list(cat_opts.keys()))
-            cid = cat_opts.get(cname) if cname else None
-            if st.form_submit_button("Guardar producto"):
-                try:
-                    sb.table("productos").insert(
-                        {
-                            "codigo": codigo.strip() or None,
-                            "descripcion": desc.strip() or "Sin descripción",
-                            "stock_actual": float(stock),
-                            "stock_minimo": float(smin),
-                            "costo_usd": float(costo),
-                            "precio_v_usd": float(pv),
-                            "categoria_id": cid,
-                            "activo": True,
-                        }
-                    ).execute()
-                    st.success("Producto guardado en la base.")
-                    st.rerun()
-                except Exception as ex:
-                    st.error(f"No se pudo guardar el producto (¿código duplicado o permisos en Supabase?): {ex}")
+                        st.error(f"No se pudo guardar el producto (¿código duplicado o permisos en Supabase?): {ex}")
 
     st.caption(
         "Carga masiva (CSV): columnas **codigo**, **descripcion**, **stock_actual**, **stock_minimo**, "
         "**costo_usd**, **precio_v_usd**; opcional **categoria** (nombre exacto o sin distinguir mayúsculas)."
     )
-    up = st.file_uploader("CSV", type=["csv"])
+    up = st.file_uploader("CSV", type=["csv"], key="inv_csv_upload")
     if up is not None:
         df_csv = pd.read_csv(up)
         required = {
@@ -2851,7 +3007,7 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
             st.error(f"Faltan columnas. Requeridas: {required}")
         else:
             df_csv.columns = [c.lower() for c in df_csv.columns]
-            if st.button("Insertar filas"):
+            if st.button("Insertar filas", key="inv_csv_insert"):
                 rows_csv = df_csv.to_dict(orient="records")
                 batch_ins: list[dict[str, Any]] = []
                 err_cat: list[str] = []
@@ -2883,363 +3039,6 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                     _insert_rows_batched(sb, "productos", batch_ins)
                     st.success(f"Insertados {len(batch_ins)} productos.")
                     st.rerun()
-
-    df = _normalize_productos_inventario_df(_fetch_productos_inventario_df(sb))
-
-    if not df.empty:
-        if "categoria_id" in df.columns:
-            df["categoria"] = df["categoria_id"].apply(
-                lambda x: _id_to_nombre_cat.get(str(x).strip(), "")
-                if x is not None and not (isinstance(x, float) and pd.isna(x)) and str(x).strip()
-                else ""
-            )
-        else:
-            df["categoria"] = ""
-    else:
-        df["categoria"] = pd.Series(dtype=object)
-
-    with st.expander("Imprimir / exportar listado", expanded=True):
-        st.caption(
-            "Elegí **categorías**, **rangos de costo y precio** (USD) y el **orden**. "
-            "Descargá **Excel (.xlsx)**, **PDF** o **HTML** (navegador → Ctrl+P). "
-            "Requiere `openpyxl` y `reportlab` (`py -m pip install -r requirements.txt`)."
-        )
-        _from_db = sorted(
-            {str(c.get("nombre") or "").strip() for c in cats_list if str(c.get("nombre") or "").strip()},
-            key=str.casefold,
-        )
-        _from_prod = (
-            sorted(
-                {str(x) for x in df["categoria"].map(_inv_cat_display).tolist() if str(x).strip()},
-                key=str.casefold,
-            )
-            if not df.empty and "categoria" in df.columns
-            else []
-        )
-        _lab_cat = sorted(set(_from_db) | set(_from_prod), key=str.casefold)
-        if not _lab_cat:
-            _lab_cat = ["(Sin categoría)"]
-        _pick_cat = st.multiselect(
-            "Categorías a incluir",
-            options=_lab_cat,
-            default=_lab_cat,
-            help="Quitá marcas para excluir categorías. Dejá todas marcadas para el catálogo completo.",
-            key="inv_print_cats",
-        )
-        _use_cats = _pick_cat if _pick_cat else _lab_cat
-        _ic1, _ic2 = st.columns(2)
-        with _ic1:
-            _solo_act = st.checkbox("Solo productos activos", value=True, key="inv_print_activos")
-        with _ic2:
-            _agrup_cat = st.checkbox("Agrupar por categoría en el impreso", value=True, key="inv_print_group")
-        _oc1, _oc2 = st.columns(2)
-        with _oc1:
-            st.markdown("**Costo USD**")
-            _cmin = st.number_input("Desde (0 = sin mínimo)", min_value=0.0, value=0.0, step=0.01, key="inv_print_cmin")
-            _cmax = st.number_input("Hasta (0 = sin máximo)", min_value=0.0, value=0.0, step=0.01, key="inv_print_cmax")
-        with _oc2:
-            st.markdown("**Precio venta USD**")
-            _pmin = st.number_input("Desde (0 = sin mínimo)", min_value=0.0, value=0.0, step=0.01, key="inv_print_pmin")
-            _pmax = st.number_input("Hasta (0 = sin máximo)", min_value=0.0, value=0.0, step=0.01, key="inv_print_pmax")
-        _orden_lbl = st.selectbox(
-            "Ordenar por",
-            options=[
-                "Descripción (A-Z)",
-                "Código (A-Z)",
-                "Costo USD: menor → mayor",
-                "Costo USD: mayor → menor",
-                "Precio venta USD: menor → mayor",
-                "Precio venta USD: mayor → menor",
-            ],
-            key="inv_print_sort",
-        )
-        _orden_map = {
-            "Descripción (A-Z)": "descripcion",
-            "Código (A-Z)": "codigo",
-            "Costo USD: menor → mayor": "costo_asc",
-            "Costo USD: mayor → menor": "costo_desc",
-            "Precio venta USD: menor → mayor": "precio_asc",
-            "Precio venta USD: mayor → menor": "precio_desc",
-        }
-        _orden_key = _orden_map[_orden_lbl]
-
-        _df_p = _df_inventario_filtrado_impresion(
-            df,
-            categorias_sel=_use_cats,
-            costo_min=float(_cmin),
-            costo_max=float(_cmax),
-            precio_min=float(_pmin),
-            precio_max=float(_pmax),
-            solo_activos=bool(_solo_act),
-        )
-        _parts_sub: list[str] = []
-        if _pick_cat and len(_pick_cat) < len(_lab_cat):
-            _parts_sub.append(f"categorías: {len(_pick_cat)} seleccionadas")
-        if _cmin > 0 or _cmax > 0:
-            _parts_sub.append(
-                f"costo USD {_cmin if _cmin > 0 else '…'} — {_cmax if _cmax > 0 else '…'}"
-            )
-        if _pmin > 0 or _pmax > 0:
-            _parts_sub.append(
-                f"precio USD {_pmin if _pmin > 0 else '…'} — {_pmax if _pmax > 0 else '…'}"
-            )
-        _parts_sub.append(_orden_lbl)
-        if _agrup_cat:
-            _parts_sub.append("agrupado por categoría")
-        _sub_f = " · ".join(_parts_sub)
-
-        if _df_p.empty:
-            st.warning(
-                "No hay **productos** que listar con esos filtros (o el inventario de productos está vacío). "
-                "Igual podés descargar Excel/PDF/HTML con encabezados o tabla vacía."
-            )
-            _df_out = _df_p
-        else:
-            _df_out = _df_inventario_orden_impresion(
-                _df_p, _orden_key, agrupar_categoria=bool(_agrup_cat)
-            )
-        _html_inv = _html_inventario_listado(
-            _df_out,
-            t,
-            agrupar_categoria=bool(_agrup_cat),
-            subtitulo_filtros=_sub_f,
-        )
-        _df_flat = _df_inventario_export_flat(_df_out)
-        _ts_p = _backup_file_timestamp()
-        _bx, _bp = st.columns(2)
-        with _bx:
-            try:
-                _xlsx_b = _xlsx_inventario_bytes(_df_flat)
-            except ImportError:
-                st.caption("Instalá **openpyxl** para exportar Excel.")
-            else:
-                st.download_button(
-                    label=f"Excel — inventario_{_ts_p}.xlsx",
-                    data=_xlsx_b,
-                    file_name=f"inventario_{_ts_p}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="dl_inv_print_xlsx",
-                    use_container_width=True,
-                )
-        with _bp:
-            try:
-                _pdf_b = _pdf_inventario_bytes(
-                    _df_out,
-                    t,
-                    agrupar_categoria=bool(_agrup_cat),
-                    subtitulo_filtros=_sub_f,
-                )
-            except ImportError:
-                st.caption("Instalá **reportlab** para exportar PDF.")
-            else:
-                st.download_button(
-                    label=f"PDF — inventario_{_ts_p}.pdf",
-                    data=_pdf_b,
-                    file_name=f"inventario_{_ts_p}.pdf",
-                    mime="application/pdf",
-                    key="dl_inv_print_pdf",
-                    use_container_width=True,
-                )
-        st.download_button(
-            label=f"HTML (imprimir en navegador) — inventario_{_ts_p}.html",
-            data=_html_inv.encode("utf-8"),
-            file_name=f"inventario_{_ts_p}.html",
-            mime="text/html",
-            key="dl_inv_print_html",
-        )
-        st.caption("Vista previa HTML (iframe; Ctrl+P o botón *Imprimir* si el navegador lo permite).")
-        components.html(_html_inv, height=520, scrolling=True)
-
-    if df.empty:
-        st.markdown("##### Productos")
-        st.info(
-            "No hay **productos** en la base todavía. Cuando agregues alguno (*Nuevo producto* o CSV), "
-            "vas a ver el menú para filtrar por categoría y la grilla para editar."
-        )
-        return
-
-    st.markdown("##### Buscar y modificar productos")
-    st.caption(
-        "El **stock** baja con las **ventas** y sube con las **compras** (y cargas nuevas). "
-        "Si cambia el **precio de venta** o hacés un **ajuste de stock**, buscá el producto acá y editá abajo "
-        "(ficha rápida o tabla)."
-    )
-    _fc1, _fc2 = st.columns([2, 1])
-    with _fc1:
-        _inv_q = st.text_input(
-            "Buscar por código o nombre del producto",
-            value="",
-            key="inv_prod_filter",
-            placeholder="Escribí parte del código o de la descripción…",
-        )
-    with _fc2:
-        _nombres_cat_ord = sorted(cat_opts.keys(), key=str.casefold)
-        _opts_filtro_cat = ["Todas las categorías"] + _nombres_cat_ord + ["(Sin categoría)"]
-        _sel_una_cat = st.selectbox(
-            "Solo categoría",
-            options=_opts_filtro_cat,
-            index=0,
-            key="inv_filtro_una_categoria",
-            help="Filtrá por una categoría. Combinado con la búsqueda de texto.",
-        )
-
-    df_view = df
-    if _inv_q.strip():
-        _q = _inv_q.strip().lower()
-        _m_txt = df_view["descripcion"].astype(str).str.lower().str.contains(_q, na=False) | df_view[
-            "codigo"
-        ].fillna("").astype(str).str.lower().str.contains(_q, na=False)
-        df_view = df_view.loc[_m_txt]
-    if _sel_una_cat == "(Sin categoría)":
-        if "categoria_id" in df_view.columns:
-            _m_sin_id = df_view["categoria_id"].isna() | (df_view["categoria_id"].astype(str).str.strip() == "")
-        else:
-            _m_sin_id = pd.Series(True, index=df_view.index)
-        _m_sin_nom = df_view["categoria"].fillna("").astype(str).str.strip() == ""
-        df_view = df_view.loc[_m_sin_id | _m_sin_nom]
-    elif _sel_una_cat != "Todas las categorías":
-        _cid_f = cat_opts.get(_sel_una_cat)
-        if _cid_f is not None and "categoria_id" in df_view.columns:
-            df_view = df_view.loc[df_view["categoria_id"].astype(str) == str(_cid_f)]
-        else:
-            df_view = df_view.loc[df_view["categoria"].fillna("").astype(str).str.strip() == _sel_una_cat]
-
-    if df_view.empty:
-        st.info("No hay productos que coincidan con la búsqueda o la categoría elegida.")
-        return
-
-    with st.expander("Ficha rápida: cambiar precio o stock de **un** producto", expanded=False):
-        _max_ficha = 200
-        if len(df_view) > _max_ficha:
-            st.caption(
-                f"Hay **{len(df_view)}** productos en pantalla. Afiná la búsqueda o la categoría "
-                f"(menos de {_max_ficha}) para usar la ficha rápida."
-            )
-        else:
-            _labels: dict[str, str] = {}
-            for _, _r in df_view.iterrows():
-                _cod = _export_cell_txt(_r.get("codigo")) or "—"
-                _desc = _export_cell_txt(_r.get("descripcion")) or "—"
-                _lid = str(_r.get("id") or "").strip()
-                if not _lid:
-                    continue
-                _lab = f"{_cod} · {_desc[:48]}" + ("" if len(_desc) <= 48 else "…")
-                if _lab in _labels:
-                    _lab = f"{_lab} [{_lid[:8]}]"
-                _labels[_lab] = _lid
-            _pick_labs = sorted(_labels.keys(), key=str.casefold)
-            _sel_lab = st.selectbox(
-                "Elegí el producto",
-                options=["—"] + _pick_labs,
-                index=0,
-                key="inv_ficha_producto_pick",
-            )
-            if _sel_lab != "—" and _sel_lab in _labels:
-                _pid = _labels[_sel_lab]
-                _row = df_view[df_view["id"].astype(str) == _pid]
-                if len(_row) != 1:
-                    st.error("No se encontró el producto.")
-                else:
-                    _rw = _row.iloc[0]
-                    with st.form("inv_ficha_prod_form"):
-                        st.caption(f"ID interno: `{_pid}` · Stock y precios se guardan en la base.")
-                        _ns = st.number_input(
-                            "Stock actual",
-                            min_value=0.0,
-                            value=float(_rw.get("stock_actual") or 0),
-                            step=0.001,
-                            format="%.3f",
-                            help="Las ventas/compras también mueven este valor.",
-                        )
-                        _nsmin = st.number_input(
-                            "Stock mínimo (alerta)",
-                            min_value=0.0,
-                            value=float(_rw.get("stock_minimo") or 0),
-                            step=0.001,
-                            format="%.3f",
-                        )
-                        _npv = st.number_input(
-                            "Precio venta USD",
-                            min_value=0.0,
-                            value=float(_rw.get("precio_v_usd") or 0),
-                            step=0.01,
-                            format="%.2f",
-                        )
-                        _nco = st.number_input(
-                            "Costo USD",
-                            min_value=0.0,
-                            value=float(_rw.get("costo_usd") or 0),
-                            step=0.01,
-                            format="%.2f",
-                        )
-                        if st.form_submit_button("Guardar este producto"):
-                            try:
-                                sb.table("productos").update(
-                                    {
-                                        "stock_actual": float(_ns),
-                                        "stock_minimo": float(_nsmin),
-                                        "precio_v_usd": float(_npv),
-                                        "costo_usd": float(_nco),
-                                    }
-                                ).eq("id", _pid).execute()
-                                st.success("Cambios guardados.")
-                                st.rerun()
-                            except Exception as ex:
-                                st.error(str(ex))
-
-    st.markdown("**Tabla de productos** (podés editar varias filas y guardar una vez)")
-    st.caption(
-        "Columnas **precio_v_bs_ref** y **costo_bs_ref**: referencia en Bs según la última **tasa_bs** "
-        "guardada (se actualizan al guardar tasas o al auto-sync web). Los precios maestros siguen en USD. "
-        "**Categoría** se elige en la lista (vacío = sin categoría)."
-    )
-    crit_all = df[df["stock_actual"].astype(float) <= df["stock_minimo"].astype(float)]
-    if len(crit_all):
-        st.error(f"Alertas de stock crítico: {len(crit_all)} ítems")
-        st.dataframe(crit_all, use_container_width=True, hide_index=True)
-
-    _editor_cols = [c for c in df_view.columns if c != "categoria_id"]
-    _ed_df = df_view[_editor_cols].copy()
-    _disabled_cols = ["id"]
-    if "precio_v_bs_ref" in _ed_df.columns:
-        _disabled_cols.extend(["precio_v_bs_ref", "costo_bs_ref"])
-    _inv_col_cfg: dict[str, Any] = {
-        "categoria": st.column_config.SelectboxColumn(
-            "Categoría",
-            options=_cat_select_opts,
-        ),
-    }
-    edited = st.data_editor(
-        _ed_df,
-        num_rows="fixed",
-        disabled=_disabled_cols,
-        column_config=_inv_col_cfg,
-        use_container_width=True,
-        key="editor_prod",
-    )
-    if st.button("Guardar cambios de inventario"):
-        for _, row in edited.iterrows():
-            _cv = row.get("categoria")
-            if _cv is None or (isinstance(_cv, float) and pd.isna(_cv)):
-                _cv = ""
-            _cv = str(_cv).strip()
-            _cid_up = _nombre_a_id_cat.get(_cv) if _cv else None
-            sb.table("productos").update(
-                {
-                    "codigo": None
-                    if row.get("codigo") is None or (isinstance(row.get("codigo"), float) and pd.isna(row.get("codigo")))
-                    else (str(row.get("codigo")).strip() or None),
-                    "descripcion": str(row.get("descripcion") or ""),
-                    "stock_actual": float(row.get("stock_actual", 0)),
-                    "stock_minimo": float(row.get("stock_minimo", 0)),
-                    "costo_usd": float(row.get("costo_usd", 0)),
-                    "precio_v_usd": float(row.get("precio_v_usd", 0)),
-                    "activo": bool(row.get("activo", True)),
-                    "categoria_id": _cid_up,
-                }
-            ).eq("id", str(row["id"])).execute()
-        st.success("Productos actualizados.")
-        st.rerun()
 
 
 def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
@@ -3611,6 +3410,163 @@ def module_cajas(sb: Client, erp_uid: str) -> None:
                 st.error(str(e))
 
 
+def panel_reportes_inventario_export(sb: Client, t: dict[str, Any] | None) -> None:
+    if not t:
+        st.warning("Registrá tasas en el **Dashboard** para que el reporte muestre referencias en Bs.")
+        return
+    st.caption(
+        "Filtrá por categoría, costo o precio; descargá **Excel**, **PDF** o **HTML** para imprimir. "
+        "Requiere `openpyxl` y `reportlab`."
+    )
+    try:
+        cats_list_rp = (sb.table("categorias").select("id,nombre").order("nombre").execute().data or [])
+    except Exception:
+        cats_list_rp = []
+    _id_rp, _, _ = _categoria_maps_from_rows(cats_list_rp)
+    df = _normalize_productos_inventario_df(_fetch_productos_inventario_df(sb))
+    if not df.empty:
+        if "categoria_id" in df.columns:
+            df["categoria"] = df["categoria_id"].apply(
+                lambda x: _id_rp.get(str(x).strip(), "")
+                if x is not None and not (isinstance(x, float) and pd.isna(x)) and str(x).strip()
+                else ""
+            )
+        else:
+            df["categoria"] = ""
+    else:
+        df["categoria"] = pd.Series(dtype=object)
+
+    _from_db = sorted(
+        {str(c.get("nombre") or "").strip() for c in cats_list_rp if str(c.get("nombre") or "").strip()},
+        key=str.casefold,
+    )
+    _from_prod = (
+        sorted(
+            {str(x) for x in df["categoria"].map(_inv_cat_display).tolist() if str(x).strip()},
+            key=str.casefold,
+        )
+        if not df.empty and "categoria" in df.columns
+        else []
+    )
+    _lab_cat = sorted(set(_from_db) | set(_from_prod), key=str.casefold)
+    if not _lab_cat:
+        _lab_cat = ["(Sin categoría)"]
+    _pick_cat = st.multiselect(
+        "Categorías a incluir en el reporte",
+        options=_lab_cat,
+        default=_lab_cat,
+        key="rep_inv_print_cats",
+    )
+    _use_cats = _pick_cat if _pick_cat else _lab_cat
+    _ic1, _ic2 = st.columns(2)
+    with _ic1:
+        _solo_act = st.checkbox("Solo productos activos", value=True, key="rep_inv_print_act")
+    with _ic2:
+        _agrup_cat = st.checkbox("Agrupar por categoría en el impreso", value=True, key="rep_inv_print_grp")
+    _oc1, _oc2 = st.columns(2)
+    with _oc1:
+        st.markdown("**Costo USD**")
+        _cmin = st.number_input("Desde (0 = sin mínimo)", min_value=0.0, value=0.0, step=0.01, key="rep_inv_cmin")
+        _cmax = st.number_input("Hasta (0 = sin máximo)", min_value=0.0, value=0.0, step=0.01, key="rep_inv_cmax")
+    with _oc2:
+        st.markdown("**Precio venta USD**")
+        _pmin = st.number_input("Desde (0 = sin mínimo)", min_value=0.0, value=0.0, step=0.01, key="rep_inv_pmin")
+        _pmax = st.number_input("Hasta (0 = sin máximo)", min_value=0.0, value=0.0, step=0.01, key="rep_inv_pmax")
+    _orden_lbl = st.selectbox(
+        "Ordenar por",
+        options=[
+            "Descripción (A-Z)",
+            "Código (A-Z)",
+            "Costo USD: menor → mayor",
+            "Costo USD: mayor → menor",
+            "Precio venta USD: menor → mayor",
+            "Precio venta USD: mayor → menor",
+        ],
+        key="rep_inv_sort",
+    )
+    _orden_map = {
+        "Descripción (A-Z)": "descripcion",
+        "Código (A-Z)": "codigo",
+        "Costo USD: menor → mayor": "costo_asc",
+        "Costo USD: mayor → menor": "costo_desc",
+        "Precio venta USD: menor → mayor": "precio_asc",
+        "Precio venta USD: mayor → menor": "precio_desc",
+    }
+    _orden_key = _orden_map[_orden_lbl]
+
+    _df_p = _df_inventario_filtrado_impresion(
+        df,
+        categorias_sel=_use_cats,
+        costo_min=float(_cmin),
+        costo_max=float(_cmax),
+        precio_min=float(_pmin),
+        precio_max=float(_pmax),
+        solo_activos=bool(_solo_act),
+    )
+    _parts_sub: list[str] = []
+    if _pick_cat and len(_pick_cat) < len(_lab_cat):
+        _parts_sub.append(f"categorías: {len(_pick_cat)} seleccionadas")
+    if _cmin > 0 or _cmax > 0:
+        _parts_sub.append(f"costo USD {_cmin if _cmin > 0 else '…'} — {_cmax if _cmax > 0 else '…'}")
+    if _pmin > 0 or _pmax > 0:
+        _parts_sub.append(f"precio USD {_pmin if _pmin > 0 else '…'} — {_pmax if _pmax > 0 else '…'}")
+    _parts_sub.append(_orden_lbl)
+    if _agrup_cat:
+        _parts_sub.append("agrupado por categoría")
+    _sub_f = " · ".join(_parts_sub)
+
+    if _df_p.empty:
+        st.warning("No hay productos con esos filtros. Igual podés descargar archivos con solo encabezados.")
+        _df_out = _df_p
+    else:
+        _df_out = _df_inventario_orden_impresion(_df_p, _orden_key, agrupar_categoria=bool(_agrup_cat))
+    _html_inv = _html_inventario_listado(
+        _df_out, t, agrupar_categoria=bool(_agrup_cat), subtitulo_filtros=_sub_f
+    )
+    _df_flat = _df_inventario_export_flat(_df_out)
+    _ts_p = _backup_file_timestamp()
+    _bx, _bp = st.columns(2)
+    with _bx:
+        try:
+            _xlsx_b = _xlsx_inventario_bytes(_df_flat)
+        except ImportError:
+            st.caption("Instalá **openpyxl** para Excel.")
+        else:
+            st.download_button(
+                label=f"Excel — inventario_{_ts_p}.xlsx",
+                data=_xlsx_b,
+                file_name=f"inventario_{_ts_p}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="rep_inv_dl_xlsx",
+                use_container_width=True,
+            )
+    with _bp:
+        try:
+            _pdf_b = _pdf_inventario_bytes(
+                _df_out, t, agrupar_categoria=bool(_agrup_cat), subtitulo_filtros=_sub_f
+            )
+        except ImportError:
+            st.caption("Instalá **reportlab** para PDF.")
+        else:
+            st.download_button(
+                label=f"PDF — inventario_{_ts_p}.pdf",
+                data=_pdf_b,
+                file_name=f"inventario_{_ts_p}.pdf",
+                mime="application/pdf",
+                key="rep_inv_dl_pdf",
+                use_container_width=True,
+            )
+    st.download_button(
+        label=f"HTML — inventario_{_ts_p}.html",
+        data=_html_inv.encode("utf-8"),
+        file_name=f"inventario_{_ts_p}.html",
+        mime="text/html",
+        key="rep_inv_dl_html",
+    )
+    st.caption("Vista previa (Ctrl+P desde el recuadro o abrí el HTML descargado).")
+    components.html(_html_inv, height=480, scrolling=True)
+
+
 def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
     st.subheader("Reportes")
     if not t:
@@ -3618,91 +3574,101 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
     t_bs = float(t["tasa_bs"])
     t_usdt = float(t["tasa_usdt"])
 
-    d1, d2 = st.columns(2)
-    a = d1.date_input("Desde", value=date.today() - timedelta(days=30))
-    b = d2.date_input("Hasta", value=date.today())
+    tab_inv, tab_ven, tab_comp = st.tabs(["Inventario", "Ventas y cobranzas", "Compras y pagos"])
+    with tab_inv:
+        st.markdown("#### Listados de inventario")
+        panel_reportes_inventario_export(sb, t)
 
-    ventas = (
-        sb.table("ventas")
-        .select("numero, cliente, fecha, total_usd, forma_pago")
-        .gte("fecha", str(a))
-        .lte("fecha", f"{b}T23:59:59")
-        .order("fecha", desc=True)
-        .execute()
-    )
-    st.markdown("#### Ventas en rango")
-    if ventas.data:
-        dfv = pd.DataFrame(ventas.data)
-        dfv["equiv_bs"] = dfv["total_usd"].astype(float) * t_bs
-        dfv["fecha_d"] = pd.to_datetime(dfv["fecha"]).dt.date.astype(str)
-        st.dataframe(dfv, use_container_width=True, hide_index=True)
-        agg = dfv.groupby("fecha_d", as_index=False)["total_usd"].sum()
-        fig = px.bar(agg, x="fecha_d", y="total_usd", title="Total USD por día")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Sin ventas en el rango.")
+    with tab_ven:
+        st.markdown("#### Ventas y análisis")
+        d1, d2 = st.columns(2)
+        a = d1.date_input("Desde", value=date.today() - timedelta(days=30), key="rep_ven_desde")
+        b = d2.date_input("Hasta", value=date.today(), key="rep_ven_hasta")
 
-    st.markdown("#### Utilidad bruta por producto (histórico ventas en rango)")
-    vr = (
-        sb.table("ventas")
-        .select("id")
-        .gte("fecha", str(a))
-        .lte("fecha", f"{b}T23:59:59")
-        .execute()
-    )
-    vids = [str(x["id"]) for x in (vr.data or [])]
-    det_rows: list[dict[str, Any]] = []
-    if vids:
-        det = (
-            sb.table("ventas_detalles")
-            .select("producto_id, cantidad, precio_unitario_usd")
-            .in_("venta_id", vids)
+        ventas = (
+            sb.table("ventas")
+            .select("numero, cliente, fecha, total_usd, forma_pago")
+            .gte("fecha", str(a))
+            .lte("fecha", f"{b}T23:59:59")
+            .order("fecha", desc=True)
             .execute()
         )
-        det_rows = det.data or []
+        st.markdown("##### Ventas en el rango")
+        if ventas.data:
+            dfv = pd.DataFrame(ventas.data)
+            dfv["equiv_bs"] = dfv["total_usd"].astype(float) * t_bs
+            dfv["fecha_d"] = pd.to_datetime(dfv["fecha"]).dt.date.astype(str)
+            st.dataframe(dfv, use_container_width=True, hide_index=True)
+            agg = dfv.groupby("fecha_d", as_index=False)["total_usd"].sum()
+            fig = px.bar(agg, x="fecha_d", y="total_usd", title="Total USD por día")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Sin ventas en el rango.")
 
-    if det_rows:
-        pmap = {
-            str(p["id"]): p
-            for p in (sb.table("productos").select("id,descripcion,costo_usd").execute().data or [])
-        }
-        rows = []
-        for row in det_rows:
-            pid = str(row["producto_id"])
-            pr = pmap.get(pid, {})
-            desc = pr.get("descripcion", pid)
-            costo = float(pr.get("costo_usd") or 0)
-            cant = float(row["cantidad"])
-            pu = float(row["precio_unitario_usd"])
-            margin = (pu - costo) * cant
-            rows.append({"producto": desc, "utilidad_bruta_usd": margin})
-        dfm = pd.DataFrame(rows).groupby("producto", as_index=False)["utilidad_bruta_usd"].sum()
-        st.dataframe(dfm, use_container_width=True, hide_index=True)
-        st.caption(fmt_tri(float(dfm["utilidad_bruta_usd"].sum()), t_bs, t_usdt))
-    else:
-        st.info("Sin líneas de venta en el rango.")
+        st.markdown("##### Utilidad bruta por producto (mismo rango)")
+        vr = (
+            sb.table("ventas")
+            .select("id")
+            .gte("fecha", str(a))
+            .lte("fecha", f"{b}T23:59:59")
+            .execute()
+        )
+        vids = [str(x["id"]) for x in (vr.data or [])]
+        det_rows: list[dict[str, Any]] = []
+        if vids:
+            det = (
+                sb.table("ventas_detalles")
+                .select("producto_id, cantidad, precio_unitario_usd")
+                .in_("venta_id", vids)
+                .execute()
+            )
+            det_rows = det.data or []
 
-    st.markdown("#### Cuentas por cobrar")
-    cxc = sb.table("cuentas_por_cobrar").select("*").execute()
-    if cxc.data:
-        dfc = pd.DataFrame(cxc.data)
-        st.dataframe(dfc, use_container_width=True, hide_index=True)
-        pend = dfc[dfc["estado"].isin(["Pendiente", "Parcial"])]["monto_pendiente_usd"].astype(float).sum()
-        st.metric("Pendiente total USD", f"{pend:,.2f}")
-        st.caption(fmt_tri(pend, t_bs, t_usdt))
-    else:
-        st.info("Sin CXC.")
+        if det_rows:
+            pmap = {
+                str(p["id"]): p
+                for p in (sb.table("productos").select("id,descripcion,costo_usd").execute().data or [])
+            }
+            rows = []
+            for row in det_rows:
+                pid = str(row["producto_id"])
+                pr = pmap.get(pid, {})
+                desc = pr.get("descripcion", pid)
+                costo = float(pr.get("costo_usd") or 0)
+                cant = float(row["cantidad"])
+                pu = float(row["precio_unitario_usd"])
+                margin = (pu - costo) * cant
+                rows.append({"producto": desc, "utilidad_bruta_usd": margin})
+            dfm = pd.DataFrame(rows).groupby("producto", as_index=False)["utilidad_bruta_usd"].sum()
+            st.dataframe(dfm, use_container_width=True, hide_index=True)
+            st.caption(fmt_tri(float(dfm["utilidad_bruta_usd"].sum()), t_bs, t_usdt))
+        else:
+            st.info("Sin líneas de venta en el rango.")
 
-    st.markdown("#### Cuentas por pagar")
-    cxp = sb.table("cuentas_por_pagar").select("*").execute()
-    if cxp.data:
-        dfp = pd.DataFrame(cxp.data)
-        st.dataframe(dfp, use_container_width=True, hide_index=True)
-        pend_p = dfp[dfp["estado"].isin(["Pendiente", "Parcial"])]["monto_pendiente_usd"].astype(float).sum()
-        st.metric("Por pagar total USD", f"{pend_p:,.2f}")
-        st.caption(fmt_tri(pend_p, t_bs, t_usdt))
-    else:
-        st.info("Sin CXP.")
+        st.markdown("##### Cuentas por cobrar")
+        cxc = sb.table("cuentas_por_cobrar").select("*").execute()
+        if cxc.data:
+            dfc = pd.DataFrame(cxc.data)
+            st.dataframe(dfc, use_container_width=True, hide_index=True)
+            pend = dfc[dfc["estado"].isin(["Pendiente", "Parcial"])]["monto_pendiente_usd"].astype(float).sum()
+            st.metric("Pendiente total USD", f"{pend:,.2f}")
+            st.caption(fmt_tri(pend, t_bs, t_usdt))
+        else:
+            st.info("Sin CXC.")
+
+    with tab_comp:
+        st.markdown("#### Compras y cuentas por pagar")
+        st.caption("Listado de compras por fechas: usá el módulo **Compras** para el detalle operativo.")
+        st.markdown("##### Cuentas por pagar")
+        cxp = sb.table("cuentas_por_pagar").select("*").execute()
+        if cxp.data:
+            dfp = pd.DataFrame(cxp.data)
+            st.dataframe(dfp, use_container_width=True, hide_index=True)
+            pend_p = dfp[dfp["estado"].isin(["Pendiente", "Parcial"])]["monto_pendiente_usd"].astype(float).sum()
+            st.metric("Por pagar total USD", f"{pend_p:,.2f}")
+            st.caption(fmt_tri(pend_p, t_bs, t_usdt))
+        else:
+            st.info("Sin CXP.")
 
 
 def module_usuarios(sb: Client) -> None:
@@ -3852,6 +3818,58 @@ def render_cambiar_mi_password(sb: Client, erp_uid: str) -> None:
                         st.rerun()
 
 
+def panel_respaldo_inventario_mantenimiento(sb: Client) -> None:
+    """Respaldo y restauración JSON solo de categorías + productos (superusuario / Mantenimiento)."""
+    st.caption(
+        "Incluye **categorías** y **productos**. Para deshacer un cambio grande en el maestro de inventario. "
+        "Si hay ventas o compras que usan esos productos, restaurar solo inventario puede fallar: en ese caso usá el **respaldo completo** arriba."
+    )
+    try:
+        inv_payload = build_backup_inventario(sb)
+        ts = _backup_file_timestamp()
+        st.download_button(
+            label=f"Descargar respaldo inventario — movi_inventario_{ts}.json",
+            data=_json_backup_bytes(inv_payload),
+            file_name=f"movi_inventario_{ts}.json",
+            mime="application/json",
+            key="mnt_dl_backup_inventario",
+        )
+        st.download_button(
+            label=f"Mismo respaldo (.json.gz) — movi_inventario_{ts}.json.gz",
+            data=_json_backup_bytes_compact_gzip(inv_payload),
+            file_name=f"movi_inventario_{ts}.json.gz",
+            mime="application/gzip",
+            key="mnt_dl_backup_inventario_gz",
+        )
+        st.caption(
+            f"**{len(inv_payload.get('categorias') or [])}** categorías · **{len(inv_payload.get('productos') or [])}** productos."
+        )
+    except Exception as e:
+        st.error(f"No se pudo generar el respaldo de inventario: {e}")
+
+    st.divider()
+    st.markdown("**Restaurar inventario desde archivo**")
+    up_inv = st.file_uploader("JSON o gzip de inventario", type=["json", "gz"], key="mnt_restore_inv_json")
+    c_inv = st.text_input("Escribe **RESTAURAR_INVENTARIO** para confirmar", key="mnt_restore_inv_ok")
+    if st.button("Restaurar inventario ahora", key="mnt_btn_restore_inv"):
+        if up_inv is None:
+            st.error("Subí el archivo JSON o .json.gz.")
+        elif c_inv.strip() != "RESTAURAR_INVENTARIO":
+            st.error("Confirmación incorrecta.")
+        else:
+            try:
+                data_inv = decode_backup_upload_bytes(up_inv.getvalue())
+            except Exception as ex:
+                st.error(f"Archivo inválido: {ex}")
+            else:
+                ok_i, msg_i = restore_inventario_desde_json(sb, data_inv)
+                if ok_i:
+                    st.success(msg_i)
+                    st.rerun()
+                else:
+                    st.error(msg_i)
+
+
 def module_mantenimiento(sb: Client) -> None:
     st.subheader("Mantenimiento")
     st.markdown("#### Respaldo de seguridad")
@@ -3890,6 +3908,10 @@ def module_mantenimiento(sb: Client) -> None:
             st.json(err_part)
     except Exception as e:
         st.error(f"No se pudo generar el respaldo completo: {e}")
+
+    st.divider()
+    st.markdown("#### Respaldo y restauración — solo inventario")
+    panel_respaldo_inventario_mantenimiento(sb)
 
     st.divider()
     st.markdown("#### Restaurar todo desde respaldo (1 clic)")
