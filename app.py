@@ -22,9 +22,11 @@ import hashlib
 import hmac
 import json
 import secrets
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import bcrypt
 import pandas as pd
@@ -352,6 +354,95 @@ def latest_tasas(sb: Client) -> dict[str, Any] | None:
     return rows[0] if rows else None
 
 
+def _today_caracas() -> date:
+    return datetime.now(ZoneInfo("America/Caracas")).date()
+
+
+def _tasas_para_fecha(sb: Client, d: date) -> dict[str, Any] | None:
+    r = sb.table("tasas_dia").select("*").eq("fecha", str(d)).limit(1).execute()
+    row = (r.data or [None])[0]
+    return row if isinstance(row, dict) else None
+
+
+# Si el paralelo web (USD×Bs) difiere del guardado en ≥ esta fracción (0.005 = 0,5 %), se actualiza `tasas_dia` del día.
+AUTO_TASA_SYNC_REL_MIN = 0.005
+# Mínimo tiempo entre escrituras automáticas a Supabase (navegar la app no dispara docenas de upserts).
+AUTO_TASA_SYNC_MIN_SECONDS = 300.0
+
+
+def maybe_auto_sync_tasas_from_web(sb: Client) -> dict[str, Any] | None:
+    """
+    Compara el USD×Bs de internet con el paralelo/tasa operativa guardada.
+    Si la diferencia relativa supera AUTO_TASA_SYNC_REL_MIN, hace upsert del registro
+    de **hoy** (Caracas): actualiza paralelo, tasa_bs, P2P y USD/EUR web; **no modifica el BCV**
+    ya cargado (se toma del registro de hoy o del último guardado).
+    """
+    t_latest = latest_tasas(sb)
+    if not t_latest:
+        return None
+
+    now = time.monotonic()
+    last = float(st.session_state.get("_auto_tasas_sync_mono", 0.0))
+    if now - last < AUTO_TASA_SYNC_MIN_SECONDS:
+        return latest_tasas(sb)
+
+    live = get_live_exchange_rates()
+    if not live.get("ok"):
+        return latest_tasas(sb)
+
+    ves = _nf(live.get("ves_bs_por_usd"))
+    if ves is None or ves <= 0:
+        return latest_tasas(sb)
+
+    hoy = _today_caracas()
+    t_hoy = _tasas_para_fecha(sb, hoy)
+    base = t_hoy or t_latest
+    saved_par = _nf(base.get("paralelo_bs_por_usd")) or _nf(base.get("tasa_bs"))
+    if saved_par is None or saved_par <= 0:
+        return latest_tasas(sb)
+
+    rel_diff = abs(float(ves) - float(saved_par)) / float(saved_par)
+    if rel_diff < AUTO_TASA_SYNC_REL_MIN:
+        return latest_tasas(sb)
+
+    bcv = _nf(base.get("bcv_bs_por_usd"))
+    if bcv is None or bcv <= 0:
+        bcv = _nf(t_latest.get("bcv_bs_por_usd")) or _nf(t_latest.get("tasa_bs")) or float(saved_par)
+
+    tusdt = _nf(base.get("tasa_usdt")) or _nf(t_latest.get("tasa_usdt")) or 1.0
+    if tusdt <= 0:
+        tusdt = 1.0
+
+    usd_eur = _nf(live.get("usd_por_eur")) or _nf(base.get("usd_por_eur")) or _nf(t_latest.get("usd_por_eur")) or 1.08
+    if usd_eur <= 0:
+        usd_eur = 1.08
+
+    p2p = _nf(live.get("usdt_x_ves_p2p")) or _nf(live.get("p2p_bs_por_usdt_aprox"))
+    if p2p is None or p2p <= 0:
+        p2p = _nf(base.get("p2p_bs_por_usdt")) or _nf(t_latest.get("p2p_bs_por_usdt")) or float(ves)
+
+    par = float(ves)
+    t_oper = par
+    row = {
+        "fecha": str(hoy),
+        "tasa_bs": float(t_oper),
+        "tasa_usdt": float(tusdt),
+        "bcv_bs_por_usd": float(bcv),
+        "paralelo_bs_por_usd": float(par),
+        "usd_por_eur": float(usd_eur),
+        "p2p_bs_por_usdt": float(p2p),
+    }
+    try:
+        sb.table("tasas_dia").upsert(row, on_conflict="fecha").execute()
+        st.session_state["_auto_tasas_sync_mono"] = now
+        st.session_state["_tasas_auto_sync_msg"] = (
+            f"Tasas actualizadas solas: paralelo Bs/USD {par:,.2f} (antes {saved_par:,.2f}, Δ {rel_diff*100:.2f} %)."
+        )
+    except Exception:
+        pass
+    return latest_tasas(sb)
+
+
 def fmt_tri(usd: float, t_bs: float, t_usdt: float) -> str:
     usd = float(usd)
     return (
@@ -486,6 +577,42 @@ def get_live_exchange_rates() -> dict[str, Any]:
     from tasas_live import fetch_live_rates
 
     return fetch_live_rates()
+
+
+def render_sidebar_cotizaciones(t: dict[str, Any] | None) -> None:
+    """
+    La barra lateral mostraba solo tasa_bs de BD (no cambia hasta guardar en Tasas).
+    Aquí se muestra además la referencia web (misma caché ~2 min que el módulo Tasas).
+    """
+    r1, r2 = st.columns([4, 1])
+    with r1:
+        st.caption("**Mercado** (USD×Bs web, se renueva ~2 min)")
+    with r2:
+        if st.button("Act.", key="sidebar_refresh_live_rates", help="Forzar nueva consulta web ahora"):
+            get_live_exchange_rates.clear()
+            st.rerun()
+
+    live = get_live_exchange_rates()
+    ves = live.get("ves_bs_por_usd")
+    p2p = live.get("usdt_x_ves_p2p") or live.get("p2p_bs_por_usdt_aprox")
+    ut_ref = _nf(live.get("usdt_por_usd")) or 1.0
+
+    if live.get("ok") and ves is not None:
+        st.caption(fmt_tri(1.0, float(ves), float(ut_ref)).replace("**", ""))
+        if p2p is not None:
+            src = live.get("usdt_x_ves_p2p_source")
+            p2p_lbl = "Binance P2P" if src == "binance_p2p_median_buy" else "referencia"
+            st.caption(f"**USDT×VES** ({p2p_lbl}): Bs {float(p2p):,.4f} por 1 USDT")
+    else:
+        st.caption("Sin datos web aún.")
+        for err in (live.get("errors") or [])[:2]:
+            st.caption(str(err)[:120])
+
+    st.caption("**Facturación** (último guardado en *Tasas del día*)")
+    if t:
+        st.caption(fmt_tri(1.0, float(t["tasa_bs"]), float(t["tasa_usdt"])).replace("**", ""))
+    else:
+        st.caption("Sin tasas en base de datos.")
 
 
 def render_tasas_tiempo_real(*, key_suffix: str, t_guardado: dict[str, Any] | None) -> dict[str, Any]:
@@ -758,7 +885,9 @@ def module_tasas(sb: Client) -> None:
     st.subheader("Tasas del día")
     st.caption(
         "Guardas los cruces **USD×Bs**, **EUR×VES** (con *USD por 1 EUR*), **USDT×VES (P2P)** y la referencia **USDT por USD**. "
-        "La **tasa operativa** (`tasa_bs`) en ventas/compras es el **paralelo** (o BCV si no hay paralelo)."
+        "La **tasa operativa** (`tasa_bs`) en ventas/compras es el **paralelo** (o BCV si no hay paralelo). "
+        f"**Auto-actualización:** si el paralelo web difiere del guardado en **≥ {AUTO_TASA_SYNC_REL_MIN*100:.1f} %**, "
+        "el sistema guarda solo el registro de **hoy** (Caracas) con datos web; el **BCV oficial no se toca**."
     )
     st.info(
         "Si al guardar ves error de columna inexistente, ejecuta en Supabase el archivo "
@@ -1524,13 +1653,18 @@ def main() -> None:
     username = str(erp.get("username", ""))
 
     t = latest_tasas(sb)
+    t_synced = maybe_auto_sync_tasas_from_web(sb)
+    if t_synced is not None:
+        t = t_synced
+    _auto_msg = st.session_state.pop("_tasas_auto_sync_msg", None)
+    if _auto_msg:
+        st.toast(_auto_msg)
 
     with st.sidebar:
         render_brand_logo()
         st.caption("**Movi Motor's Importadora** · ERP")
         st.caption(f"{erp.get('nombre', username)} · **{rol}**")
-        if t:
-            st.caption(fmt_tri(1.0, float(t["tasa_bs"]), float(t["tasa_usdt"])).replace("**", ""))
+        render_sidebar_cotizaciones(t)
         render_cambiar_mi_password(sb, erp_uid)
         opts: list[str] = []
         if role_can(rol, "dashboard"):

@@ -1,0 +1,18 @@
+---
+description: Tras cambios en el ERP Movi, commit y push al repo remoto
+alwaysApply: true
+---
+
+# Sincronizar GitHub tras cambios en la aplicación
+
+Cuando modifiques **código, SQL, `requirements.txt`, `.streamlit/config.toml`, assets, docs del proyecto** u otros archivos versionados de este ERP (Streamlit + Supabase):
+
+1. **No** hagas commit de `.streamlit/secrets.toml`, `.env` ni claves.
+2. Ejecuta en el repo `c:\Proyectos IA\Movi` (o la raíz del workspace):
+   - `git status`
+   - `git add` de los archivos pertinentes (o `git add -A` respetando `.gitignore`)
+   - `git commit -m "mensaje claro del cambio"`
+   - `git push` a `origin` en la rama actual (suele ser `main`).
+3. Si `push` falla (auth, conflicto), intenta `git pull --rebase origin <rama>` y vuelve a `push`, o informa al usuario del error concreto.
+
+Si el usuario solo pidió una consulta sin tocar archivos, no hace falta commit.

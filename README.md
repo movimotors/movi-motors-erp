@@ -12,3 +12,7 @@ py -m streamlit run app.py
 ```
 
 El esquema anterior `supabase/schema.sql` es otra variante (auth de Supabase); no mezclar ambos en la misma base sin migrar.
+
+## Streamlit Community Cloud
+
+Para publicar la app en internet (sin dejar tu PC encendido), sigue **[DEPLOY_STREAMLIT_CLOUD.md](DEPLOY_STREAMLIT_CLOUD.md)**. Resumen: conectas el repo en [share.streamlit.io](https://share.streamlit.io), pones **Main file** `app.py` y copias los **Secrets** (mismo TOML que `secrets.toml`).
