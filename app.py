@@ -3058,47 +3058,136 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
         )
         return
 
-    st.markdown("##### Productos")
-    _nombres_cat_ord = sorted(cat_opts.keys(), key=str.casefold)
-    _opts_filtro_cat = ["Todas las categorías"] + _nombres_cat_ord + ["(Sin categoría)"]
-    _sel_una_cat = st.selectbox(
-        "Mostrar productos de…",
-        options=_opts_filtro_cat,
-        index=0,
-        key="inv_filtro_una_categoria",
-        help="Una categoría a la vez. *Todas* muestra todo; *(Sin categoría)* solo los que no tienen categoría.",
+    st.markdown("##### Buscar y modificar productos")
+    st.caption(
+        "El **stock** baja con las **ventas** y sube con las **compras** (y cargas nuevas). "
+        "Si cambia el **precio de venta** o hacés un **ajuste de stock**, buscá el producto acá y editá abajo "
+        "(ficha rápida o tabla)."
     )
-    df_view = df
-    if _sel_una_cat == "(Sin categoría)":
-        if "categoria_id" in df.columns:
-            _m_sin_id = df["categoria_id"].isna() | (df["categoria_id"].astype(str).str.strip() == "")
-        else:
-            _m_sin_id = pd.Series(True, index=df.index)
-        _m_sin_nom = df["categoria"].fillna("").astype(str).str.strip() == ""
-        df_view = df.loc[_m_sin_id | _m_sin_nom]
-    elif _sel_una_cat != "Todas las categorías":
-        _cid_f = cat_opts.get(_sel_una_cat)
-        if _cid_f is not None and "categoria_id" in df.columns:
-            df_view = df.loc[df["categoria_id"].astype(str) == str(_cid_f)]
-        else:
-            df_view = df.loc[df["categoria"].fillna("").astype(str).str.strip() == _sel_una_cat]
+    _fc1, _fc2 = st.columns([2, 1])
+    with _fc1:
+        _inv_q = st.text_input(
+            "Buscar por código o nombre del producto",
+            value="",
+            key="inv_prod_filter",
+            placeholder="Escribí parte del código o de la descripción…",
+        )
+    with _fc2:
+        _nombres_cat_ord = sorted(cat_opts.keys(), key=str.casefold)
+        _opts_filtro_cat = ["Todas las categorías"] + _nombres_cat_ord + ["(Sin categoría)"]
+        _sel_una_cat = st.selectbox(
+            "Solo categoría",
+            options=_opts_filtro_cat,
+            index=0,
+            key="inv_filtro_una_categoria",
+            help="Filtrá por una categoría. Combinado con la búsqueda de texto.",
+        )
 
-    _inv_q = st.text_input(
-        "Filtrar por código o descripción",
-        value="",
-        key="inv_prod_filter",
-        placeholder="Ej. filtro, SKU…",
-    )
+    df_view = df
     if _inv_q.strip():
         _q = _inv_q.strip().lower()
-        _m = df_view["descripcion"].astype(str).str.lower().str.contains(_q, na=False) | df_view[
+        _m_txt = df_view["descripcion"].astype(str).str.lower().str.contains(_q, na=False) | df_view[
             "codigo"
         ].fillna("").astype(str).str.lower().str.contains(_q, na=False)
-        df_view = df_view.loc[_m]
+        df_view = df_view.loc[_m_txt]
+    if _sel_una_cat == "(Sin categoría)":
+        if "categoria_id" in df_view.columns:
+            _m_sin_id = df_view["categoria_id"].isna() | (df_view["categoria_id"].astype(str).str.strip() == "")
+        else:
+            _m_sin_id = pd.Series(True, index=df_view.index)
+        _m_sin_nom = df_view["categoria"].fillna("").astype(str).str.strip() == ""
+        df_view = df_view.loc[_m_sin_id | _m_sin_nom]
+    elif _sel_una_cat != "Todas las categorías":
+        _cid_f = cat_opts.get(_sel_una_cat)
+        if _cid_f is not None and "categoria_id" in df_view.columns:
+            df_view = df_view.loc[df_view["categoria_id"].astype(str) == str(_cid_f)]
+        else:
+            df_view = df_view.loc[df_view["categoria"].fillna("").astype(str).str.strip() == _sel_una_cat]
+
     if df_view.empty:
-        st.info("No hay productos con esa categoría o con ese texto de búsqueda.")
+        st.info("No hay productos que coincidan con la búsqueda o la categoría elegida.")
         return
 
+    with st.expander("Ficha rápida: cambiar precio o stock de **un** producto", expanded=False):
+        _max_ficha = 200
+        if len(df_view) > _max_ficha:
+            st.caption(
+                f"Hay **{len(df_view)}** productos en pantalla. Afiná la búsqueda o la categoría "
+                f"(menos de {_max_ficha}) para usar la ficha rápida."
+            )
+        else:
+            _labels: dict[str, str] = {}
+            for _, _r in df_view.iterrows():
+                _cod = _export_cell_txt(_r.get("codigo")) or "—"
+                _desc = _export_cell_txt(_r.get("descripcion")) or "—"
+                _lid = str(_r.get("id") or "").strip()
+                if not _lid:
+                    continue
+                _lab = f"{_cod} · {_desc[:48]}" + ("" if len(_desc) <= 48 else "…")
+                if _lab in _labels:
+                    _lab = f"{_lab} [{_lid[:8]}]"
+                _labels[_lab] = _lid
+            _pick_labs = sorted(_labels.keys(), key=str.casefold)
+            _sel_lab = st.selectbox(
+                "Elegí el producto",
+                options=["—"] + _pick_labs,
+                index=0,
+                key="inv_ficha_producto_pick",
+            )
+            if _sel_lab != "—" and _sel_lab in _labels:
+                _pid = _labels[_sel_lab]
+                _row = df_view[df_view["id"].astype(str) == _pid]
+                if len(_row) != 1:
+                    st.error("No se encontró el producto.")
+                else:
+                    _rw = _row.iloc[0]
+                    with st.form("inv_ficha_prod_form"):
+                        st.caption(f"ID interno: `{_pid}` · Stock y precios se guardan en la base.")
+                        _ns = st.number_input(
+                            "Stock actual",
+                            min_value=0.0,
+                            value=float(_rw.get("stock_actual") or 0),
+                            step=0.001,
+                            format="%.3f",
+                            help="Las ventas/compras también mueven este valor.",
+                        )
+                        _nsmin = st.number_input(
+                            "Stock mínimo (alerta)",
+                            min_value=0.0,
+                            value=float(_rw.get("stock_minimo") or 0),
+                            step=0.001,
+                            format="%.3f",
+                        )
+                        _npv = st.number_input(
+                            "Precio venta USD",
+                            min_value=0.0,
+                            value=float(_rw.get("precio_v_usd") or 0),
+                            step=0.01,
+                            format="%.2f",
+                        )
+                        _nco = st.number_input(
+                            "Costo USD",
+                            min_value=0.0,
+                            value=float(_rw.get("costo_usd") or 0),
+                            step=0.01,
+                            format="%.2f",
+                        )
+                        if st.form_submit_button("Guardar este producto"):
+                            try:
+                                sb.table("productos").update(
+                                    {
+                                        "stock_actual": float(_ns),
+                                        "stock_minimo": float(_nsmin),
+                                        "precio_v_usd": float(_npv),
+                                        "costo_usd": float(_nco),
+                                    }
+                                ).eq("id", _pid).execute()
+                                st.success("Cambios guardados.")
+                                st.rerun()
+                            except Exception as ex:
+                                st.error(str(ex))
+
+    st.markdown("**Tabla de productos** (podés editar varias filas y guardar una vez)")
     st.caption(
         "Columnas **precio_v_bs_ref** y **costo_bs_ref**: referencia en Bs según la última **tasa_bs** "
         "guardada (se actualizan al guardar tasas o al auto-sync web). Los precios maestros siguen en USD. "
