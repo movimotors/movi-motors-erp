@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import html
 import json
 import secrets
 import time
@@ -77,6 +78,81 @@ st.markdown(
   button[kind="primary"]:hover {
     background-color: #ff9800 !important;
     border-color: #ffb74d !important;
+  }
+  /* Sidebar: cabecera y cotizaciones más claras y ordenadas */
+  [data-testid="stSidebar"] .sb-welcome {
+    background: linear-gradient(135deg, rgba(255, 152, 0, 0.14) 0%, rgba(92, 45, 145, 0.22) 100%);
+    border: 1px solid rgba(255, 183, 77, 0.35);
+    border-radius: 14px;
+    padding: 0.85rem 1rem;
+    margin-bottom: 0.75rem;
+  }
+  [data-testid="stSidebar"] .sb-welcome-title {
+    font-size: 0.95rem;
+    font-weight: 800;
+    color: #ffb74d;
+    letter-spacing: 0.03em;
+    line-height: 1.2;
+  }
+  [data-testid="stSidebar"] .sb-welcome-sub {
+    font-size: 0.72rem;
+    color: #e0c8ff;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    margin-top: 0.15rem;
+    margin-bottom: 0.5rem;
+  }
+  [data-testid="stSidebar"] .sb-welcome-user {
+    font-size: 0.8rem;
+    color: #e6edf3;
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
+    padding-top: 0.5rem;
+  }
+  [data-testid="stSidebar"] .sb-role {
+    color: #ffcc80;
+    font-weight: 600;
+  }
+  [data-testid="stSidebar"] .sb-block-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #ffcc80;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin: 0.5rem 0 0.35rem 0;
+    opacity: 0.95;
+  }
+  [data-testid="stSidebar"] [data-testid="stExpander"] {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 183, 77, 0.28);
+    border-radius: 12px;
+    margin-bottom: 0.45rem;
+    overflow: hidden;
+  }
+  [data-testid="stSidebar"] [data-testid="stExpander"] details {
+    border: none;
+  }
+  [data-testid="stSidebar"] [data-testid="stExpander"] summary {
+    font-weight: 700 !important;
+    color: #ffe0b2 !important;
+    font-size: 0.88rem !important;
+  }
+  [data-testid="stSidebar"] [data-testid="stExpander"] summary span {
+    color: #ffe0b2 !important;
+  }
+  [data-testid="stSidebar"] div[data-testid="stMetric"] {
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: 10px;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  [data-testid="stSidebar"] div[data-testid="stMetric"] label {
+    color: #b8c4d0 !important;
+    font-size: 0.72rem !important;
+  }
+  [data-testid="stSidebar"] div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+    color: #fff8e1 !important;
+    font-size: 1.15rem !important;
+    font-weight: 700 !important;
   }
 </style>
 """,
@@ -579,40 +655,87 @@ def get_live_exchange_rates() -> dict[str, Any]:
     return fetch_live_rates()
 
 
+def render_sidebar_welcome(*, nombre: str, username: str, rol: str) -> None:
+    safe_n = html.escape(str(nombre or username or "Usuario"))
+    safe_u = html.escape(str(username or ""))
+    safe_r = html.escape(str(rol or ""))
+    line_user = safe_n if safe_n else safe_u
+    st.markdown(
+        f"""
+<div class="sb-welcome">
+  <div class="sb-welcome-title">Movi Motor's Importadora</div>
+  <div class="sb-welcome-sub">ERP · Multimoneda</div>
+  <div class="sb-welcome-user">{line_user} · <span class="sb-role">{safe_r}</span></div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
 def render_sidebar_cotizaciones(t: dict[str, Any] | None) -> None:
     """
-    La barra lateral mostraba solo tasa_bs de BD (no cambia hasta guardar en Tasas).
-    Aquí se muestra además la referencia web (misma caché ~2 min que el módulo Tasas).
+    Referencia web (caché ~2 min) + operativo en BD, en bloques visuales claros.
     """
-    r1, r2 = st.columns([4, 1])
-    with r1:
-        st.caption("**Mercado** (USD×Bs web, se renueva ~2 min)")
-    with r2:
-        if st.button("Act.", key="sidebar_refresh_live_rates", help="Forzar nueva consulta web ahora"):
-            get_live_exchange_rates.clear()
-            st.rerun()
+    st.markdown('<p class="sb-block-title">Cotizaciones</p>', unsafe_allow_html=True)
 
     live = get_live_exchange_rates()
     ves = live.get("ves_bs_por_usd")
     p2p = live.get("usdt_x_ves_p2p") or live.get("p2p_bs_por_usdt_aprox")
     ut_ref = _nf(live.get("usdt_por_usd")) or 1.0
+    t_bs_bd = _nf(t.get("tasa_bs")) if t else None
 
-    if live.get("ok") and ves is not None:
-        st.caption(fmt_tri(1.0, float(ves), float(ut_ref)).replace("**", ""))
-        if p2p is not None:
+    with st.expander("Mercado en vivo (internet)", expanded=True):
+        st.caption("Referencia pública · se renueva solo ~cada 2 min")
+        if st.button(
+            "Actualizar cotización web",
+            key="sidebar_refresh_live_rates",
+            use_container_width=True,
+            help="Ignora la caché y vuelve a pedir datos a las APIs",
+        ):
+            get_live_exchange_rates.clear()
+            st.rerun()
+
+        if live.get("ok") and ves is not None:
+            fv = float(ves)
+            delta_vs = None
+            if t_bs_bd is not None and t_bs_bd > 0:
+                delta_vs = fv - float(t_bs_bd)
+            st.metric(
+                "Bs por 1 USD (web)",
+                f"{fv:,.2f}",
+                delta=f"{delta_vs:+,.2f} vs facturación" if delta_vs is not None else None,
+                delta_color="off",
+            )
+            st.metric("USDT por 1 USD (ref.)", f"{float(ut_ref):,.4f}", delta_color="off")
+        else:
+            st.info("Sin datos web por ahora. Revisa la conexión.")
+            for err in (live.get("errors") or [])[:2]:
+                st.caption(html.escape(str(err)[:140]))
+
+    with st.expander("USDT ↔ bolívares (P2P)", expanded=True):
+        if live.get("ok") and p2p is not None:
             src = live.get("usdt_x_ves_p2p_source")
-            p2p_lbl = "Binance P2P" if src == "binance_p2p_median_buy" else "referencia"
-            st.caption(f"**USDT×VES** ({p2p_lbl}): Bs {float(p2p):,.4f} por 1 USDT")
-    else:
-        st.caption("Sin datos web aún.")
-        for err in (live.get("errors") or [])[:2]:
-            st.caption(str(err)[:120])
+            p2p_lbl = "Binance P2P" if src == "binance_p2p_median_buy" else "API referencia"
+            st.caption(f"Fuente: **{p2p_lbl}**")
+            st.metric("Bs por 1 USDT", f"{float(p2p):,.4f}", delta_color="off")
+        else:
+            st.caption("Sin P2P hasta que carguen datos web.")
 
-    st.caption("**Facturación** (último guardado en *Tasas del día*)")
-    if t:
-        st.caption(fmt_tri(1.0, float(t["tasa_bs"]), float(t["tasa_usdt"])).replace("**", ""))
-    else:
-        st.caption("Sin tasas en base de datos.")
+    with st.expander("Facturación (base de datos)", expanded=True):
+        st.caption("Lo que usan ventas y compras hasta que guardes nuevas tasas")
+        if t:
+            st.metric(
+                "Bs por 1 USD (operativo)",
+                f"{float(t['tasa_bs']):,.2f}",
+                delta_color="off",
+            )
+            st.metric(
+                "USDT por 1 USD",
+                f"{float(t['tasa_usdt']):,.6f}",
+                delta_color="off",
+            )
+        else:
+            st.warning("Aún no hay tasas cargadas. Entra a **Tasas del día**.")
 
 
 def render_tasas_tiempo_real(*, key_suffix: str, t_guardado: dict[str, Any] | None) -> dict[str, Any]:
@@ -1662,8 +1785,7 @@ def main() -> None:
 
     with st.sidebar:
         render_brand_logo()
-        st.caption("**Movi Motor's Importadora** · ERP")
-        st.caption(f"{erp.get('nombre', username)} · **{rol}**")
+        render_sidebar_welcome(nombre=str(erp.get("nombre", username)), username=username, rol=rol)
         render_sidebar_cotizaciones(t)
         render_cambiar_mi_password(sb, erp_uid)
         opts: list[str] = []
