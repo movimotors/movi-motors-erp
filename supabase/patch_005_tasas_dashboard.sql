@@ -16,3 +16,6 @@ UPDATE public.tasas_dia SET bcv_bs_por_usd = tasa_bs WHERE bcv_bs_por_usd IS NUL
 UPDATE public.tasas_dia SET paralelo_bs_por_usd = tasa_bs WHERE paralelo_bs_por_usd IS NULL;
 UPDATE public.tasas_dia SET p2p_bs_por_usdt = tasa_bs / NULLIF(tasa_usdt, 0) WHERE p2p_bs_por_usdt IS NULL AND tasa_usdt IS NOT NULL;
 UPDATE public.tasas_dia SET usd_por_eur = 1.08 WHERE usd_por_eur IS NULL;
+
+-- Evita PGRST204 hasta que PostgREST refresque el esquema
+NOTIFY pgrst, 'reload schema';
