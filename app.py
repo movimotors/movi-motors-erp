@@ -644,6 +644,33 @@ def _fetch_productos_inventario_df(sb: Client) -> pd.DataFrame:
     return pd.DataFrame(r.data or [])
 
 
+def _normalize_productos_inventario_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Si no hay filas, Supabase devuelve [] y pandas crea un DataFrame **sin columnas**.
+    Normalizamos al esquema esperado por el editor y los reportes.
+    """
+    cols = [
+        "id",
+        "codigo",
+        "descripcion",
+        "stock_actual",
+        "stock_minimo",
+        "costo_usd",
+        "precio_v_usd",
+        "precio_v_bs_ref",
+        "costo_bs_ref",
+        "activo",
+        "categoria_id",
+    ]
+    if df.empty and len(df.columns) == 0:
+        return pd.DataFrame(columns=cols)
+    out = df.copy()
+    for c in cols:
+        if c not in out.columns:
+            out[c] = pd.NA
+    return out
+
+
 def _categoria_maps_from_rows(
     cat_rows: list[dict[str, Any]],
 ) -> tuple[dict[str, str], dict[str, str], list[str]]:
@@ -2741,18 +2768,40 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                     else:
                         st.error(msg_i)
 
-    cats = sb.table("categorias").select("id,nombre").order("nombre").execute()
-    cats_list = cats.data or []
-    cat_opts = {c["nombre"]: c["id"] for c in cats_list}
+    try:
+        cats = sb.table("categorias").select("id,nombre").order("nombre").execute()
+        cats_list = cats.data or []
+    except Exception as ex:
+        cats_list = []
+        st.error(f"No se pudieron leer **categorías** desde la base: {ex}")
+
+    cat_opts = {c["nombre"]: c["id"] for c in cats_list if c.get("nombre")}
     _id_to_nombre_cat, _nombre_a_id_cat, _cat_select_opts = _categoria_maps_from_rows(cats_list)
+
+    st.markdown("##### Categorías en base de datos")
+    st.caption("Lista leída directamente de la tabla `categorias` en Supabase (se actualiza al recargar la página).")
+    if cats_list:
+        st.dataframe(pd.DataFrame(cats_list), use_container_width=True, hide_index=True)
+        st.caption(f"**{len(cats_list)}** categoría(s).")
+    else:
+        st.info("Todavía no hay categorías en la base, o no se pudieron cargar. Creá la primera con el formulario de abajo.")
 
     with st.expander("Nueva categoría"):
         with st.form("f_cat"):
             cn = st.text_input("Nombre categoría")
-            if st.form_submit_button("Crear") and cn.strip():
-                sb.table("categorias").insert({"nombre": cn.strip()}).execute()
-                st.success("Categoría creada.")
-                st.rerun()
+            submitted_cat = st.form_submit_button("Crear categoría")
+            if submitted_cat:
+                if not cn.strip():
+                    st.error("Escribí un nombre para la categoría.")
+                else:
+                    try:
+                        sb.table("categorias").insert({"nombre": cn.strip()}).execute()
+                        st.success("Categoría guardada en la base.")
+                        st.rerun()
+                    except Exception as ex:
+                        st.error(
+                            f"No se pudo guardar. Si el nombre ya existe, elegí otro (las categorías son únicas). Detalle: {ex}"
+                        )
 
     with st.expander("Nuevo producto"):
         with st.form("f_prod"):
@@ -2765,20 +2814,23 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
             cname = st.selectbox("Categoría", options=[""] + list(cat_opts.keys()))
             cid = cat_opts.get(cname) if cname else None
             if st.form_submit_button("Guardar producto"):
-                sb.table("productos").insert(
-                    {
-                        "codigo": codigo.strip() or None,
-                        "descripcion": desc.strip() or "Sin descripción",
-                        "stock_actual": float(stock),
-                        "stock_minimo": float(smin),
-                        "costo_usd": float(costo),
-                        "precio_v_usd": float(pv),
-                        "categoria_id": cid,
-                        "activo": True,
-                    }
-                ).execute()
-                st.success("Producto creado.")
-                st.rerun()
+                try:
+                    sb.table("productos").insert(
+                        {
+                            "codigo": codigo.strip() or None,
+                            "descripcion": desc.strip() or "Sin descripción",
+                            "stock_actual": float(stock),
+                            "stock_minimo": float(smin),
+                            "costo_usd": float(costo),
+                            "precio_v_usd": float(pv),
+                            "categoria_id": cid,
+                            "activo": True,
+                        }
+                    ).execute()
+                    st.success("Producto guardado en la base.")
+                    st.rerun()
+                except Exception as ex:
+                    st.error(f"No se pudo guardar el producto (¿código duplicado o permisos en Supabase?): {ex}")
 
     st.caption(
         "Carga masiva (CSV): columnas **codigo**, **descripcion**, **stock_actual**, **stock_minimo**, "
@@ -2832,19 +2884,19 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                     st.success(f"Insertados {len(batch_ins)} productos.")
                     st.rerun()
 
-    df = _fetch_productos_inventario_df(sb)
-    if df.empty:
-        st.info("No hay productos.")
-        return
+    df = _normalize_productos_inventario_df(_fetch_productos_inventario_df(sb))
 
-    if "categoria_id" in df.columns:
-        df["categoria"] = df["categoria_id"].apply(
-            lambda x: _id_to_nombre_cat.get(str(x).strip(), "")
-            if x is not None and not (isinstance(x, float) and pd.isna(x)) and str(x).strip()
-            else ""
-        )
+    if not df.empty:
+        if "categoria_id" in df.columns:
+            df["categoria"] = df["categoria_id"].apply(
+                lambda x: _id_to_nombre_cat.get(str(x).strip(), "")
+                if x is not None and not (isinstance(x, float) and pd.isna(x)) and str(x).strip()
+                else ""
+            )
+        else:
+            df["categoria"] = ""
     else:
-        df["categoria"] = ""
+        df["categoria"] = pd.Series(dtype=object)
 
     with st.expander("Imprimir / exportar listado", expanded=True):
         st.caption(
@@ -2852,7 +2904,21 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
             "Descargá **Excel (.xlsx)**, **PDF** o **HTML** (navegador → Ctrl+P). "
             "Requiere `openpyxl` y `reportlab` (`py -m pip install -r requirements.txt`)."
         )
-        _lab_cat = sorted(df["categoria"].map(_inv_cat_display).unique().tolist(), key=str.casefold)
+        _from_db = sorted(
+            {str(c.get("nombre") or "").strip() for c in cats_list if str(c.get("nombre") or "").strip()},
+            key=str.casefold,
+        )
+        _from_prod = (
+            sorted(
+                {str(x) for x in df["categoria"].map(_inv_cat_display).tolist() if str(x).strip()},
+                key=str.casefold,
+            )
+            if not df.empty and "categoria" in df.columns
+            else []
+        )
+        _lab_cat = sorted(set(_from_db) | set(_from_prod), key=str.casefold)
+        if not _lab_cat:
+            _lab_cat = ["(Sin categoría)"]
         _pick_cat = st.multiselect(
             "Categorías a incluir",
             options=_lab_cat,
@@ -2923,62 +2989,74 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
         _sub_f = " · ".join(_parts_sub)
 
         if _df_p.empty:
-            st.warning("No hay productos con esos filtros.")
+            st.warning(
+                "No hay **productos** que listar con esos filtros (o el inventario de productos está vacío). "
+                "Igual podés descargar Excel/PDF/HTML con encabezados o tabla vacía."
+            )
+            _df_out = _df_p
         else:
             _df_out = _df_inventario_orden_impresion(
                 _df_p, _orden_key, agrupar_categoria=bool(_agrup_cat)
             )
-            _html_inv = _html_inventario_listado(
-                _df_out,
-                t,
-                agrupar_categoria=bool(_agrup_cat),
-                subtitulo_filtros=_sub_f,
-            )
-            _df_flat = _df_inventario_export_flat(_df_out)
-            _ts_p = _backup_file_timestamp()
-            _bx, _bp = st.columns(2)
-            with _bx:
-                try:
-                    _xlsx_b = _xlsx_inventario_bytes(_df_flat)
-                except ImportError:
-                    st.caption("Instalá **openpyxl** para exportar Excel.")
-                else:
-                    st.download_button(
-                        label=f"Excel — inventario_{_ts_p}.xlsx",
-                        data=_xlsx_b,
-                        file_name=f"inventario_{_ts_p}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="dl_inv_print_xlsx",
-                        use_container_width=True,
-                    )
-            with _bp:
-                try:
-                    _pdf_b = _pdf_inventario_bytes(
-                        _df_out,
-                        t,
-                        agrupar_categoria=bool(_agrup_cat),
-                        subtitulo_filtros=_sub_f,
-                    )
-                except ImportError:
-                    st.caption("Instalá **reportlab** para exportar PDF.")
-                else:
-                    st.download_button(
-                        label=f"PDF — inventario_{_ts_p}.pdf",
-                        data=_pdf_b,
-                        file_name=f"inventario_{_ts_p}.pdf",
-                        mime="application/pdf",
-                        key="dl_inv_print_pdf",
-                        use_container_width=True,
-                    )
-            st.download_button(
-                label=f"HTML (imprimir en navegador) — inventario_{_ts_p}.html",
-                data=_html_inv.encode("utf-8"),
-                file_name=f"inventario_{_ts_p}.html",
-                mime="text/html",
-                key="dl_inv_print_html",
-            )
-            st.caption("Vista previa HTML (iframe; Ctrl+P o botón *Imprimir* si el navegador lo permite).")
-            components.html(_html_inv, height=520, scrolling=True)
+        _html_inv = _html_inventario_listado(
+            _df_out,
+            t,
+            agrupar_categoria=bool(_agrup_cat),
+            subtitulo_filtros=_sub_f,
+        )
+        _df_flat = _df_inventario_export_flat(_df_out)
+        _ts_p = _backup_file_timestamp()
+        _bx, _bp = st.columns(2)
+        with _bx:
+            try:
+                _xlsx_b = _xlsx_inventario_bytes(_df_flat)
+            except ImportError:
+                st.caption("Instalá **openpyxl** para exportar Excel.")
+            else:
+                st.download_button(
+                    label=f"Excel — inventario_{_ts_p}.xlsx",
+                    data=_xlsx_b,
+                    file_name=f"inventario_{_ts_p}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_inv_print_xlsx",
+                    use_container_width=True,
+                )
+        with _bp:
+            try:
+                _pdf_b = _pdf_inventario_bytes(
+                    _df_out,
+                    t,
+                    agrupar_categoria=bool(_agrup_cat),
+                    subtitulo_filtros=_sub_f,
+                )
+            except ImportError:
+                st.caption("Instalá **reportlab** para exportar PDF.")
+            else:
+                st.download_button(
+                    label=f"PDF — inventario_{_ts_p}.pdf",
+                    data=_pdf_b,
+                    file_name=f"inventario_{_ts_p}.pdf",
+                    mime="application/pdf",
+                    key="dl_inv_print_pdf",
+                    use_container_width=True,
+                )
+        st.download_button(
+            label=f"HTML (imprimir en navegador) — inventario_{_ts_p}.html",
+            data=_html_inv.encode("utf-8"),
+            file_name=f"inventario_{_ts_p}.html",
+            mime="text/html",
+            key="dl_inv_print_html",
+        )
+        st.caption("Vista previa HTML (iframe; Ctrl+P o botón *Imprimir* si el navegador lo permite).")
+        components.html(_html_inv, height=520, scrolling=True)
+
+    if df.empty:
+        st.markdown("##### Productos")
+        st.info(
+            "No hay **productos** en la base todavía. Las **categorías** arriba sí se listan desde `categorias`. "
+            "Cuando agregues productos (*Nuevo producto* o CSV), aparecerán el filtro y la grilla editable."
+        )
+        return
 
     _inv_q = st.text_input(
         "Filtrar por código o descripción",
