@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS public.productos (
   stock_minimo NUMERIC(14, 3) NOT NULL DEFAULT 0 CHECK (stock_minimo >= 0),
   costo_usd NUMERIC(14, 2) NOT NULL DEFAULT 0 CHECK (costo_usd >= 0),
   precio_v_usd NUMERIC(14, 2) NOT NULL DEFAULT 0 CHECK (precio_v_usd >= 0),
+  precio_v_bs_ref NUMERIC(18, 4),
+  costo_bs_ref NUMERIC(18, 4),
   categoria_id UUID REFERENCES public.categorias (id) ON DELETE SET NULL,
   activo BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -669,6 +671,28 @@ FROM public.cajas_bancos
 WHERE activo = TRUE;
 
 GRANT SELECT ON public.v_balance_consolidado_usd TO service_role;
+
+-- -----------------------------------------------------------------------------
+-- Recalcular equivalentes Bs en productos (llama la app tras sincronizar tasa web)
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.refresh_productos_bs_equiv(p_tasa_bs NUMERIC)
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  UPDATE public.productos
+  SET
+    precio_v_bs_ref = ROUND((precio_v_usd * p_tasa_bs)::numeric, 4),
+    costo_bs_ref = ROUND((costo_usd * p_tasa_bs)::numeric, 4),
+    updated_at = NOW()
+  WHERE activo = TRUE
+    AND p_tasa_bs IS NOT NULL
+    AND p_tasa_bs > 0;
+$$;
+
+REVOKE ALL ON FUNCTION public.refresh_productos_bs_equiv(NUMERIC) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.refresh_productos_bs_equiv(NUMERIC) TO service_role;
 
 -- -----------------------------------------------------------------------------
 -- Datos semilla (opcional): tasas de ejemplo, cajas y usuario admin (username admin)

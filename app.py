@@ -497,18 +497,29 @@ def _tasas_para_fecha(sb: Client, d: date) -> dict[str, Any] | None:
     return row if isinstance(row, dict) else None
 
 
-# Si el paralelo web (USD×Bs) difiere del guardado en ≥ esta fracción (0.005 = 0,5 %), se actualiza `tasas_dia` del día.
-AUTO_TASA_SYNC_REL_MIN = 0.005
-# Mínimo tiempo entre escrituras automáticas a Supabase (navegar la app no dispara docenas de upserts).
-AUTO_TASA_SYNC_MIN_SECONDS = 300.0
+# Sincronización automática tasas web → `tasas_dia` + recálculo Bs en productos (RPC).
+# Si REL = 0, solo cuenta la diferencia absoluta en Bs/USD (más “tiempo real”).
+AUTO_TASA_SYNC_REL_MIN = 0.0
+# Mínimo cambio en Bs por 1 USD para escribir (evita ruido de redondeo de la API).
+AUTO_TASA_ABS_MIN_BS = 0.02
+# Alineado con caché de `get_live_exchange_rates` (~120 s): cada refresco web puede persistirse.
+AUTO_TASA_SYNC_MIN_SECONDS = 120.0
+
+
+def _refresh_productos_bs_equiv_note(sb: Client, t_oper: float) -> str:
+    """Tras actualizar `tasa_bs`, recalcula precio_v_bs_ref y costo_bs_ref en productos."""
+    try:
+        sb.rpc("refresh_productos_bs_equiv", {"p_tasa_bs": float(t_oper)}).execute()
+        return " Productos: equivalentes Bs recalculados en BD."
+    except Exception:
+        return " (Ejecuta `supabase/patch_007_productos_bs_ref.sql` para recalcular Bs en productos.)"
 
 
 def maybe_auto_sync_tasas_from_web(sb: Client) -> dict[str, Any] | None:
     """
-    Compara el USD×Bs de internet con el paralelo/tasa operativa guardada.
-    Si la diferencia relativa supera AUTO_TASA_SYNC_REL_MIN, hace upsert del registro
-    de **hoy** (Caracas): actualiza paralelo, tasa_bs, P2P y USD/EUR web; **no modifica el BCV**
-    ya cargado (se toma del registro de hoy o del último guardado).
+    Si el USD×Bs web difiere del guardado (abs ≥ AUTO_TASA_ABS_MIN_BS y/o rel ≥ AUTO_TASA_SYNC_REL_MIN),
+    hace upsert del día (Caracas): paralelo, tasa_bs, P2P, EUR; **no modifica BCV manual**.
+    Tras guardar tasas, llama `refresh_productos_bs_equiv` para actualizar precio_v_bs_ref y costo_bs_ref.
     """
     t_latest = latest_tasas(sb)
     if not t_latest:
@@ -534,8 +545,11 @@ def maybe_auto_sync_tasas_from_web(sb: Client) -> dict[str, Any] | None:
     if saved_par is None or saved_par <= 0:
         return latest_tasas(sb)
 
-    rel_diff = abs(float(ves) - float(saved_par)) / float(saved_par)
-    if rel_diff < AUTO_TASA_SYNC_REL_MIN:
+    abs_diff = abs(float(ves) - float(saved_par))
+    rel_diff = abs_diff / float(saved_par) if saved_par > 0 else 0.0
+    rel_ok = AUTO_TASA_SYNC_REL_MIN > 0 and rel_diff >= AUTO_TASA_SYNC_REL_MIN
+    abs_ok = abs_diff >= AUTO_TASA_ABS_MIN_BS
+    if not rel_ok and not abs_ok:
         return latest_tasas(sb)
 
     bcv = _nf(base.get("bcv_bs_por_usd"))
@@ -568,12 +582,26 @@ def maybe_auto_sync_tasas_from_web(sb: Client) -> dict[str, Any] | None:
     try:
         sb.table("tasas_dia").upsert(row, on_conflict="fecha").execute()
         st.session_state["_auto_tasas_sync_mono"] = now
+        prod_note = _refresh_productos_bs_equiv_note(sb, float(t_oper))
         st.session_state["_tasas_auto_sync_msg"] = (
-            f"Tasas actualizadas solas: paralelo Bs/USD {par:,.2f} (antes {saved_par:,.2f}, Δ {rel_diff*100:.2f} %)."
+            f"Tasas auto: Bs/USD {par:,.2f} (antes {saved_par:,.2f}).{prod_note}"
         )
     except Exception:
         pass
     return latest_tasas(sb)
+
+
+def _fetch_productos_inventario_df(sb: Client) -> pd.DataFrame:
+    cols_full = (
+        "id,codigo,descripcion,stock_actual,stock_minimo,costo_usd,precio_v_usd,"
+        "precio_v_bs_ref,costo_bs_ref,activo"
+    )
+    cols_base = "id,codigo,descripcion,stock_actual,stock_minimo,costo_usd,precio_v_usd,activo"
+    try:
+        r = sb.table("productos").select(cols_full).order("descripcion").execute()
+    except Exception:
+        r = sb.table("productos").select(cols_base).order("descripcion").execute()
+    return pd.DataFrame(r.data or [])
 
 
 def fmt_tri(usd: float, t_bs: float, t_usdt: float) -> str:
@@ -1481,8 +1509,10 @@ def module_tasas(sb: Client, *, embedded: bool = False) -> None:
         st.caption(
             "Guardas los cruces **USD×Bs**, **EUR×VES** (con *USD por 1 EUR*), **USDT×VES (P2P)** y la referencia **USDT por USD**. "
             "La **tasa operativa** (`tasa_bs`) en ventas/compras es el **paralelo** (o BCV si no hay paralelo). "
-            f"**Auto-actualización:** si el paralelo web difiere del guardado en **≥ {AUTO_TASA_SYNC_REL_MIN*100:.1f} %**, "
-            "el sistema guarda solo el registro de **hoy** (Caracas) con datos web; el **BCV oficial no se toca**."
+            "**Auto-actualización:** si el paralelo web cambia respecto al guardado "
+            f"(mín. **{AUTO_TASA_ABS_MIN_BS}** Bs/USD"
+            + (f" o **≥{AUTO_TASA_SYNC_REL_MIN*100:.1f} %**" if AUTO_TASA_SYNC_REL_MIN > 0 else "")
+            + "), guarda el día (Caracas), recalcula equivalentes Bs en productos y **no modifica el BCV**."
         )
         st.info(
             "Si al guardar ves error de columna inexistente, ejecuta en Supabase el archivo "
@@ -1490,7 +1520,7 @@ def module_tasas(sb: Client, *, embedded: bool = False) -> None:
         )
     else:
         st.caption(
-            f"**tasa_bs** en documentos = paralelo (o BCV). Auto-sync web ≥{AUTO_TASA_SYNC_REL_MIN*100:.1f}% no modifica BCV. "
+            f"**tasa_bs** = paralelo (o BCV). Auto-sync web (~cada {int(AUTO_TASA_SYNC_MIN_SECONDS)}s si cambia ≥{AUTO_TASA_ABS_MIN_BS} Bs/USD) no modifica BCV. "
             "Cotizaciones en vivo: expander *Tasas en vivo y tabla guardada* arriba en este panel."
         )
 
@@ -1615,7 +1645,7 @@ def module_tasas(sb: Client, *, embedded: bool = False) -> None:
                 }
                 try:
                     sb.table("tasas_dia").upsert(row, on_conflict="fecha").execute()
-                    st.success("Tasas guardadas.")
+                    st.success("Tasas guardadas." + _refresh_productos_bs_equiv_note(sb, float(t_oper)))
                     st.rerun()
                 except Exception as e:
                     st.error(str(e))
@@ -1700,26 +1730,27 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                 st.success(f"Insertados {len(rows)} productos.")
                 st.rerun()
 
-    prods = (
-        sb.table("productos")
-        .select("id,codigo,descripcion,stock_actual,stock_minimo,costo_usd,precio_v_usd,activo")
-        .order("descripcion")
-        .execute()
-    )
-    if not prods.data:
+    df = _fetch_productos_inventario_df(sb)
+    if df.empty:
         st.info("No hay productos.")
         return
 
-    df = pd.DataFrame(prods.data)
+    st.caption(
+        "Columnas **precio_v_bs_ref** y **costo_bs_ref**: referencia en Bs según la última **tasa_bs** "
+        "guardada (se actualizan al guardar tasas o al auto-sync web). Los precios maestros siguen en USD."
+    )
     crit = df[df["stock_actual"].astype(float) <= df["stock_minimo"].astype(float)]
     if len(crit):
         st.error(f"Alertas de stock crítico: {len(crit)} ítems")
         st.dataframe(crit, use_container_width=True, hide_index=True)
 
+    _disabled_cols = ["id"]
+    if "precio_v_bs_ref" in df.columns:
+        _disabled_cols.extend(["precio_v_bs_ref", "costo_bs_ref"])
     edited = st.data_editor(
         df,
         num_rows="fixed",
-        disabled=["id"],
+        disabled=_disabled_cols,
         use_container_width=True,
         key="editor_prod",
     )
