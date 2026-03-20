@@ -3,7 +3,7 @@
 1. En Supabase → SQL Editor: ejecutar `supabase/schema_erp_multimoneda.sql` (proyecto nuevo recomendado).
 2. Copiar `.streamlit/secrets.toml.example` a `.streamlit/secrets.toml` y completar URL + `service_role`. El acceso es con **usuario y contraseña** definidos en Supabase (`erp_users`); el primer acceso suele ser usuario `admin` y contraseña `admin` (cámbiala en el módulo **Usuarios**). Si tu base ya existía, ejecuta también `supabase/patch_004_erp_users_password_vendedor.sql` y, para el dashboard de tasas (BCV, paralelo, EUR, P2P), `supabase/patch_005_tasas_dashboard.sql`.
 
-**Tasas en vivo:** el panel “tiempo real” usa APIs públicas (`tasas_live.py`: VES vía open.er-api.com, EUR/USD vía Frankfurter). El VES de esa API **no** es el BCV oficial; el BCV debes cargarlo a mano en **Tasas del día**.
+**Tasas en vivo:** el panel “tiempo real” usa APIs públicas (`tasas_live.py`: VES vía open.er-api.com, EUR/USD vía Frankfurter). El VES de esa API **no** es el BCV oficial; el BCV debes cargarlo a mano desde **Dashboard → Cargar / editar tasas en base de datos**.
 3. Ejecutar la app:
 
 ```bash

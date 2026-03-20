@@ -782,7 +782,7 @@ def render_sidebar_cotizaciones(t: dict[str, Any] | None) -> None:
         st.caption(
             "Aquí la **referencia principal** es la **última cotización web**. "
             "Ventas y compras siguen usando el valor **guardado en BD** hasta que lo actualices "
-            "en *Tasas del día* o el **auto-sync** lo ajuste (si el mercado se aleja ≥0,5 %)."
+            "en **Dashboard** (guardar tasas en BD) o el **auto-sync** lo ajuste (si el mercado se aleja ≥0,5 %)."
         )
         if live.get("ok") and ves is not None:
             st.metric(
@@ -817,7 +817,7 @@ def render_sidebar_cotizaciones(t: dict[str, Any] | None) -> None:
                 delta_color="off",
             )
         else:
-            st.info("No hay tasas en base de datos. Entra a **Tasas del día**.")
+            st.info("No hay tasas en base de datos. En **Dashboard** abre *Cargar / editar tasas en base de datos*.")
 
 
 def render_tasas_tiempo_real(*, key_suffix: str, t_guardado: dict[str, Any] | None) -> dict[str, Any]:
@@ -1451,6 +1451,11 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
         else:
             st.warning("Sin tasas del día en base de datos.")
 
+    rol_dash = str(st.session_state.get("erp_rol", ""))
+    if role_can(rol_dash, "tasas"):
+        with st.expander("Cargar / editar tasas en base de datos (BCV, paralelo, P2P)", expanded=False):
+            module_tasas(sb, embedded=True)
+
     st.divider()
     st.markdown("##### Últimos movimientos de caja")
     mov = (
@@ -1466,18 +1471,28 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
         st.caption("Sin movimientos.")
 
 
-def module_tasas(sb: Client) -> None:
-    st.subheader("Tasas del día")
-    st.caption(
-        "Guardas los cruces **USD×Bs**, **EUR×VES** (con *USD por 1 EUR*), **USDT×VES (P2P)** y la referencia **USDT por USD**. "
-        "La **tasa operativa** (`tasa_bs`) en ventas/compras es el **paralelo** (o BCV si no hay paralelo). "
-        f"**Auto-actualización:** si el paralelo web difiere del guardado en **≥ {AUTO_TASA_SYNC_REL_MIN*100:.1f} %**, "
-        "el sistema guarda solo el registro de **hoy** (Caracas) con datos web; el **BCV oficial no se toca**."
-    )
-    st.info(
-        "Si al guardar ves error de columna inexistente, ejecuta en Supabase el archivo "
-        "`supabase/patch_005_tasas_dashboard.sql`."
-    )
+def module_tasas(sb: Client, *, embedded: bool = False) -> None:
+    """
+    Guarda tasas en `tasas_dia`. Si `embedded=True`, no muestra el panel duplicado de tiempo real
+    (se usa desde el Dashboard, donde ya existe el expander de tasas en vivo).
+    """
+    if not embedded:
+        st.subheader("Tasas del día")
+        st.caption(
+            "Guardas los cruces **USD×Bs**, **EUR×VES** (con *USD por 1 EUR*), **USDT×VES (P2P)** y la referencia **USDT por USD**. "
+            "La **tasa operativa** (`tasa_bs`) en ventas/compras es el **paralelo** (o BCV si no hay paralelo). "
+            f"**Auto-actualización:** si el paralelo web difiere del guardado en **≥ {AUTO_TASA_SYNC_REL_MIN*100:.1f} %**, "
+            "el sistema guarda solo el registro de **hoy** (Caracas) con datos web; el **BCV oficial no se toca**."
+        )
+        st.info(
+            "Si al guardar ves error de columna inexistente, ejecuta en Supabase el archivo "
+            "`supabase/patch_005_tasas_dashboard.sql`."
+        )
+    else:
+        st.caption(
+            f"**tasa_bs** en documentos = paralelo (o BCV). Auto-sync web ≥{AUTO_TASA_SYNC_REL_MIN*100:.1f}% no modifica BCV. "
+            "Cotizaciones en vivo: expander *Tasas en vivo y tabla guardada* arriba en este panel."
+        )
 
     lt = latest_tasas(sb) or {}
     _applied_live = st.session_state.pop("_live_apply", None)
@@ -1486,27 +1501,44 @@ def module_tasas(sb: Client) -> None:
         v = _nf(lt.get(key))
         return float(v) if v is not None else float(fallback)
 
-    live_now = render_tasas_tiempo_real(key_suffix="tasas_mod", t_guardado=lt or None)
-    if st.button(
-        "Aplicar tasas web al formulario (paralelo, EUR, P2P y USDT)",
-        key="apply_live_to_form",
-        help="No modifica el BCV oficial: debes cargarlo tú (p. ej. desde el BCV).",
-    ):
-        snap = get_live_exchange_rates()
-        if snap.get("ok"):
-            st.session_state["_live_apply"] = snap
-            st.rerun()
-        else:
-            st.warning("No hay datos web listos. Revisa la conexión o pulsa **Refrescar ahora** arriba.")
-
-    st.divider()
+    if not embedded:
+        render_tasas_tiempo_real(key_suffix="tasas_mod", t_guardado=lt or None)
+        if st.button(
+            "Aplicar tasas web al formulario (paralelo, EUR, P2P y USDT)",
+            key="apply_live_to_form",
+            help="No modifica el BCV oficial: debes cargarlo tú (p. ej. desde el BCV).",
+        ):
+            snap = get_live_exchange_rates()
+            if snap.get("ok"):
+                st.session_state["_live_apply"] = snap
+                st.rerun()
+            else:
+                st.warning("No hay datos web listos. Revisa la conexión o pulsa **Refrescar ahora** arriba.")
+        st.divider()
+    else:
+        if st.button(
+            "Rellenar formulario con tasas web (paralelo, EUR, P2P, USDT)",
+            key="apply_live_to_form_embed",
+            help="No cambia el BCV del formulario; solo trae datos web a los campos.",
+        ):
+            snap = get_live_exchange_rates()
+            if snap.get("ok"):
+                st.session_state["_live_apply"] = snap
+                st.rerun()
+            else:
+                st.warning("No hay datos web listos. Usa **Actualizar cotización web** en la barra lateral.")
 
     if lt:
-        with st.expander("Ver todas las tasas vigentes en base de datos (detalle)", expanded=False):
-            st.caption(f"Último registro guardado — fecha **{lt.get('fecha', '—')}**.")
+        with st.expander("Ver tasas guardadas en BD (detalle)", expanded=False):
+            st.caption(f"Último registro — fecha **{lt.get('fecha', '—')}**.")
             render_tabla_tasas_ui(build_tasas_tabla_detalle(lt))
     else:
-        st.warning("Aún no hay ninguna tasa cargada. Usa el formulario de abajo para crear la primera.")
+        st.warning("Aún no hay tasas en base de datos. Completa el formulario y guarda.")
+
+    if embedded:
+        st.info(
+            "¿Error de columna al guardar? Ejecuta en Supabase `supabase/patch_005_tasas_dashboard.sql`."
+        )
 
     par_def = (
         float(_applied_live["ves_bs_por_usd"])
@@ -1529,7 +1561,8 @@ def module_tasas(sb: Client) -> None:
         else dv("tasa_usdt", 1.0)
     )
 
-    with st.form("f_tasa"):
+    _form_id = "f_tasa_embed" if embedded else "f_tasa"
+    with st.form(_form_id):
         f = st.date_input("Fecha", value=date.today())
         st.markdown("**Cruces (lo que ves en tablas y dashboard)**")
         bcv = st.number_input(
@@ -1595,7 +1628,7 @@ def module_tasas(sb: Client) -> None:
 def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
     st.subheader("Inventario")
     if not t:
-        st.warning("Cargue tasas del día para ver montos equivalentes en sidebar de productos.")
+        st.warning("Registre tasas en **Dashboard** (expander *Cargar / editar tasas en base de datos*) para ver equivalentes.")
 
     cats = sb.table("categorias").select("id,nombre").order("nombre").execute()
     cat_opts = {c["nombre"]: c["id"] for c in (cats.data or [])}
@@ -2253,8 +2286,6 @@ def main() -> None:
         opts: list[str] = []
         if role_can(rol, "dashboard"):
             opts.append("Dashboard")
-        if role_can(rol, "tasas"):
-            opts.append("Tasas del día")
         if role_can(rol, "inventario"):
             opts.append("Inventario")
         if role_can(rol, "ventas"):
@@ -2279,8 +2310,6 @@ def main() -> None:
 
     if mod == "Dashboard" and role_can(rol, "dashboard"):
         module_dashboard(sb, t)
-    elif mod == "Tasas del día" and role_can(rol, "tasas"):
-        module_tasas(sb)
     elif mod == "Inventario" and role_can(rol, "inventario"):
         module_inventario(sb, t)
     elif mod == "Ventas / CXC" and role_can(rol, "ventas"):
