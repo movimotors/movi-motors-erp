@@ -1,0 +1,10 @@
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+*.db
+auth_state.json
+.DS_Store
+Thumbs.db

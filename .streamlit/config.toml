@@ -1,0 +1,10 @@
+# Tema alineado con la marca (logo: morado + naranja).
+# https://docs.streamlit.io/develop/concepts/configuration/custom_theme
+
+[theme]
+base = "dark"
+primaryColor = "#FF9800"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#1e1630"
+textColor = "#fafafa"
+font = "sans serif"
