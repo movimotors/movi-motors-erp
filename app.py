@@ -2175,6 +2175,7 @@ def build_backup_erp_completo(sb: Client) -> dict[str, Any]:
         ("cuentas_por_cobrar", "*"),
         ("cuentas_por_pagar", "*"),
         ("movimientos_caja", "*"),
+        ("cambios_tesoreria", "*"),
     ]
     errs: list[dict[str, str]] = []
     for tbl, cols in specs:
@@ -2257,6 +2258,10 @@ def restore_erp_completo_desde_json(sb: Client, payload: dict[str, Any]) -> tupl
         _delete_all_rows(sb, "productos")
         _delete_all_rows(sb, "categorias")
         _delete_all_rows(sb, "tasas_dia")
+        try:
+            _delete_all_rows(sb, "cambios_tesoreria")
+        except Exception:
+            pass
         _delete_all_rows(sb, "cajas_bancos")
 
         _insert_rows_batched(sb, "categorias", list(payload.get("categorias") or []))
@@ -2269,6 +2274,12 @@ def restore_erp_completo_desde_json(sb: Client, payload: dict[str, Any]) -> tupl
             )
         _insert_rows_batched(sb, "tasas_dia", list(payload.get("tasas_dia") or []))
         _insert_rows_batched(sb, "cajas_bancos", list(payload.get("cajas_bancos") or []))
+        try:
+            _insert_rows_batched(sb, "cambios_tesoreria", list(payload.get("cambios_tesoreria") or []))
+        except Exception:
+            warns.append(
+                "No se pudieron restaurar filas de **cambios_tesoreria** (¿falta patch_018?). Podés reimportarlas manualmente o ignorar si no usabas el registro."
+            )
 
         urows = list(payload.get("erp_users") or [])
         if urows:
@@ -2968,6 +2979,162 @@ def _dashboard_resumen_cobros_por_moneda(sb: Client, *, d_a: date, r_fut: str) -
     )
 
 
+def _dashboard_seccion_cambios_tesoreria(
+    sb: Client,
+    *,
+    t: dict[str, Any] | None,
+    d_a: date,
+    d_b: date,
+    r_fut: str,
+) -> None:
+    """Bitácora Bs→USD: formulario (RPC) + tabla con diff vs tasa de referencia en el rango del dashboard."""
+    erp_uid = str(st.session_state.get("erp_uid") or "").strip()
+    st.markdown('<div class="dash-bento">', unsafe_allow_html=True)
+    st.markdown("##### Seguimiento: cambios de bolívares a moneda más estable")
+    st.caption(
+        "Esto **no mueve saldos** en las cajas: es un **registro** para comparar lo que obtuviste en USD con lo que hubieras tenido "
+        "a la **tasa Bs/USD de referencia** que elijas (ej. BCV o mercado). Los movimientos reales van en **Cajas**."
+    )
+
+    try:
+        cambios_q = (
+            sb.table("cambios_tesoreria")
+            .select("*")
+            .gte("fecha", f"{d_a.isoformat()}T00:00:00")
+            .lte("fecha", r_fut)
+            .order("fecha", desc=True)
+            .execute()
+        )
+    except Exception as ex:
+        st.info(
+            f"Para usar esta sección ejecutá en Supabase **`supabase/patch_018_cambios_tesoreria.sql`**. Detalle: {ex}"
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    rows_caj = _cajas_fetch_rows(sb, solo_activas=False)
+    id_to_et = {str(r["id"]): _caja_etiqueta_lista(r) for r in rows_caj}
+    ves_ids = [str(c["id"]) for c in rows_caj if str(c.get("moneda_cuenta") or "").strip().upper() == "VES"]
+    stab_ids = [str(c["id"]) for c in rows_caj if str(c.get("moneda_cuenta") or "").strip().upper() in ("USD", "USDT")]
+
+    raw_rows = cambios_q.data or []
+    recs: list[dict[str, Any]] = []
+    for r in raw_rows:
+        m_ves = float(r.get("monto_ves") or 0)
+        m_usd = float(r.get("monto_usd_obtenido") or 0)
+        t_ref = float(r.get("tasa_referencia_bs_por_usd") or 0)
+        usd_a_ref = (m_ves / t_ref) if t_ref > 0 else 0.0
+        diff_usd = m_usd - usd_a_ref
+        oid = r.get("caja_origen_id")
+        did = r.get("caja_destino_id")
+        recs.append(
+            {
+                "Fecha": r.get("fecha"),
+                "Origen": id_to_et.get(str(oid), "—") if oid else "—",
+                "Destino": id_to_et.get(str(did), "—") if did else "—",
+                "Bs": m_ves,
+                "USD obtenido": m_usd,
+                "Tasa ref. (Bs/USD)": t_ref,
+                "USD a tasa ref.": round(usd_a_ref, 4),
+                "Diff vs ref. (USD)": round(diff_usd, 4),
+                "Nota": (r.get("nota") or "")[:120],
+            }
+        )
+
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.metric("Cambios registrados (período)", f"{len(recs)}")
+    with m2:
+        tot_diff = sum(float(x["Diff vs ref. (USD)"]) for x in recs) if recs else 0.0
+        st.metric("Suma diff vs referencia (USD)", f"{tot_diff:+,.4f}", help="Positivo = más USD que la tasa de referencia.")
+    with m3:
+        st.metric(
+            "Equiv. USD en cuentas VES (ahora)",
+            f"US$ {sum(float(c.get('saldo_actual_usd') or 0) for c in rows_caj if c.get('activo') and str(c.get('moneda_cuenta') or '').strip().upper() == 'VES'):,.2f}",
+        )
+
+    if recs:
+        df_c = pd.DataFrame(recs)
+        df_c["Fecha"] = pd.to_datetime(df_c["Fecha"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+        st.dataframe(
+            df_c,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Bs": st.column_config.NumberColumn(format="%.2f"),
+                "USD obtenido": st.column_config.NumberColumn(format="%.4f"),
+                "Tasa ref. (Bs/USD)": st.column_config.NumberColumn(format="%.4f"),
+                "USD a tasa ref.": st.column_config.NumberColumn(format="%.4f"),
+                "Diff vs ref. (USD)": st.column_config.NumberColumn(format="%.4f"),
+            },
+        )
+    else:
+        st.caption("No hay registros de cambio en el rango de fechas del panel.")
+
+    def_tasa = 0.0
+    if t:
+        def_tasa = (
+            float(_nf(t.get("bcv_bs_por_usd")) or 0)
+            or float(_nf(t.get("tasa_bs")) or 0)
+            or float(_nf(t.get("paralelo_bs_por_usd")) or 0)
+        )
+    if def_tasa <= 0:
+        liv = get_live_exchange_rates()
+        def_tasa = float(_nf(liv.get("ves_bs_por_usd")) or 0)
+    if def_tasa <= 0:
+        def_tasa = 1.0
+
+    if not erp_uid:
+        st.warning("Sesión sin usuario ERP; no se puede registrar cambio.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    with st.expander("Registrar cambio (bitácora)", expanded=False):
+        with st.form("f_cambio_tesoreria_dash"):
+            opt_none = "__none__"
+            opt_o = [opt_none] + ves_ids
+            opt_d = [opt_none] + stab_ids
+
+            def _fmt_caja(cid: str) -> str:
+                if cid == opt_none:
+                    return "Sin especificar"
+                return id_to_et.get(cid, cid)
+
+            so = st.selectbox("Caja origen (VES)", options=opt_o, format_func=_fmt_caja, key="dash_ct_orig")
+            sd = st.selectbox("Caja destino (USD/USDT)", options=opt_d, format_func=_fmt_caja, key="dash_ct_dest")
+            m_ves_in = st.number_input("Monto en bolívares (Bs)", min_value=0.0001, format="%.4f", key="dash_ct_mves")
+            m_usd_in = st.number_input("USD obtenidos en el cambio", min_value=0.0001, format="%.4f", key="dash_ct_musd")
+            tasa_in = st.number_input(
+                "Tasa de referencia Bs por 1 USD (comparación)",
+                min_value=0.00000001,
+                value=float(def_tasa),
+                format="%.6f",
+                key="dash_ct_tasa",
+                help="Ej.: BCV o la cotización que tomás como referencia para saber si ganaste o perdiste.",
+            )
+            nota_in = st.text_input("Nota (opcional)", key="dash_ct_nota")
+            if st.form_submit_button("Guardar registro"):
+                try:
+                    payload_rpc: dict[str, Any] = {
+                        "p_usuario_id": erp_uid,
+                        "p_caja_origen_id": None if so == opt_none else str(so),
+                        "p_caja_destino_id": None if sd == opt_none else str(sd),
+                        "p_monto_ves": float(m_ves_in),
+                        "p_monto_usd_obtenido": float(m_usd_in),
+                        "p_tasa_referencia_bs_por_usd": float(tasa_in),
+                    }
+                    nn = (nota_in or "").strip()
+                    if nn:
+                        payload_rpc["p_nota"] = nn
+                    sb.rpc("registrar_cambio_tesoreria_erp", payload_rpc).execute()
+                    st.success("Registro guardado.")
+                    st.rerun()
+                except Exception as ex:
+                    st.error(str(ex))
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
     """Panel ejecutivo estilo Bento (dark + acentos cian/naranja). Streamlit + Plotly."""
     h1, h2, h3 = st.columns([2.2, 2.2, 1.6])
@@ -2998,6 +3165,18 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
     if d_b < d_a:
         st.error("La fecha *Hasta* debe ser ≥ *Desde*.")
         st.stop()
+
+    _caj_ves_alert = _cajas_fetch_rows(sb, solo_activas=True)
+    sum_ves_equiv_usd = sum(
+        float(c.get("saldo_actual_usd") or 0)
+        for c in _caj_ves_alert
+        if str(c.get("moneda_cuenta") or "").strip().upper() == "VES"
+    )
+    if sum_ves_equiv_usd >= 0.01:
+        st.warning(
+            f"**Hay bolívares en caja/banco:** las cuentas en **VES** suman ~**US$ {sum_ves_equiv_usd:,.2f}** de equivalente en el sistema. "
+            "Conviene evaluar pasar a **USD / USDT** (o vía que usen) y **registrar** el cambio más abajo para ver si la tasa te dejó ganancia o pérdida vs tu referencia (BCV/mercado)."
+        )
 
     n_days = max(1, (d_b - d_a).days + 1)
     d_prev_b = d_a - timedelta(days=1)
@@ -3373,6 +3552,8 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
         fig_ie.update_traces(marker_line_width=0)
         _plotly_apply_dash_theme(fig_ie, title="Ingresos y egresos por día")
         st.plotly_chart(fig_ie, use_container_width=True)
+
+    _dashboard_seccion_cambios_tesoreria(sb, t=t, d_a=d_a, d_b=d_b, r_fut=r_fut)
 
     st.markdown("##### Resumen: qué entró en Bs, USD y USDT (y en qué cuenta)")
     _dashboard_resumen_cobros_por_moneda(sb, d_a=d_a, r_fut=r_fut)
@@ -6380,6 +6561,10 @@ def module_mantenimiento(sb: Client) -> None:
     palabra = st.text_input('Escribe ELIMINAR para confirmar')
     if st.button("Ejecutar depuración") and palabra.strip().upper() == "ELIMINAR":
         try:
+            try:
+                sb.table("cambios_tesoreria").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
+            except Exception:
+                pass
             sb.table("movimientos_caja").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
             sb.table("ventas").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
             sb.table("compras").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
