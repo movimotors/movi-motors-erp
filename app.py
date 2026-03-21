@@ -3120,16 +3120,15 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
 
     st.divider()
     with st.expander(
-        "Productos — 5 pestañas: editar · categoría · nuevo · eliminar (stock 0) · carga/descarga inventario",
+        "Productos — Editar · Nuevo (incluye categoría) · Eliminar · Carga/descarga inventario",
         expanded=True,
     ):
-        _t_edit, _t_cat, _t_prod, _t_del, _t_mov = st.tabs(
+        _t_edit, _t_prod, _t_del, _t_mov = st.tabs(
             [
-                "Editar producto",
-                "Nueva categoría",
-                "Nuevo producto",
-                "Eliminar (stock 0)",
-                "Carga / descarga stock",
+                "Editar Productos",
+                "Nuevo Producto",
+                "Eliminar Producto",
+                "Carga /Descarga de inventario",
             ]
         )
         with _t_edit:
@@ -3138,7 +3137,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
             )
             if df.empty:
                 st.info(
-                    "No hay **productos** en la base. Creá categorías y productos en las otras pestañas o importá un **CSV** más abajo."
+                    "No hay **productos** en la base. Usá **Nuevo Producto** (y *Nueva categoría* dentro de esa pestaña) o importá un **CSV** más abajo."
                 )
             elif df_view.empty:
                 st.info(
@@ -3350,23 +3349,24 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                         st.error(
                                             f"{ex} · Revisá que esté aplicado **patch_011** (columnas repuestos) en Supabase."
                                         )
-        with _t_cat:
-            with st.form("f_cat"):
-                cn = st.text_input("Nombre categoría", key="inv_alta_cat_nombre")
-                submitted_cat = st.form_submit_button("Crear categoría")
-                if submitted_cat:
-                    if not cn.strip():
-                        st.error("Escribí un nombre para la categoría.")
-                    else:
-                        try:
-                            sb.table("categorias").insert({"nombre": cn.strip()}).execute()
-                            st.success("Categoría guardada en la base.")
-                            st.rerun()
-                        except Exception as ex:
-                            st.error(
-                                f"No se pudo guardar. Si el nombre ya existe, elegí otro (las categorías son únicas). Detalle: {ex}"
-                            )
         with _t_prod:
+            with st.expander("Nueva categoría", expanded=False):
+                st.caption("Creá la categoría acá si aún no existe; después elegila en el formulario de abajo.")
+                with st.form("f_cat"):
+                    cn = st.text_input("Nombre categoría", key="inv_alta_cat_nombre")
+                    submitted_cat = st.form_submit_button("Crear categoría")
+                    if submitted_cat:
+                        if not cn.strip():
+                            st.error("Escribí un nombre para la categoría.")
+                        else:
+                            try:
+                                sb.table("categorias").insert({"nombre": cn.strip()}).execute()
+                                st.success("Categoría guardada en la base.")
+                                st.rerun()
+                            except Exception as ex:
+                                st.error(
+                                    f"No se pudo guardar. Si el nombre ya existe, elegí otro (las categorías son únicas). Detalle: {ex}"
+                                )
             with st.form("f_prod"):
                 desc = st.text_input("Descripción", max_chars=500, key="inv_alta_prod_desc")
                 cx, mx = st.columns(2)
@@ -3742,7 +3742,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
     elif df_view.empty:
         st.info(
             "No hay filas con el filtro actual. Cambiá la búsqueda o la categoría para ver la tabla, "
-            "o usá la pestaña **Editar producto** en el expander *Productos* más arriba."
+            "o usá la pestaña **Editar Productos** en el expander *Productos* más arriba."
         )
     else:
         _inv_skip_cols = {"id", "categoria_id", "compatibilidad"}
