@@ -697,6 +697,35 @@ def _inv_build_compat_dict(marcas_csv: str, anos: str) -> dict[str, Any]:
     return out
 
 
+def _inv_merge_marcas_catalogo_texto(seleccion: list[str], texto_extra: str) -> str:
+    """Une marcas elegidas en multiselect + las que escribís a mano (coma o punto y coma)."""
+    nombres: set[str] = set()
+    for x in seleccion or []:
+        s = str(x).strip()
+        if s:
+            nombres.add(s)
+    raw = (texto_extra or "").replace(";", ",")
+    for x in raw.split(","):
+        s = x.strip()
+        if s:
+            nombres.add(s)
+    return ", ".join(sorted(nombres, key=str.casefold))
+
+
+def _fetch_marcas_vehiculo_catalogo(sb: Client) -> list[str]:
+    try:
+        mr = (
+            sb.table("marcas_vehiculo")
+            .select("nombre")
+            .eq("activo", True)
+            .order("orden")
+            .execute()
+        )
+        return [str(r["nombre"]) for r in (mr.data or []) if r.get("nombre")]
+    except Exception:
+        return []
+
+
 def _inv_row_matches_query(row: pd.Series, q: str) -> bool:
     ql = q.lower()
     for k in ("descripcion", "codigo", "sku_oem", "marca_producto"):
@@ -2883,6 +2912,7 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
 
     cat_opts = {c["nombre"]: c["id"] for c in cats_list if c.get("nombre")}
     _id_to_nombre_cat, _nombre_a_id_cat, _cat_select_opts = _categoria_maps_from_rows(cats_list)
+    _marcas_veh_catalogo = _fetch_marcas_vehiculo_catalogo(sb)
 
     df = _inv_enrich_compat_columns(_normalize_productos_inventario_df(_fetch_productos_inventario_df(sb)))
     if not df.empty:
@@ -3199,12 +3229,26 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                 b1, b2 = st.columns(2)
                 marca_rep = b1.text_input("Marca del repuesto (ej. Bosch, Denso)", key="inv_alta_marca_prod")
                 cond_alta = b2.selectbox("Condición", ["Nuevo", "Usado"], index=0, key="inv_alta_cond")
+                if _marcas_veh_catalogo:
+                    st.multiselect(
+                        "Marcas de carro (catálogo en base)",
+                        options=_marcas_veh_catalogo,
+                        default=[],
+                        key="inv_alta_marcas_pick",
+                        help="Listado cargado con **patch_012_marcas_vehiculo.sql**. Podés sumar más en el campo de texto.",
+                    )
+                else:
+                    st.caption(
+                        "No hay catálogo de marcas en la base. Ejecutá **supabase/patch_012_marcas_vehiculo.sql** "
+                        "en Supabase y recargá la app."
+                    )
+                    st.session_state["inv_alta_marcas_pick"] = []
                 c1, c2 = st.columns(2)
                 marcas_auto = c1.text_input(
-                    "Marcas de carro (compatibilidad)",
+                    "Otras marcas de carro (texto, coma)",
                     key="inv_alta_marcas_veh",
-                    placeholder="Toyota, Ford, Chevrolet…",
-                    help="Separá con coma. Es lo que después buscás al vender o consultar.",
+                    placeholder="Ej. otra que no esté en la lista…",
+                    help="Se unen con las que marcaste arriba en el catálogo.",
                 )
                 anos_auto = c2.text_input("Años / rango (opcional)", key="inv_alta_anos", placeholder="2010-2015")
                 u1, u2 = st.columns(2)
@@ -3223,7 +3267,9 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                 cid = cat_opts.get(cname) if cname else None
                 if st.form_submit_button("Guardar producto"):
                     try:
-                        _compat_ins = _inv_build_compat_dict(marcas_auto, anos_auto)
+                        _pick_mv = list(st.session_state.get("inv_alta_marcas_pick") or [])
+                        _merged_mv = _inv_merge_marcas_catalogo_texto(_pick_mv, marcas_auto)
+                        _compat_ins = _inv_build_compat_dict(_merged_mv, anos_auto)
                         sb.table("productos").insert(
                             {
                                 "codigo": codigo.strip() or None,
