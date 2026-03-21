@@ -1,0 +1,4 @@
+Carpeta de respaldos generados para copiar a Google Drive u otro medio.
+Ejecuta desde la raiz del proyecto:
+  powershell -ExecutionPolicy Bypass -File .\empresa_backup_drive\generar_respaldo.ps1
+Las subcarpetas Movi_backup_para_drive_* no se suben a Git (.gitignore).

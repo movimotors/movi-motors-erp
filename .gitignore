@@ -9,3 +9,6 @@ auth_state.json
 .DS_Store
 Thumbs.db
 auto_backups/
+
+# Paquetes para Drive (dentro de respaldos/); la carpeta respaldos/ si existe en Git solo con .gitkeep + LEEME
+respaldos/Movi_backup_para_drive_*/

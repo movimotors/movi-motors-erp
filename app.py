@@ -694,8 +694,29 @@ def _movi_bump_form_nonce(name: str) -> None:
 
 
 def _movi_reset_venta_form_fields() -> None:
+    """Quita el estado de widgets del formulario de venta (incl. cobros y líneas de producto)."""
     _movi_ss_pop_key_prefixes("vp_", "vq_", "vpu_", "vcb_", "vca_")
-    _movi_ss_pop_keys("venta_doc_tasa_bs", "venta_abono_credito")
+    _movi_ss_pop_keys(
+        "venta_doc_tasa_bs",
+        "venta_abono_credito",
+        "venta_cli",
+        "venta_forma",
+        "venta_fv",
+        "venta_notas",
+    )
+
+
+def _movi_reset_venta_session_nueva(plist: list[dict[str, Any]], id_to_price: dict[str, float]) -> None:
+    """Una línea de producto por defecto, un cobro, sin datos del cliente; nuevo `form` vía nonce."""
+    if not plist:
+        return
+    pid0 = str(plist[0]["id"])
+    st.session_state["venta_lines"] = [
+        {"producto_id": pid0, "cantidad": 1, "precio_unitario_usd": float(id_to_price.get(pid0, 0))}
+    ]
+    st.session_state["venta_n_cobros"] = 1
+    _movi_reset_venta_form_fields()
+    _movi_bump_form_nonce("venta_form_nonce")
 
 
 def _movi_reset_compra_form_fields() -> None:
@@ -5357,20 +5378,23 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             st.rerun()
 
     with st.form(f"f_venta_{int(st.session_state.get('venta_form_nonce', 0))}"):
-        cliente = st.text_input("Cliente")
+        cliente = st.text_input("Cliente", key="venta_cli", autocomplete="off")
         forma = st.selectbox(
             "Forma de pago",
             ["contado", "credito"],
+            key="venta_forma",
             help="**Crédito:** el cliente se lleva la mercancía y debe el saldo hasta la fecha límite. "
             "Podés marcar abono el mismo día (apartado con seña). **Contado:** debe pagar todo en el acto.",
         )
         fv = st.date_input(
             "Fecha límite para saldar (solo venta a crédito)",
             value=date.today() + timedelta(days=30),
+            key="venta_fv",
             help="Es la fecha en que en teoría debería estar pagado lo que quede debiendo. No bloquea el sistema; sirve para reportes y seguimiento.",
         )
         notas = st.text_area(
             "Notas (opcional)",
+            key="venta_notas",
             help="Podés escribir por ejemplo: Apartado, entrega en taller, teléfono del cliente, etc.",
         )
 
@@ -5544,16 +5568,7 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                             try:
                                 sb.rpc("crear_venta_erp", payload).execute()
                                 st.success("Venta registrada.")
-                                st.session_state["venta_lines"] = [
-                                    {
-                                        "producto_id": str(plist[0]["id"]),
-                                        "cantidad": 1,
-                                        "precio_unitario_usd": id_to_price[str(plist[0]["id"])],
-                                    }
-                                ]
-                                st.session_state["venta_n_cobros"] = 1
-                                _movi_reset_venta_form_fields()
-                                _movi_bump_form_nonce("venta_form_nonce")
+                                _movi_reset_venta_session_nueva(plist, id_to_price)
                                 st.rerun()
                             except Exception as e:
                                 err = str(e)
@@ -5598,16 +5613,7 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                                         f"Venta a crédito registrada. Abono ~US$ {sum_eq:,.2f}; "
                                         f"pendiente ~US$ {est_total - sum_eq:,.2f} en cuentas por cobrar."
                                     )
-                                    st.session_state["venta_lines"] = [
-                                        {
-                                            "producto_id": str(plist[0]["id"]),
-                                            "cantidad": 1,
-                                            "precio_unitario_usd": id_to_price[str(plist[0]["id"])],
-                                        }
-                                    ]
-                                    st.session_state["venta_n_cobros"] = 1
-                                    _movi_reset_venta_form_fields()
-                                    _movi_bump_form_nonce("venta_form_nonce")
+                                    _movi_reset_venta_session_nueva(plist, id_to_price)
                                     st.rerun()
                                 except Exception as e:
                                     err = str(e)
@@ -5622,25 +5628,29 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                         try:
                             sb.rpc("crear_venta_erp", payload).execute()
                             st.success("Venta a crédito registrada (todo pendiente de cobro).")
-                            st.session_state["venta_lines"] = [
-                                {
-                                    "producto_id": str(plist[0]["id"]),
-                                    "cantidad": 1,
-                                    "precio_unitario_usd": id_to_price[str(plist[0]["id"])],
-                                }
-                            ]
-                            st.session_state["venta_n_cobros"] = 1
-                            _movi_reset_venta_form_fields()
-                            _movi_bump_form_nonce("venta_form_nonce")
+                            _movi_reset_venta_session_nueva(plist, id_to_price)
                             st.rerun()
                         except Exception as e:
                             st.error(f"No se pudo registrar: {e}")
 
-    if st.button("Añadir línea"):
-        st.session_state["venta_lines"].append(
-            {"producto_id": str(plist[0]["id"]), "cantidad": 1, "precio_unitario_usd": id_to_price[str(plist[0]["id"])]}
-        )
-        st.rerun()
+    _ba, _bb = st.columns(2)
+    with _ba:
+        if st.button("Añadir línea de producto"):
+            st.session_state["venta_lines"].append(
+                {
+                    "producto_id": str(plist[0]["id"]),
+                    "cantidad": 1,
+                    "precio_unitario_usd": id_to_price[str(plist[0]["id"])],
+                }
+            )
+            st.rerun()
+    with _bb:
+        if st.button(
+            "Limpiar formulario (nueva venta)",
+            help="Borra cliente, notas, líneas y cobros en pantalla sin guardar en la base.",
+        ):
+            _movi_reset_venta_session_nueva(plist, id_to_price)
+            st.rerun()
 
     st.divider()
     st.caption(

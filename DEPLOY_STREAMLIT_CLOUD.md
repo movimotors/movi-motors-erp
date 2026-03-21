@@ -46,6 +46,7 @@ Guarda. **Redeploy** la app si ya estaba creada.
 - **Python:** el repo incluye `runtime.txt` para alinear versión en Cloud (evita sorpresas con librerías).
 - **Cookies de sesión:** en `https://*.streamlit.app` suelen funcionar; si algo raro pasa al refrescar, prueba otro navegador o revisa bloqueo de cookies.
 - **Binance P2P / APIs externas:** algunos despliegues en la nube comparten IPs que Binance a veces limita; si el P2P falla, el código usa respaldo (mismo VES que la API USD→VES). El BCV sigue siendo manual en **Tasas del día**.
+- **Operación continua:** ver **[MAINTENANCE.md](MAINTENANCE.md)** (respaldos, parches SQL, secretos).
 
 ## Actualizar la app
 

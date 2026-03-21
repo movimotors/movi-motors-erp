@@ -1,5 +1,9 @@
 # Movi Motors ERP (Streamlit + Supabase)
 
+**Mantenimiento a largo plazo:** checklist operativo en **[MAINTENANCE.md](MAINTENANCE.md)** (Git, SQL, respaldos, despliegue).
+
+**Respaldo para Google Drive + repo Git nuevo:** carpeta **[empresa_backup_drive/](empresa_backup_drive/)** → leé `INSTRUCCIONES.md` y ejecutá `generar_respaldo.ps1` (el paquete queda en **`respaldos/`**).
+
 1. En Supabase → SQL Editor: ejecutar `supabase/schema_erp_multimoneda.sql` (proyecto nuevo recomendado).
 2. Copiar `.streamlit/secrets.toml.example` a `.streamlit/secrets.toml` y completar URL + `service_role`. El acceso es con **usuario y contraseña** definidos en Supabase (`erp_users`); el primer acceso suele ser usuario `admin` y contraseña `admin` (cámbiala en el módulo **Usuarios**). Si tu base ya existía, ejecuta también `supabase/patch_004_erp_users_password_vendedor.sql` y, para el dashboard de tasas (BCV, paralelo, EUR, P2P), `supabase/patch_005_tasas_dashboard.sql` (corrige **PGRST204** si faltan columnas en `tasas_dia`). Para recalcular equivalentes Bs en productos al sincronizar tasas, ejecuta `supabase/patch_007_productos_bs_ref.sql`. Para **cobros en Bs / USD / USDT por caja** y el resumen en el dashboard, ejecuta `supabase/patch_008_movimientos_moneda_cobros.sql`. Para que la **restauración completa desde JSON** pueda alinear los números de factura/compra (`sync_erp_sequences`), ejecuta `supabase/patch_009_sync_sequences.sql` (también incluido en `schema_erp_multimoneda.sql` si creás el proyecto desde cero). Para el **respaldo automático diario** (tabla `erp_kv` que marca el día ya respaldado), ejecuta `supabase/patch_010_erp_kv.sql` (también va en el esquema completo si empezás de cero).
 
