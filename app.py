@@ -12,7 +12,7 @@ Acceso: cada persona entra con su **usuario** y **contraseña** (guardada hashea
 en `erp_users`). El **superusuario** crea usuarios y asigna rol: administrador,
 vendedor o almacén. Tras entrar, la sesión se guarda en una **cookie firmada**
 (por usuario y por cada login); al refrescar la página sigues identificado hasta
-que pulses **Salir** o venza la vigencia (p. ej. 90 días).
+que pulses **Cerrar sesión** o venza la vigencia (p. ej. 90 días).
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ import hashlib
 import hmac
 import html
 import json
+import math
 import re
 import secrets
 import unicodedata
@@ -919,7 +920,7 @@ def gate_user_login(sb: Client, cm: Any | None) -> dict[str, Any] | None:
     st.markdown("---")
     st.subheader("Iniciar sesión")
     _persist_hint = (
-        f"En este equipo la sesión se mantiene al refrescar (hasta **{SESSION_MAX_DAYS} días** o **Salir**)."
+        f"En este equipo la sesión se mantiene al refrescar (hasta **{SESSION_MAX_DAYS} días** o **Cerrar sesión**)."
         if _cookie_support()
         else "Para recordar la sesión al refrescar, instala: `python -m pip install extra-streamlit-components`."
     )
@@ -1571,17 +1572,202 @@ def _df_inventario_orden_impresion(df: pd.DataFrame, orden_key: str, *, agrupar_
     return work.sort_values(by=col_names, ascending=ascending, kind="mergesort")
 
 
-def _html_inventario_listado(
-    df: pd.DataFrame,
-    t: dict[str, Any] | None,
+# --- Reporte inventario: columnas (misma lógica HTML / PDF / Excel) ---
+INV_REP_COL_META: list[tuple[str, str]] = [
+    ("codigo", "Código"),
+    ("sku_oem", "OEM"),
+    ("descripcion", "Descripción"),
+    ("marca_producto", "Marca rep."),
+    ("condicion", "Cond."),
+    ("_veh_rep", "Marcas carro"),
+    ("_anos_rep", "Años"),
+    ("categoria_display", "Categoría"),
+    ("stock_actual", "Stock"),
+    ("stock_minimo", "Stock mín."),
+    ("costo_usd", "Costo USD"),
+    ("precio_v_usd", "Precio venta USD"),
+    ("precio_v_bs_ref", "Precio venta Bs (ref.)"),
+    ("costo_bs_ref", "Costo Bs (ref.)"),
+    ("_pv_usdt_ref", "Precio venta USDT (ref.)"),
+    ("_cu_usdt_ref", "Costo USDT (ref.)"),
+    ("ubicacion", "Ubicación"),
+    ("activo", "Activo"),
+]
+
+# Multiselect “personalizado”: las USDT se activan con el checkbox de moneda, no hace falta listarlas acá.
+INV_REP_COL_META_DICT: dict[str, str] = dict(INV_REP_COL_META)
+INV_REP_COL_KEYS_PERSONALIZADO: tuple[str, ...] = tuple(
+    k for k, _ in INV_REP_COL_META if k not in ("_pv_usdt_ref", "_cu_usdt_ref")
+)
+
+INV_REP_PDF_ABBR: dict[str, str] = {
+    "codigo": "Cód.",
+    "sku_oem": "OEM",
+    "descripcion": "Descripción",
+    "marca_producto": "M. rep.",
+    "condicion": "Cond.",
+    "_veh_rep": "Vehíc.",
+    "_anos_rep": "Años",
+    "categoria_display": "Cat.",
+    "stock_actual": "St",
+    "stock_minimo": "Mín",
+    "costo_usd": "C.U.",
+    "precio_v_usd": "P.V.",
+    "precio_v_bs_ref": "P.Bs",
+    "costo_bs_ref": "C.Bs",
+    "_pv_usdt_ref": "P.USDT",
+    "_cu_usdt_ref": "C.USDT",
+    "ubicacion": "Ubic.",
+    "activo": "Act.",
+}
+
+INV_REP_KEY_TO_EXCEL: dict[str, str] = {
+    "codigo": "Código",
+    "sku_oem": "OEM",
+    "descripcion": "Descripción",
+    "marca_producto": "Marca repuesto",
+    "condicion": "Condición",
+    "_veh_rep": "Marcas carro",
+    "_anos_rep": "Años",
+    "categoria_display": "Categoría",
+    "stock_actual": "Stock",
+    "stock_minimo": "Stock mín.",
+    "costo_usd": "Costo USD",
+    "precio_v_usd": "Precio venta USD",
+    "precio_v_bs_ref": "Precio venta Bs (ref.)",
+    "costo_bs_ref": "Costo Bs (ref.)",
+    "_pv_usdt_ref": "Precio venta USDT (ref.)",
+    "_cu_usdt_ref": "Costo USDT (ref.)",
+    "ubicacion": "Ubicación",
+    "activo": "Activo",
+}
+
+INV_REP_NUMERIC_KEYS: frozenset[str] = frozenset(
+    {
+        "stock_actual",
+        "stock_minimo",
+        "costo_usd",
+        "precio_v_usd",
+        "precio_v_bs_ref",
+        "costo_bs_ref",
+        "_pv_usdt_ref",
+        "_cu_usdt_ref",
+    }
+)
+
+INV_REP_SYNTH_USDT_KEYS: frozenset[str] = frozenset({"_pv_usdt_ref", "_cu_usdt_ref"})
+
+INV_REP_META_KEYS_SIN_SYNTH: frozenset[str] = frozenset(k for k, _ in INV_REP_COL_META if k not in INV_REP_SYNTH_USDT_KEYS)
+
+# None = todas las columnas disponibles según la tabla
+INV_REP_PRESET_COLS: dict[str, frozenset[str] | None] = {
+    "interno": None,
+    "lista_cliente": frozenset(
+        {
+            "codigo",
+            "descripcion",
+            "categoria_display",
+            "marca_producto",
+            "condicion",
+            "_veh_rep",
+            "precio_v_usd",
+        }
+    ),
+    "analisis_precios": frozenset(
+        {
+            "codigo",
+            "sku_oem",
+            "descripcion",
+            "marca_producto",
+            "condicion",
+            "_veh_rep",
+            "categoria_display",
+            "stock_actual",
+            "costo_usd",
+            "precio_v_usd",
+        }
+    ),
+}
+
+
+def _inv_rep_merge_template_keys(column_keys: frozenset[str] | None) -> frozenset[str]:
+    """Plantilla `None` = todas las columnas físicas (sin USDT sintéticas; esas van con el checkbox)."""
+    if column_keys is None:
+        return frozenset(INV_REP_META_KEYS_SIN_SYNTH)
+    return column_keys
+
+
+def _inv_rep_extend_currency_columns(
+    keys: frozenset[str],
     *,
-    agrupar_categoria: bool,
-    subtitulo_filtros: str,
-) -> str:
-    tz = ZoneInfo("America/Caracas")
-    fecha = datetime.now(tz).strftime("%d/%m/%Y %H:%M")
+    show_bs: bool,
+    show_usdt: bool,
+) -> frozenset[str]:
+    """Añade columnas de Bs ref. / USDT ref. solo si el usuario las pidió (p. ej. lista cliente sin Bs por defecto)."""
+    k = set(keys)
+    if show_bs:
+        k.add("precio_v_bs_ref")
+        if "costo_usd" in k:
+            k.add("costo_bs_ref")
+    if show_usdt:
+        k.update(INV_REP_SYNTH_USDT_KEYS)
+    return frozenset(k)
+
+
+def _inv_rep_apply_currency_prefs(
+    keys: frozenset[str],
+    *,
+    show_usd: bool,
+    show_bs: bool,
+    show_usdt: bool,
+) -> frozenset[str]:
+    drop: set[str] = set()
+    if not show_usd:
+        drop.update({"costo_usd", "precio_v_usd"})
+    if not show_bs:
+        drop.update({"precio_v_bs_ref", "costo_bs_ref"})
+    if not show_usdt:
+        drop.update(INV_REP_SYNTH_USDT_KEYS)
+    return frozenset(k for k in keys if k not in drop)
+
+
+def _inv_format_usdt_ref_cell(val_usd: Any, tasa_usdt: float | None) -> str:
+    """USDT ref. = USD × `tasa_usdt` (USDT por 1 USD en sistema), igual que en el resto de la app."""
+    if tasa_usdt is None or tasa_usdt <= 0 or not _inv_is_finite_num(val_usd):
+        return ""
+    return f"{float(val_usd) * float(tasa_usdt):,.6f}"
+
+
+def _inv_rep_cols_for_export(work: pd.DataFrame, column_keys: frozenset[str] | None) -> list[tuple[str, str]]:
+    """Orden fijo de metadatos; respeta columnas que existan en `work`."""
+    out: list[tuple[str, str]] = []
+    for key, lab in INV_REP_COL_META:
+        if column_keys is not None and key not in column_keys:
+            continue
+        if key in INV_REP_SYNTH_USDT_KEYS:
+            out.append((key, lab))
+            continue
+        if key in ("precio_v_bs_ref", "costo_bs_ref"):
+            if key not in work.columns:
+                continue
+        elif key in ("_veh_rep", "_anos_rep"):
+            if "compatibilidad" not in work.columns:
+                continue
+        elif key == "categoria_display":
+            if "categoria" not in work.columns:
+                continue
+        elif key not in work.columns:
+            continue
+        out.append((key, lab))
+    return out
+
+
+def _inv_rep_prepare_work_df(df: pd.DataFrame) -> pd.DataFrame:
     work = df.copy()
-    work["categoria_display"] = work["categoria"].map(_inv_cat_display)
+    if "categoria" in work.columns:
+        work["categoria_display"] = work["categoria"].map(_inv_cat_display)
+    else:
+        work["categoria_display"] = ""
     if "compatibilidad" in work.columns:
         work["_veh_rep"] = work["compatibilidad"].map(
             lambda x: _inv_compat_marcas_str(_inv_compat_as_dict(x))
@@ -1592,26 +1778,29 @@ def _html_inventario_listado(
     else:
         work["_veh_rep"] = ""
         work["_anos_rep"] = ""
+    return work
 
-    cols_print: list[tuple[str, str]] = [
-        ("codigo", "Código"),
-        ("sku_oem", "OEM"),
-        ("descripcion", "Descripción"),
-        ("marca_producto", "Marca rep."),
-        ("condicion", "Cond."),
-        ("_veh_rep", "Marcas carro"),
-        ("_anos_rep", "Años"),
-        ("categoria_display", "Categoría"),
-        ("stock_actual", "Stock"),
-        ("stock_minimo", "Stock mín."),
-        ("costo_usd", "Costo USD"),
-        ("precio_v_usd", "Precio venta USD"),
-    ]
-    cols_print = [(k, lab) for k, lab in cols_print if k in work.columns]
-    if "precio_v_bs_ref" in work.columns:
-        cols_print.append(("precio_v_bs_ref", "Precio venta Bs (ref.)"))
-    if "costo_bs_ref" in work.columns:
-        cols_print.append(("costo_bs_ref", "Costo Bs (ref.)"))
+
+def _html_inventario_listado(
+    df: pd.DataFrame,
+    t: dict[str, Any] | None,
+    *,
+    agrupar_categoria: bool,
+    subtitulo_filtros: str,
+    column_keys: frozenset[str] | None = None,
+) -> str:
+    tz = ZoneInfo("America/Caracas")
+    fecha = datetime.now(tz).strftime("%d/%m/%Y %H:%M")
+    work = _inv_rep_prepare_work_df(df)
+    cols_print = _inv_rep_cols_for_export(work, column_keys)
+    if not cols_print:
+        return (
+            "<!DOCTYPE html><html lang=\"es\"><head><meta charset=\"utf-8\"/><title>Inventario</title></head>"
+            "<body><p>No hay columnas para mostrar con la plantilla elegida (revisá datos o elegí otras columnas).</p></body></html>"
+        )
+
+    _t_bs_rep = float(t["tasa_bs"]) if (t and _nf(t.get("tasa_bs")) is not None) else None
+    _t_usdt_rep = float(t["tasa_usdt"]) if (t and _nf(t.get("tasa_usdt")) is not None) else None
 
     ths = "".join(f"<th>{html.escape(lab)}</th>" for _k, lab in cols_print)
     body_rows: list[str] = []
@@ -1627,28 +1816,43 @@ def _html_inventario_listado(
         tds: list[str] = []
         for key, _lab in cols_print:
             val = row.get(key)
+            td_cls = ""
             if key in ("stock_actual", "stock_minimo"):
                 try:
                     cell = f"{_inv_stock_int(val):,d}"
+                    td_cls = "num"
                 except (TypeError, ValueError):
                     cell = html.escape("" if val is None else str(val))
-            elif key in ("costo_usd", "precio_v_usd", "precio_v_bs_ref", "costo_bs_ref"):
-                try:
-                    cell = f"{float(val):,.2f}"
-                except (TypeError, ValueError):
-                    cell = html.escape("" if val is None else str(val))
+            elif key in ("costo_usd", "precio_v_usd"):
+                cell = f"{float(val):,.2f}" if _inv_is_finite_num(val) else ""
+                td_cls = "num"
+            elif key == "precio_v_bs_ref":
+                cell = _inv_format_bs_ref_cell(val, row.get("precio_v_usd"), _t_bs_rep)
+                td_cls = "num"
+            elif key == "costo_bs_ref":
+                cell = _inv_format_bs_ref_cell(val, row.get("costo_usd"), _t_bs_rep)
+                td_cls = "num"
+            elif key == "_pv_usdt_ref":
+                cell = _inv_format_usdt_ref_cell(row.get("precio_v_usd"), _t_usdt_rep)
+                td_cls = "num"
+            elif key == "_cu_usdt_ref":
+                cell = _inv_format_usdt_ref_cell(row.get("costo_usd"), _t_usdt_rep)
+                td_cls = "num"
+            elif key == "activo":
+                cell = "Sí" if bool(val) else "No"
             else:
                 if val is None or (isinstance(val, float) and pd.isna(val)):
                     cell = ""
                 else:
                     cell = html.escape(str(val))
-            tds.append(f"<td>{cell}</td>")
+                if key == "descripcion":
+                    td_cls = "desc"
+            _cls_attr = f' class="{td_cls}"' if td_cls else ""
+            tds.append(f"<td{_cls_attr}>{cell}</td>")
         body_rows.append("<tr>" + "".join(tds) + "</tr>")
 
     n = len(work)
-    tasa_note = ""
-    if t and _nf(t.get("tasa_bs")) is not None:
-        tasa_note = f"<p class=\"sub\">Tasa Bs/USD de referencia en sistema: <strong>{float(t['tasa_bs']):,.2f}</strong></p>"
+    tasa_note = _inv_rep_tasas_footer_html(cols_print, t)
 
     filt_html = f"<p class=\"sub\">{html.escape(subtitulo_filtros)}</p>" if subtitulo_filtros.strip() else ""
 
@@ -1699,10 +1903,14 @@ def _html_inventario_listado(
   h1 {{ font-size: 1.1rem; margin: 0 0 0.35rem 0; text-align: center; color: #2a1f45; }}
   .meta {{ color: #444; font-size: 0.82rem; margin-bottom: 0.65rem; text-align: center; }}
   .sub {{ font-size: 0.78rem; color: #333; margin: 0.3rem 0; text-align: center; }}
-  table {{ border-collapse: collapse; width: 100%; font-size: 0.72rem; }}
-  th, td {{ border: 1px solid #bbb; padding: 0.3rem 0.4rem; text-align: left; vertical-align: top; word-break: break-word; }}
+  table.inv-grid {{ border-collapse: collapse; width: 100%; font-size: 0.72rem; table-layout: fixed; }}
+  th, td {{ border: 1px solid #bbb; padding: 0.35rem 0.45rem; text-align: left; vertical-align: top;
+    word-wrap: break-word; overflow-wrap: anywhere; hyphens: auto; }}
   th {{ background: #2a1f45; color: #fff; font-weight: 600; }}
-  tr.catgrp td {{ background: #fff3e0; font-weight: 700; color: #e65100; border-color: #ffcc80; }}
+  th.num, td.num {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
+  td.desc {{ white-space: normal; }}
+  tr.catgrp td {{ background: #fff3e0; font-weight: 700; color: #e65100; border-color: #ffcc80;
+    font-family: Segoe UI, Roboto, Arial, sans-serif; font-style: normal; }}
   tr:nth-child(even) td {{ background: #fafafa; }}
   .foot {{ margin-top: 0.85rem; font-size: 0.75rem; color: #555; text-align: center; }}
   .print-actions {{ margin-top: 0.75rem; text-align: center; }}
@@ -1721,7 +1929,7 @@ def _html_inventario_listado(
   <div class="meta">Generado: {html.escape(fecha)} (America/Caracas) · <strong>{n}</strong> ítem(s)</div>
   {tasa_note}
   {filt_html}
-  <table>
+  <table class="inv-grid">
     <thead><tr>{ths}</tr></thead>
     <tbody>
       {''.join(body_rows)}
@@ -1743,8 +1951,46 @@ def _export_cell_txt(val: Any) -> str:
     return "" if s.lower() == "nan" else s
 
 
-def _df_inventario_export_flat(df: pd.DataFrame) -> pd.DataFrame:
-    work = df.copy()
+def _inv_is_finite_num(val: Any) -> bool:
+    if val is None:
+        return False
+    try:
+        if isinstance(val, float) and pd.isna(val):
+            return False
+        v = float(val)
+        return math.isfinite(v)
+    except (TypeError, ValueError):
+        return False
+
+
+def _inv_rep_tasas_footer_html(cols_print: list[tuple[str, str]], t: dict[str, Any] | None) -> str:
+    bits: list[str] = []
+    keys_in = {k for k, _ in cols_print}
+    if keys_in & {"precio_v_bs_ref", "costo_bs_ref"} and t and _nf(t.get("tasa_bs")) is not None:
+        bits.append(f"Ref. Bs/USD (precios en Bs): <strong>{float(t['tasa_bs']):,.2f}</strong> Bs por 1 USD")
+    if keys_in & INV_REP_SYNTH_USDT_KEYS and t and _nf(t.get("tasa_usdt")) is not None:
+        bits.append(f"Ref. USDT/USD: <strong>{float(t['tasa_usdt']):,.6f}</strong> USDT por 1 USD")
+    if not bits:
+        return ""
+    return '<p class="sub">' + " · ".join(bits) + "</p>"
+
+
+def _inv_format_bs_ref_cell(val_bs: Any, val_usd: Any, tasa_bs: float | None) -> str:
+    """Bs ref.: usa columna BD si es número; si no, USD × tasa del reporte (evita nan en PDF/HTML)."""
+    if _inv_is_finite_num(val_bs):
+        return f"{float(val_bs):,.2f}"
+    if tasa_bs is not None and tasa_bs > 0 and _inv_is_finite_num(val_usd):
+        return f"{float(val_usd) * float(tasa_bs):,.2f}"
+    return ""
+
+
+def _df_inventario_export_flat(
+    df: pd.DataFrame,
+    t: dict[str, Any] | None = None,
+    column_keys: frozenset[str] | None = None,
+) -> pd.DataFrame:
+    work = _inv_rep_prepare_work_df(df.copy())
+    _t_bs_x = _nf(t.get("tasa_bs")) if t else None
     base: dict[str, Any] = {
         "Código": work["codigo"].map(_export_cell_txt),
         "Descripción": work["descripcion"].map(_export_cell_txt),
@@ -1771,11 +2017,33 @@ def _df_inventario_export_flat(df: pd.DataFrame) -> pd.DataFrame:
         base["Ubicación"] = work["ubicacion"].map(_export_cell_txt)
     out = pd.DataFrame(base)
     if "precio_v_bs_ref" in work.columns:
-        out["Precio venta Bs (ref.)"] = pd.to_numeric(work["precio_v_bs_ref"], errors="coerce")
+        _pv = pd.to_numeric(work["precio_v_usd"], errors="coerce")
+        _pbs = pd.to_numeric(work["precio_v_bs_ref"], errors="coerce")
+        if _t_bs_x is not None and _t_bs_x > 0:
+            _pbs = _pbs.fillna(_pv * float(_t_bs_x))
+        out["Precio venta Bs (ref.)"] = _pbs
     if "costo_bs_ref" in work.columns:
-        out["Costo Bs (ref.)"] = pd.to_numeric(work["costo_bs_ref"], errors="coerce")
+        _cv = pd.to_numeric(work["costo_usd"], errors="coerce")
+        _cbs = pd.to_numeric(work["costo_bs_ref"], errors="coerce")
+        if _t_bs_x is not None and _t_bs_x > 0:
+            _cbs = _cbs.fillna(_cv * float(_t_bs_x))
+        out["Costo Bs (ref.)"] = _cbs
+    _t_ut_x = _nf(t.get("tasa_usdt")) if t else None
+    _pvu_num = pd.to_numeric(work["precio_v_usd"], errors="coerce")
+    _cvu_num = pd.to_numeric(work["costo_usd"], errors="coerce")
+    if _t_ut_x is not None and _t_ut_x > 0:
+        out["Precio venta USDT (ref.)"] = _pvu_num * float(_t_ut_x)
+        out["Costo USDT (ref.)"] = _cvu_num * float(_t_ut_x)
+    else:
+        out["Precio venta USDT (ref.)"] = pd.Series([pd.NA] * len(work), index=work.index, dtype="Float64")
+        out["Costo USDT (ref.)"] = pd.Series([pd.NA] * len(work), index=work.index, dtype="Float64")
     if "activo" in work.columns:
         out["Activo"] = work["activo"].astype(bool)
+    keys_order = [k for k, _ in _inv_rep_cols_for_export(work, column_keys)]
+    excel_pick = [INV_REP_KEY_TO_EXCEL[k] for k in keys_order if k in INV_REP_KEY_TO_EXCEL]
+    cols_ok = [c for c in excel_pick if c in out.columns]
+    if cols_ok:
+        out = out[cols_ok]
     return out
 
 
@@ -1807,26 +2075,25 @@ def _reporte_tabla_a_csv(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
 
 
-def _pdf_short_txt(val: Any, max_len: int) -> str:
-    if val is None or (isinstance(val, float) and pd.isna(val)):
-        s = ""
-    else:
-        s = str(val).strip()
-    if len(s) > max_len:
-        return s[: max_len - 1] + "…"
-    return s
-
-
 def _pdf_inventario_col_widths(n_cols: int, total_w: float) -> list[float]:
-    """Proporciones para **A4 vertical** (ancho útil ≈ 210 mm − márgenes)."""
+    """Proporciones para **A4 vertical** (ancho útil ≈ 210 mm − márgenes). Suman 1.0."""
     if n_cols == 7:
         parts = [0.09, 0.30, 0.14, 0.09, 0.09, 0.145, 0.145]
     elif n_cols == 8:
         parts = [0.08, 0.26, 0.12, 0.08, 0.08, 0.13, 0.13, 0.13]
     elif n_cols == 9:
         parts = [0.07, 0.22, 0.11, 0.07, 0.07, 0.12, 0.12, 0.12, 0.12]
+    elif n_cols == 10:
+        # Cód OEM Desc Cond Vehíc Cat St Mín C.U. P.V.
+        parts = [0.055, 0.062, 0.26, 0.045, 0.118, 0.072, 0.036, 0.036, 0.088, 0.088]
+    elif n_cols == 11:
+        parts = [0.052, 0.058, 0.22, 0.042, 0.105, 0.068, 0.032, 0.032, 0.078, 0.078, 0.087]
+    elif n_cols == 12:
+        parts = [0.048, 0.054, 0.195, 0.04, 0.098, 0.065, 0.03, 0.03, 0.074, 0.074, 0.076, 0.076]
     else:
-        parts = [1.0 / n_cols] * n_cols
+        parts = [1.0 / max(1, n_cols)] * max(1, n_cols)
+    s = sum(parts)
+    parts = [p / s for p in parts]
     return [total_w * p for p in parts]
 
 
@@ -1836,15 +2103,16 @@ def _pdf_inventario_bytes(
     *,
     agrupar_categoria: bool,
     subtitulo_filtros: str,
+    column_keys: frozenset[str] | None = None,
 ) -> bytes:
     from copy import deepcopy
 
     from xml.sax.saxutils import escape as xml_esc
 
     from reportlab.lib import colors
-    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
     from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
     from reportlab.lib.utils import ImageReader
     from reportlab.platypus import Image as RLImage
@@ -1903,9 +2171,16 @@ def _pdf_inventario_bytes(
             meta,
         )
     )
+    work_pdf = _inv_rep_prepare_work_df(df)
+    col_defs_pdf = _inv_rep_cols_for_export(work_pdf, column_keys)
+    pdf_key_list = [k for k, _ in col_defs_pdf]
+    _keys_pdf_set = set(pdf_key_list)
     tbs = _nf(t.get("tasa_bs")) if t else None
-    if tbs is not None:
+    if tbs is not None and _keys_pdf_set & {"precio_v_bs_ref", "costo_bs_ref"}:
         story.append(Paragraph(xml_esc(f"Tasa Bs/USD ref.: {tbs:,.2f}"), meta))
+    tusd = _nf(t.get("tasa_usdt")) if t else None
+    if tusd is not None and _keys_pdf_set & INV_REP_SYNTH_USDT_KEYS:
+        story.append(Paragraph(xml_esc(f"Tasa USDT/USD ref.: {tusd:,.6f}"), meta))
     if subtitulo_filtros.strip():
         sf = deepcopy(styles["BodyText"])
         sf.fontSize = 8
@@ -1913,13 +2188,46 @@ def _pdf_inventario_bytes(
         story.append(Paragraph(xml_esc(subtitulo_filtros), sf))
     story.append(Spacer(1, 2.5 * mm))
 
-    headers = ["Cód.", "OEM", "Descripción", "Cond.", "Vehíc.", "Cat.", "St", "Mín", "C.U.", "P.V."]
-    if "precio_v_bs_ref" in df.columns:
-        headers.append("P.Bs")
-    if "costo_bs_ref" in df.columns:
-        headers.append("C.Bs")
+    if not pdf_key_list:
+        story.append(Paragraph(xml_esc("Sin columnas para mostrar con la plantilla elegida."), meta))
+        doc.build(story)
+        return buf.getvalue()
+    headers = [INV_REP_PDF_ABBR.get(k, k) for k in pdf_key_list]
     n_h = len(headers)
     col_ws = _pdf_inventario_col_widths(n_h, tw)
+    t_bs_pdf = _nf(t.get("tasa_bs")) if t else None
+
+    cell_l = ParagraphStyle(
+        name="invCellL",
+        fontName="Helvetica",
+        fontSize=6.5,
+        leading=7.8,
+        alignment=TA_LEFT,
+        spaceAfter=0,
+        spaceBefore=0,
+    )
+    cell_r = ParagraphStyle(
+        name="invCellR",
+        fontName="Helvetica",
+        fontSize=6.5,
+        leading=7.8,
+        alignment=TA_RIGHT,
+        spaceAfter=0,
+        spaceBefore=0,
+    )
+    hdr_ps = ParagraphStyle(
+        name="invHdr",
+        fontName="Helvetica-Bold",
+        fontSize=6.5,
+        leading=8,
+        alignment=TA_CENTER,
+        textColor=colors.whitesmoke,
+        spaceAfter=0,
+        spaceBefore=0,
+    )
+
+    def Pcell(txt: str | None, ps: ParagraphStyle) -> Paragraph:
+        return Paragraph(xml_esc("" if txt is None else str(txt)), ps)
 
     def fmt_int_st(x: Any) -> str:
         try:
@@ -1928,37 +2236,43 @@ def _pdf_inventario_bytes(
             return ""
 
     def fmt2(x: Any) -> str:
-        try:
-            return f"{float(x):,.2f}"
-        except (TypeError, ValueError):
-            return ""
+        return f"{float(x):,.2f}" if _inv_is_finite_num(x) else ""
 
-    def row_cells(r: pd.Series) -> list[str]:
-        cd = _inv_cat_display(r.get("categoria"))
-        _dcomp = _inv_compat_as_dict(r.get("compatibilidad"))
-        _veh = _pdf_short_txt(_inv_compat_marcas_str(_dcomp), 14)
-        cells = [
-            _pdf_short_txt(r.get("codigo"), 8),
-            _pdf_short_txt(r.get("sku_oem"), 10),
-            _pdf_short_txt(r.get("descripcion"), 22),
-            _pdf_short_txt(r.get("condicion"), 6),
-            _veh,
-            _pdf_short_txt(cd, 10),
-            fmt_int_st(r.get("stock_actual")),
-            fmt_int_st(r.get("stock_minimo")),
-            fmt2(r.get("costo_usd")),
-            fmt2(r.get("precio_v_usd")),
-        ]
-        if "precio_v_bs_ref" in df.columns:
-            cells.append(fmt2(r.get("precio_v_bs_ref")))
-        if "costo_bs_ref" in df.columns:
-            cells.append(fmt2(r.get("costo_bs_ref")))
-        return [xml_esc(c) for c in cells]
+    def cell_txt_for_key(r: pd.Series, key: str) -> str:
+        if key == "categoria_display":
+            return _inv_cat_display(r.get("categoria")) or ""
+        if key == "_veh_rep":
+            return _inv_compat_marcas_str(_inv_compat_as_dict(r.get("compatibilidad"))) or ""
+        if key == "_anos_rep":
+            return _inv_compat_anos_str(_inv_compat_as_dict(r.get("compatibilidad"))) or ""
+        if key == "activo":
+            return "Sí" if bool(r.get("activo")) else "No"
+        if key in ("stock_actual", "stock_minimo"):
+            return fmt_int_st(r.get(key))
+        if key in ("costo_usd", "precio_v_usd"):
+            return fmt2(r.get(key))
+        if key == "precio_v_bs_ref":
+            return _inv_format_bs_ref_cell(r.get("precio_v_bs_ref"), r.get("precio_v_usd"), t_bs_pdf)
+        if key == "costo_bs_ref":
+            return _inv_format_bs_ref_cell(r.get("costo_bs_ref"), r.get("costo_usd"), t_bs_pdf)
+        if key == "_pv_usdt_ref":
+            return _inv_format_usdt_ref_cell(r.get("precio_v_usd"), tusd)
+        if key == "_cu_usdt_ref":
+            return _inv_format_usdt_ref_cell(r.get("costo_usd"), tusd)
+        return _export_cell_txt(r.get(key))
+
+    def row_cells(r: pd.Series) -> list[Paragraph]:
+        texts = [cell_txt_for_key(r, k) for k in pdf_key_list]
+        out: list[Paragraph] = []
+        for k, tx in zip(pdf_key_list, texts):
+            out.append(Pcell(tx, cell_r if k in INV_REP_NUMERIC_KEYS else cell_l))
+        return out
+
+    hdr_row = [Pcell(h, hdr_ps) for h in headers]
 
     tbl_style = TableStyle(
         [
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2a1f45")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
             ("FONTSIZE", (0, 0), (-1, -1), 6.5),
             ("LEADING", (0, 0), (-1, -1), 8),
@@ -1968,16 +2282,23 @@ def _pdf_inventario_bytes(
         ]
     )
 
-    work = df.copy()
-    work["_cdisp"] = work["categoria"].map(_inv_cat_display)
+    work = work_pdf
+    work["_cdisp"] = work["categoria_display"]
 
     if agrupar_categoria:
-        h4_base = deepcopy(styles["Heading4"])
-        h4_base.fontSize = 9.5
-        h4_base.textColor = colors.HexColor("#e65100")
+        h4_base = ParagraphStyle(
+            name="invCatHdr",
+            fontName="Helvetica-Bold",
+            fontSize=9.5,
+            leading=11,
+            textColor=colors.HexColor("#e65100"),
+            alignment=TA_LEFT,
+            spaceAfter=2,
+            spaceBefore=2,
+        )
         for cat_name, grp in work.groupby("_cdisp", sort=False):
             story.append(Paragraph(f"<b>{xml_esc(str(cat_name))}</b>", h4_base))
-            data: list[list[str]] = [headers]
+            data: list[list[Any]] = [hdr_row]
             for _, r in grp.iterrows():
                 data.append(row_cells(r))
             tbl = Table(data, colWidths=col_ws, repeatRows=1)
@@ -1985,7 +2306,7 @@ def _pdf_inventario_bytes(
             story.append(tbl)
             story.append(Spacer(1, 2 * mm))
     else:
-        data = [headers]
+        data = [hdr_row]
         for _, r in work.iterrows():
             data.append(row_cells(r))
         tbl = Table(data, colWidths=col_ws, repeatRows=1)
@@ -5671,6 +5992,44 @@ def panel_reportes_inventario_export(sb: Client, t: dict[str, Any] | None) -> No
         key="rep_inv_print_cats",
     )
     _use_cats = _pick_cat if _pick_cat else _lab_cat
+    _inv_col_mode = st.selectbox(
+        "Qué columnas incluir (PDF, HTML y Excel)",
+        options=["interno", "lista_cliente", "analisis_precios", "personalizado"],
+        format_func=lambda x: {
+            "interno": "Completo — operación interna",
+            "lista_cliente": "Lista de precios (cliente: sin costos, OEM, stock, años…)",
+            "analisis_precios": "Análisis de precios (sin años ni stock mínimo)",
+            "personalizado": "Personalizado — elijo columnas",
+        }[x],
+        key="rep_inv_col_mode",
+        help="Para listas que ves al cliente ocultá costos y datos internos. En análisis podés quitar años o stock mínimo.",
+    )
+    _col_keys_f: frozenset[str] | None
+    if _inv_col_mode == "personalizado":
+        _opts_k = list(INV_REP_COL_KEYS_PERSONALIZADO)
+        _cust = st.multiselect(
+            "Columnas del reporte",
+            options=_opts_k,
+            default=_opts_k,
+            format_func=lambda k: INV_REP_COL_META_DICT[k],
+            key="rep_inv_col_custom",
+        )
+        _col_keys_f = frozenset(_cust) if _cust else None
+    else:
+        _col_keys_f = INV_REP_PRESET_COLS[_inv_col_mode]
+    st.markdown("**Precios en el reporte** (activá solo lo que necesites)")
+    _m1, _m2, _m3 = st.columns(3)
+    with _m1:
+        _show_usd = st.checkbox("USD (costo y precio)", value=True, key="rep_inv_cur_usd")
+    with _m2:
+        _show_bs = st.checkbox("Bs (ref., según tasa del sistema)", value=False, key="rep_inv_cur_bs")
+    with _m3:
+        _show_usdt = st.checkbox("USDT (ref., USD × tasa USDT)", value=False, key="rep_inv_cur_usdt")
+    _k_tpl = _inv_rep_merge_template_keys(_col_keys_f)
+    _k_ext = _inv_rep_extend_currency_columns(_k_tpl, show_bs=_show_bs, show_usdt=_show_usdt)
+    _col_keys_export = _inv_rep_apply_currency_prefs(
+        _k_ext, show_usd=_show_usd, show_bs=_show_bs, show_usdt=_show_usdt
+    )
     _ic1, _ic2 = st.columns(2)
     with _ic1:
         _solo_act = st.checkbox("Solo productos activos", value=True, key="rep_inv_print_act")
@@ -5726,6 +6085,23 @@ def panel_reportes_inventario_export(sb: Client, t: dict[str, Any] | None) -> No
     _parts_sub.append(_orden_lbl)
     if _agrup_cat:
         _parts_sub.append("agrupado por categoría")
+    _parts_sub.append(
+        {
+            "interno": "columnas: todas",
+            "lista_cliente": "columnas: lista cliente",
+            "analisis_precios": "columnas: análisis precios",
+            "personalizado": "columnas: personalizado",
+        }[_inv_col_mode]
+    )
+    _mon_lbl: list[str] = []
+    if _show_usd:
+        _mon_lbl.append("USD")
+    if _show_bs:
+        _mon_lbl.append("Bs ref.")
+    if _show_usdt:
+        _mon_lbl.append("USDT ref.")
+    if _mon_lbl:
+        _parts_sub.append("precios: " + " · ".join(_mon_lbl))
     _sub_f = " · ".join(_parts_sub)
 
     if _df_p.empty:
@@ -5734,9 +6110,13 @@ def panel_reportes_inventario_export(sb: Client, t: dict[str, Any] | None) -> No
     else:
         _df_out = _df_inventario_orden_impresion(_df_p, _orden_key, agrupar_categoria=bool(_agrup_cat))
     _html_inv = _html_inventario_listado(
-        _df_out, t, agrupar_categoria=bool(_agrup_cat), subtitulo_filtros=_sub_f
+        _df_out,
+        t,
+        agrupar_categoria=bool(_agrup_cat),
+        subtitulo_filtros=_sub_f,
+        column_keys=_col_keys_export,
     )
-    _df_flat = _df_inventario_export_flat(_df_out)
+    _df_flat = _df_inventario_export_flat(_df_out, t, column_keys=_col_keys_export)
     _ts_p = _backup_file_timestamp()
     _bx, _bp = st.columns(2)
     with _bx:
@@ -5756,7 +6136,11 @@ def panel_reportes_inventario_export(sb: Client, t: dict[str, Any] | None) -> No
     with _bp:
         try:
             _pdf_b = _pdf_inventario_bytes(
-                _df_out, t, agrupar_categoria=bool(_agrup_cat), subtitulo_filtros=_sub_f
+                _df_out,
+                t,
+                agrupar_categoria=bool(_agrup_cat),
+                subtitulo_filtros=_sub_f,
+                column_keys=_col_keys_export,
             )
         except ImportError:
             st.caption("Instalá **reportlab** para PDF.")
@@ -6755,6 +7139,9 @@ def main() -> None:
             render_movi_theme_picker(key_suffix="sb")
         render_brand_logo()
         render_sidebar_welcome(nombre=str(erp.get("nombre", username)), username=username, rol=rol)
+        if st.button("Cerrar sesión", key="movi_sidebar_logout", use_container_width=True):
+            _logout()
+            st.rerun()
         render_sidebar_cotizaciones(t)
         render_cambiar_mi_password(sb, erp_uid)
         opts: list[str] = []
@@ -6776,11 +7163,9 @@ def main() -> None:
             opts.append("Mantenimiento")
         if not opts:
             st.error("Tu rol no tiene módulos asignados. Pide al superusuario que revise tu cuenta.")
+            st.caption("Podés **Cerrar sesión** con el botón de arriba (debajo de tu nombre).")
             st.stop()
         mod = st.radio("Módulo", opts, label_visibility="collapsed")
-        if st.button("Salir", use_container_width=True):
-            _logout()
-            st.rerun()
 
     if mod == "Dashboard" and role_can(rol, "dashboard"):
         module_dashboard(sb, t)
