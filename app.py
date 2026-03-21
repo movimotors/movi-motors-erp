@@ -2449,11 +2449,25 @@ def _infer_tasa_bs_oper_index(lt: dict[str, Any]) -> int:
 
 DOC_TASA_BS_OPTS = ("BCV oficial", "P2P Binance (mercado)")
 
+# Cobros en caja: ZELLE se contabiliza 1:1 como USD (mismo tratamiento en RPC).
+COBRO_MONEDAS: tuple[str, ...] = ("USD", "ZELLE", "VES", "USDT")
+
+_COBR_MON_LBL: dict[str, str] = {
+    "USD": "USD (efectivo o transferencia local en dólares)",
+    "ZELLE": "Zelle (USD en cuenta USA; 1:1 con USD)",
+    "VES": "Bolívares (VES)",
+    "USDT": "USDT (cripto)",
+}
+
+
+def _fmt_moneda_cobro(code: str) -> str:
+    return _COBR_MON_LBL.get(code, code)
+
 
 def _monto_nativo_a_usd(mon: str, monto: float, t_bs: float, t_usdt: float) -> float:
-    """Convierte monto cobrado en VES / USD / USDT a equivalente USD (tasas de la venta)."""
+    """Convierte monto cobrado en VES / USD / USDT / ZELLE a equivalente USD (tasas de la venta)."""
     u = (mon or "").strip().upper()
-    if u == "USD":
+    if u in ("USD", "ZELLE"):
         return float(monto)
     if u == "USDT":
         return float(monto) / float(t_usdt) if t_usdt else 0.0
@@ -2865,14 +2879,24 @@ def _dashboard_resumen_cobros_por_moneda(sb: Client, *, d_a: date, r_fut: str) -
     """Ingresos a caja en el período: totales VES / USD / USDT y detalle por cuenta."""
     dsl = d_a.isoformat()
     try:
-        mh = (
-            sb.table("movimientos_caja")
-            .select("caja_id, monto_usd, moneda, monto_moneda, concepto, created_at")
-            .eq("tipo", "Ingreso")
-            .gte("created_at", dsl)
-            .lte("created_at", r_fut)
-            .execute()
-        )
+        try:
+            mh = (
+                sb.table("movimientos_caja")
+                .select("caja_id, monto_usd, moneda, monto_moneda, concepto, nota_operacion, created_at")
+                .eq("tipo", "Ingreso")
+                .gte("created_at", dsl)
+                .lte("created_at", r_fut)
+                .execute()
+            )
+        except Exception:
+            mh = (
+                sb.table("movimientos_caja")
+                .select("caja_id, monto_usd, moneda, monto_moneda, concepto, created_at")
+                .eq("tipo", "Ingreso")
+                .gte("created_at", dsl)
+                .lte("created_at", r_fut)
+                .execute()
+            )
     except Exception:
         st.caption(
             "Para ver cobros en **Bs / USD / USDT** por caja, ejecutá en Supabase "
@@ -2888,7 +2912,7 @@ def _dashboard_resumen_cobros_por_moneda(sb: Client, *, d_a: date, r_fut: str) -
     caj_map = {str(c["id"]): _caja_etiqueta_lista(c) for c in _cajas_fetch_rows(sb, solo_activas=False)}
 
     recs: list[dict[str, Any]] = []
-    tot_ves = tot_usdt = tot_usd_cash = 0.0
+    tot_ves = tot_usdt = tot_usd_cash = tot_zelle = 0.0
     sum_equiv_usd = 0.0
     for r in rows:
         mon = (r.get("moneda") or "USD").strip().upper()
@@ -2900,6 +2924,10 @@ def _dashboard_resumen_cobros_por_moneda(sb: Client, *, d_a: date, r_fut: str) -
             tot_ves += native
         elif mon == "USDT":
             tot_usdt += native
+        elif mon == "ZELLE":
+            tot_zelle += native
+        elif mon == "USD":
+            tot_usd_cash += native
         else:
             tot_usd_cash += native
         recs.append(
@@ -2910,10 +2938,11 @@ def _dashboard_resumen_cobros_por_moneda(sb: Client, *, d_a: date, r_fut: str) -
                 "Monto moneda": native,
                 "Equiv. USD": mu,
                 "Concepto": (r.get("concepto") or "")[:80],
+                "Nota tesorería": str(r.get("nota_operacion") or "")[:100],
             }
         )
 
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     with m1:
         st.metric("Cobrado VES (Bs)", f"{tot_ves:,.2f}")
     with m2:
@@ -2921,6 +2950,8 @@ def _dashboard_resumen_cobros_por_moneda(sb: Client, *, d_a: date, r_fut: str) -
     with m3:
         st.metric("Cobrado USD", f"US$ {tot_usd_cash:,.2f}")
     with m4:
+        st.metric("Zelle (USD)", f"US$ {tot_zelle:,.2f}")
+    with m5:
         st.metric("Ingresos (equiv. USD)", f"US$ {sum_equiv_usd:,.2f}")
 
     st.caption(
@@ -3406,20 +3437,29 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
 
     st.divider()
     st.markdown("##### Últimos movimientos de caja")
-    mov = (
-        sb.table("movimientos_caja")
-        .select("created_at, tipo, monto_usd, concepto, caja_id")
-        .order("created_at", desc=True)
-        .limit(15)
-        .execute()
-    )
+    try:
+        mov = (
+            sb.table("movimientos_caja")
+            .select("created_at, tipo, monto_usd, concepto, caja_id, moneda, nota_operacion")
+            .order("created_at", desc=True)
+            .limit(15)
+            .execute()
+        )
+    except Exception:
+        mov = (
+            sb.table("movimientos_caja")
+            .select("created_at, tipo, monto_usd, concepto, caja_id")
+            .order("created_at", desc=True)
+            .limit(15)
+            .execute()
+        )
     if mov.data:
         _mc_cajas = _cajas_fetch_rows(sb, solo_activas=False)
         _mc_map = {str(c["id"]): _caja_etiqueta_lista(c) for c in _mc_cajas}
         df_mc = pd.DataFrame(mov.data)
         df_mc["caja"] = df_mc["caja_id"].map(lambda x: _mc_map.get(str(x), str(x)[:8] + "…"))
         df_mc = df_mc.drop(columns=["caja_id"], errors="ignore")
-        cols = ["created_at", "tipo", "monto_usd", "caja", "concepto"]
+        cols = ["created_at", "tipo", "monto_usd", "moneda", "caja", "concepto", "nota_operacion"]
         df_mc = df_mc[[c for c in cols if c in df_mc.columns]]
         st.dataframe(df_mc, use_container_width=True, hide_index=True)
     else:
@@ -4754,7 +4794,8 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             st.markdown("**Cobro al contado — por moneda y cuenta**")
             st.caption(
                 f"Total venta **US$ {est_total:,.2f}**. La suma en USD equivalente de las filas debe coincidir (±0,05). "
-                "**VES** = bolívares cobrados; **USDT** = unidades USDT; **USD** = dólares en efectivo/banco."
+                "**Zelle** cuenta como dólares (1:1). En *Nota de tesorería* podés escribir si cambiaste Bs a USD, "
+                "quién te mandó el Zelle, etc. (sale en reportes de caja)."
             )
             if not caja_ids:
                 st.error("No hay cajas activas. Cree una en el módulo Cajas.")
@@ -4768,20 +4809,30 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                     key=f"vcb_ck_{i}",
                 )
                 mon = r2.selectbox(
-                    "Moneda",
-                    options=["USD", "VES", "USDT"],
+                    "Forma / moneda",
+                    options=list(COBRO_MONEDAS),
+                    format_func=_fmt_moneda_cobro,
                     key=f"vcb_mon_{i}",
-                    help="Monto en la moneda elegida (no en USD salvo que elija USD).",
+                    help="Monto en la moneda elegida. Zelle = USD vía Zelle.",
                 )
-                default_m = float(est_total) if (n_cob == 1 and i == 0 and mon == "USD") else 0.0
+                default_m = float(est_total) if (n_cob == 1 and i == 0 and mon in ("USD", "ZELLE")) else 0.0
+                _fmt_am = "%.2f" if mon in ("USD", "ZELLE") else "%.4f"
                 mval = r3.number_input(
                     f"Monto ({mon})",
                     min_value=0.0,
                     value=default_m,
-                    format="%.4f" if mon != "USD" else "%.2f",
+                    format=_fmt_am,
                     key=f"vcb_mv_{i}",
                 )
-                cobros_pl.append({"caja_id": str(cid), "moneda": mon, "monto": float(mval)})
+                nota_cob = st.text_input(
+                    "Nota de tesorería (opcional)",
+                    placeholder="Ej.: Cliente pagó en Bs; cambié a USD en caja fuerte el … / Zelle recibido de …",
+                    key=f"vcb_no_{i}",
+                )
+                _row_c: dict[str, Any] = {"caja_id": str(cid), "moneda": mon, "monto": float(mval)}
+                if (nota_cob or "").strip():
+                    _row_c["nota_operacion"] = (nota_cob or "").strip()
+                cobros_pl.append(_row_c)
 
         abono_hoy = False
         if forma == "credito":
@@ -4809,18 +4860,28 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                         key=f"vca_ck_{i}",
                     )
                     mon = r2.selectbox(
-                        "Moneda",
-                        options=["USD", "VES", "USDT"],
+                        "Forma / moneda",
+                        options=list(COBRO_MONEDAS),
+                        format_func=_fmt_moneda_cobro,
                         key=f"vca_mon_{i}",
                     )
+                    _fmt_aa = "%.2f" if mon in ("USD", "ZELLE") else "%.4f"
                     mval = r3.number_input(
                         f"Monto ({mon})",
                         min_value=0.0,
                         value=0.0,
-                        format="%.4f" if mon != "USD" else "%.2f",
+                        format=_fmt_aa,
                         key=f"vca_mv_{i}",
                     )
-                    cobros_pl.append({"caja_id": str(cid), "moneda": mon, "monto": float(mval)})
+                    nota_ab = st.text_input(
+                        "Nota de tesorería (opcional)",
+                        placeholder="Ej.: Seña en Bs, liquidación luego a Zelle…",
+                        key=f"vca_no_{i}",
+                    )
+                    _row_a: dict[str, Any] = {"caja_id": str(cid), "moneda": mon, "monto": float(mval)}
+                    if (nota_ab or "").strip():
+                        _row_a["nota_operacion"] = (nota_ab or "").strip()
+                    cobros_pl.append(_row_a)
 
         if st.form_submit_button("Registrar venta (atómica)"):
             try:
@@ -4972,27 +5033,78 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
         df = pd.DataFrame(cxc.data)
         st.dataframe(df, use_container_width=True, hide_index=True)
         row_id = st.selectbox("ID CXC", options=[str(x["id"]) for x in cxc.data])
-        monto = st.number_input("Monto a cobrar USD", min_value=0.01, value=float(next(x["monto_pendiente_usd"] for x in cxc.data if str(x["id"]) == row_id)), format="%.2f")
+        _cxc_row = next(x for x in cxc.data if str(x["id"]) == row_id)
+        pend_usd = float(_cxc_row["monto_pendiente_usd"])
+        _vid = str(_cxc_row["venta_id"])
+        _tvr = sb.table("ventas").select("tasa_bs,tasa_usdt").eq("id", _vid).limit(1).execute()
+        _t_bs_v = float((_tvr.data or [{}])[0].get("tasa_bs") or t["tasa_bs"])
+        _t_ut_v = float((_tvr.data or [{}])[0].get("tasa_usdt") or t["tasa_usdt"])
         if not caja_ids:
             st.warning("No hay cajas activas para registrar el cobro.")
         caja_cobro = (
-            st.selectbox("Caja cobro", options=caja_ids, format_func=caja_fmt, key="cxc_caja") if caja_ids else None
+            st.selectbox("Cuenta donde entra el cobro", options=caja_ids, format_func=caja_fmt, key="cxc_caja")
+            if caja_ids
+            else None
         )
+        cxc_mon = st.selectbox(
+            "Cómo paga el cliente (moneda o medio)",
+            options=list(COBRO_MONEDAS),
+            format_func=_fmt_moneda_cobro,
+            key="cxc_mon",
+            help="El sistema convierte a USD con las **tasas de la venta** original.",
+        )
+        _def_nat = pend_usd if cxc_mon in ("USD", "ZELLE") else 0.0
+        monto_nativo = st.number_input(
+            f"Monto en {cxc_mon}",
+            min_value=0.01,
+            value=float(_def_nat),
+            format="%.2f" if cxc_mon in ("USD", "ZELLE") else "%.4f",
+            key="cxc_monto_nat",
+        )
+        sum_eq_cxc = round(_monto_nativo_a_usd(cxc_mon, float(monto_nativo), _t_bs_v, _t_ut_v), 2)
+        st.caption(
+            f"Equivale a **~ US$ {sum_eq_cxc:,.2f}** en el sistema. Pendiente en esta cuenta: **US$ {pend_usd:,.2f}**."
+        )
+        nota_cxc = st.text_input(
+            "Nota de tesorería (opcional)",
+            placeholder="Ej.: Bs recibidos en Banesco; cambiados a efectivo USD / recibí Zelle de …",
+            key="cxc_nota_op",
+        )
+        if sum_eq_cxc > pend_usd + 0.05:
+            st.warning("El equivalente en USD es mayor al pendiente; ajustá el monto o la moneda.")
         if st.button("Registrar cobro CXC", disabled=not caja_ids):
-            try:
-                sb.rpc(
-                    "cobrar_cxc_erp",
-                    {
-                        "p_usuario_id": erp_uid,
-                        "p_cxc_id": row_id,
-                        "p_caja_id": str(caja_cobro),
-                        "p_monto_usd": float(monto),
-                    },
-                ).execute()
-                st.success("Cobro registrado.")
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
+            if sum_eq_cxc > pend_usd + 0.05:
+                st.error("No se registró: el cobro supera lo pendiente.")
+            else:
+                try:
+                    _pc0: dict[str, Any] = {
+                        "caja_id": str(caja_cobro),
+                        "moneda": cxc_mon,
+                        "monto": float(monto_nativo),
+                    }
+                    if (nota_cxc or "").strip():
+                        _pc0["nota_operacion"] = (nota_cxc or "").strip()
+                    sb.rpc(
+                        "cobrar_cxc_erp",
+                        {
+                            "p_usuario_id": erp_uid,
+                            "p_cxc_id": row_id,
+                            "p_caja_id": str(caja_cobro),
+                            "p_monto_usd": float(sum_eq_cxc),
+                            "p_cobros": [_pc0],
+                        },
+                    ).execute()
+                    st.success("Cobro registrado.")
+                    st.rerun()
+                except Exception as e:
+                    err = str(e)
+                    if "nota_operacion" in err or "column" in err.lower():
+                        st.error(
+                            f"{err} · Ejecutá en Supabase `supabase/patch_017_movimientos_nota_zelle.sql` "
+                            "y recargá el esquema."
+                        )
+                    else:
+                        st.error(err)
     else:
         st.info("No hay cuentas por cobrar pendientes.")
 
@@ -5178,19 +5290,24 @@ def module_cajas(sb: Client, erp_uid: str) -> None:
         monto = st.number_input("Monto USD", min_value=0.01, format="%.2f")
         concepto = st.text_input("Concepto")
         ref = st.text_input("Referencia")
+        nota_mov = st.text_input(
+            "Nota de tesorería (opcional)",
+            placeholder="Ej.: Cambio Bs→USD, traspaso entre cuentas…",
+            key="caja_mov_nota_op",
+        )
         if st.form_submit_button("Registrar"):
             try:
-                sb.rpc(
-                    "registrar_movimiento_caja_erp",
-                    {
-                        "p_usuario_id": erp_uid,
-                        "p_caja_id": str(cid_mov),
-                        "p_tipo": tipo_m,
-                        "p_monto_usd": float(monto),
-                        "p_concepto": concepto,
-                        "p_referencia": ref,
-                    },
-                ).execute()
+                _rpc_mov: dict[str, Any] = {
+                    "p_usuario_id": erp_uid,
+                    "p_caja_id": str(cid_mov),
+                    "p_tipo": tipo_m,
+                    "p_monto_usd": float(monto),
+                    "p_concepto": concepto,
+                    "p_referencia": ref,
+                }
+                if (nota_mov or "").strip():
+                    _rpc_mov["p_nota_operacion"] = (nota_mov or "").strip()
+                sb.rpc("registrar_movimiento_caja_erp", _rpc_mov).execute()
                 st.success("Movimiento registrado.")
                 st.rerun()
             except Exception as e:
@@ -5416,7 +5533,9 @@ def _rep_movimientos_caja_filtrados(
     try:
         q = (
             sb.table("movimientos_caja")
-            .select("created_at, tipo, monto_usd, moneda, monto_moneda, concepto, referencia, caja_id, usuario_id")
+            .select(
+                "created_at, tipo, monto_usd, moneda, monto_moneda, concepto, referencia, nota_operacion, caja_id, usuario_id"
+            )
             .gte("created_at", ds)
             .lte("created_at", hf)
             .order("created_at", desc=True)
@@ -5434,6 +5553,7 @@ def _rep_movimientos_caja_filtrados(
         for row in r.data or []:
             row.setdefault("moneda", None)
             row.setdefault("monto_moneda", None)
+            row.setdefault("nota_operacion", None)
     rows = r.data or []
     if caja_id:
         rows = [x for x in rows if str(x.get("caja_id")) == caja_id]
@@ -5534,6 +5654,7 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
                     "Monto en moneda original": float(mm) if mm is not None else "",
                     "Concepto": (m.get("concepto") or "")[:120],
                     "Referencia": (m.get("referencia") or "")[:80],
+                    "Nota tesorería": str(m.get("nota_operacion") or "")[:200],
                     "Registrado por": umap.get(str(m.get("usuario_id")), "—"),
                 }
             )
