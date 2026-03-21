@@ -23,7 +23,9 @@ import hashlib
 import hmac
 import html
 import json
+import re
 import secrets
+import unicodedata
 import time
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
@@ -710,6 +712,43 @@ def _inv_merge_marcas_catalogo_texto(seleccion: list[str], texto_extra: str) -> 
         if s:
             nombres.add(s)
     return ", ".join(sorted(nombres, key=str.casefold))
+
+
+def _codigo_interno_slug(s: str, *, max_len: int = 3) -> str:
+    """Fragmento corto en mayúsculas (solo letras/números) para armar códigos tipo FIL-BOS-0001."""
+    if not s or not str(s).strip():
+        return "GEN"[:max_len]
+    t = unicodedata.normalize("NFKD", str(s).strip())
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    t = "".join(ch for ch in t.upper() if ch.isalnum())
+    if not t:
+        return "GEN"[:max_len]
+    return t[:max_len]
+
+
+def _siguiente_codigo_interno_producto(sb: Client, nombre_categoria: str, marca_repuesto: str) -> str:
+    """
+    Código automático: CATEGORÍA(3)-MARCA_REP(3)-NNNN.
+    Ej.: categoría «Filtros» + marca «Bosch» → FIL-BOS-0007
+    """
+    cat = _codigo_interno_slug(nombre_categoria or "CAT", max_len=3)
+    mar = _codigo_interno_slug(marca_repuesto or "GEN", max_len=3)
+    prefix = f"{cat}-{mar}-"
+    try:
+        r = sb.table("productos").select("codigo").like("codigo", f"{prefix}%").execute()
+    except Exception:
+        r = type("R", (), {"data": []})()
+    max_n = 0
+    rx = re.compile(re.escape(prefix) + r"(\d{1,6})$", re.IGNORECASE)
+    for row in r.data or []:
+        c = (row.get("codigo") or "").strip()
+        m = rx.match(c)
+        if m:
+            try:
+                max_n = max(max_n, int(m.group(1)))
+            except ValueError:
+                pass
+    return f"{prefix}{max_n + 1:04d}"
 
 
 def _fetch_marcas_vehiculo_catalogo(sb: Client) -> list[str]:
@@ -3349,13 +3388,45 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                             )
         with _t_prod:
             with st.form("f_prod"):
-                a1, a2 = st.columns(2)
-                codigo = a1.text_input("Código interno (tuyo)", key="inv_alta_prod_codigo")
-                sku_oem = a2.text_input("Código OEM / parte / fabricante", key="inv_alta_prod_sku_oem")
                 desc = st.text_input("Descripción", max_chars=500, key="inv_alta_prod_desc")
-                b1, b2 = st.columns(2)
-                marca_rep = b1.text_input("Marca del repuesto (ej. Bosch, Denso)", key="inv_alta_marca_prod")
-                cond_alta = b2.selectbox("Condición", ["Nuevo", "Usado"], index=0, key="inv_alta_cond")
+                cx, mx = st.columns(2)
+                cname = cx.selectbox(
+                    "Categoría",
+                    options=[""] + sorted(cat_opts.keys(), key=str.casefold),
+                    key="inv_alta_prod_cat",
+                    help="Para código automático es obligatoria. Primeras 3 letras/números del nombre → tramo del código.",
+                )
+                marca_rep = mx.text_input(
+                    "Marca del repuesto (ej. Bosch, Denso)",
+                    key="inv_alta_marca_prod",
+                    help="Primeras 3 letras/números → tramo del código. Vacío = **GEN** (ej. FIL-GEN-0001).",
+                )
+                cond_alta = st.selectbox("Condición", ["Nuevo", "Usado"], index=0, key="inv_alta_cond")
+                st.markdown("**Código interno**")
+                cod_auto = st.checkbox(
+                    "Generar automático: **categoría + marca + número** (ej. `FIL-BOS-0001`)",
+                    value=True,
+                    key="inv_alta_cod_auto",
+                )
+                codigo_manual = ""
+                if cod_auto:
+                    if cname:
+                        _prev_cod = _siguiente_codigo_interno_producto(sb, cname, marca_rep)
+                        st.info(
+                            f"Vista previa: **`{_prev_cod}`** · Al guardar se vuelve a calcular el siguiente libre "
+                            "(por si otro usuario cargó algo al mismo tiempo)."
+                        )
+                    else:
+                        st.warning("Elegí una **categoría** para poder generar el código automático.")
+                else:
+                    codigo_manual = st.text_input(
+                        "Código manual",
+                        key="inv_alta_prod_codigo",
+                        placeholder="Ej. ARR-REN-01",
+                    )
+                a1, a2 = st.columns(2)
+                sku_oem = a1.text_input("Código OEM / parte / fabricante", key="inv_alta_prod_sku_oem")
+                a2.caption("El **código interno** es el tuyo para buscar en inventario; el OEM es el de la caja/fábrica.")
                 if _marcas_veh_catalogo:
                     st.multiselect(
                         "Marcas de carro (catálogo en base)",
@@ -3390,33 +3461,82 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                         f"Margen bruto sobre costo: **{((float(pv) - float(costo)) / float(costo) * 100):.1f}%** "
                         f"· Diferencia USD: **{float(pv) - float(costo):.2f}**"
                     )
-                cname = st.selectbox("Categoría", options=[""] + list(cat_opts.keys()), key="inv_alta_prod_cat")
                 cid = cat_opts.get(cname) if cname else None
                 if st.form_submit_button("Guardar producto"):
                     try:
                         _pick_mv = list(st.session_state.get("inv_alta_marcas_pick") or [])
                         _merged_mv = _inv_merge_marcas_catalogo_texto(_pick_mv, marcas_auto)
                         _compat_ins = _inv_build_compat_dict(_merged_mv, anos_auto)
-                        sb.table("productos").insert(
-                            {
-                                "codigo": codigo.strip() or None,
-                                "sku_oem": sku_oem.strip() or None,
-                                "descripcion": desc.strip() or "Sin descripción",
-                                "marca_producto": marca_rep.strip() or None,
-                                "condicion": cond_alta,
-                                "ubicacion": ubic.strip() or None,
-                                "compatibilidad": _compat_ins,
-                                "imagen_url": img_url.strip() or None,
-                                "stock_actual": int(stock),
-                                "stock_minimo": int(smin),
-                                "costo_usd": float(costo),
-                                "precio_v_usd": float(pv),
-                                "categoria_id": cid,
-                                "activo": True,
-                            }
-                        ).execute()
-                        st.success("Producto guardado en la base.")
-                        st.rerun()
+                        if cod_auto:
+                            if not cname:
+                                st.error("Para código automático elegí una **categoría**.")
+                            else:
+                                codigo_final: str | None = _siguiente_codigo_interno_producto(sb, cname, marca_rep)
+                                _insert_ok = False
+                                _last_ex: Exception | None = None
+                                for _ in range(10):
+                                    try:
+                                        sb.table("productos").insert(
+                                            {
+                                                "codigo": codigo_final,
+                                                "sku_oem": sku_oem.strip() or None,
+                                                "descripcion": desc.strip() or "Sin descripción",
+                                                "marca_producto": marca_rep.strip() or None,
+                                                "condicion": cond_alta,
+                                                "ubicacion": ubic.strip() or None,
+                                                "compatibilidad": _compat_ins,
+                                                "imagen_url": img_url.strip() or None,
+                                                "stock_actual": int(stock),
+                                                "stock_minimo": int(smin),
+                                                "costo_usd": float(costo),
+                                                "precio_v_usd": float(pv),
+                                                "categoria_id": cid,
+                                                "activo": True,
+                                            }
+                                        ).execute()
+                                        _insert_ok = True
+                                        break
+                                    except Exception as ex_i:
+                                        _last_ex = ex_i
+                                        es = str(ex_i).lower()
+                                        if "duplicate" in es or "unique" in es or "23505" in es:
+                                            codigo_final = _siguiente_codigo_interno_producto(sb, cname, marca_rep)
+                                        else:
+                                            raise
+                                if _insert_ok:
+                                    st.success(f"Producto guardado con código **{codigo_final}**.")
+                                    st.rerun()
+                                else:
+                                    st.error(
+                                        str(_last_ex)
+                                        if _last_ex
+                                        else "No se pudo asignar código único. Reintentá o usá código manual."
+                                    )
+                        else:
+                            _cm = (codigo_manual or "").strip()
+                            if not _cm:
+                                st.error("Ingresá un **código manual** o activá el generador automático.")
+                            else:
+                                sb.table("productos").insert(
+                                    {
+                                        "codigo": _cm or None,
+                                        "sku_oem": sku_oem.strip() or None,
+                                        "descripcion": desc.strip() or "Sin descripción",
+                                        "marca_producto": marca_rep.strip() or None,
+                                        "condicion": cond_alta,
+                                        "ubicacion": ubic.strip() or None,
+                                        "compatibilidad": _compat_ins,
+                                        "imagen_url": img_url.strip() or None,
+                                        "stock_actual": int(stock),
+                                        "stock_minimo": int(smin),
+                                        "costo_usd": float(costo),
+                                        "precio_v_usd": float(pv),
+                                        "categoria_id": cid,
+                                        "activo": True,
+                                    }
+                                ).execute()
+                                st.success("Producto guardado en la base.")
+                                st.rerun()
                     except Exception as ex:
                         st.error(
                             f"No se pudo guardar el producto: {ex}. "
@@ -3424,9 +3544,9 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                         )
 
     st.caption(
-        "CSV: obligatorias **codigo**, **descripcion**, **stock_actual**, **stock_minimo**, **costo_usd**, **precio_v_usd**. "
-        "Opcional: **categoria**, **sku_oem**, **marca_producto**, **condicion** (Nuevo/Usado), **ubicacion**, "
-        "**marcas_vehiculo** (Toyota, Ford… separadas por coma), **años**, **imagen_url**."
+        "CSV: obligatorias **codigo** (en import no hay autogenerado; ponelos vos), **descripcion**, **stock_actual**, "
+        "**stock_minimo**, **costo_usd**, **precio_v_usd**. Opcional: **categoria**, **sku_oem**, **marca_producto**, "
+        "**condicion**, **ubicacion**, **marcas_vehiculo**, **años**, **imagen_url**."
     )
     up = st.file_uploader("CSV", type=["csv"], key="inv_csv_upload")
     if up is not None:
