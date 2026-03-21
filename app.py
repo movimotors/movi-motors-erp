@@ -75,9 +75,11 @@ def render_brand_logo(*, use_column_width: bool = True) -> None:
 
 
 # --- Temas de interfaz (fondos y acentos; texto siempre legible) ---
+MOVI_UI_THEME_DEFAULT: str = "aurora"
+
 MOVI_UI_THEME_ORDER: list[str] = [
-    "origen",
     "aurora",
+    "origen",
     "laguna",
     "calido",
     "lavanda",
@@ -476,9 +478,9 @@ MOVI_UI_THEMES: dict[str, dict[str, str]] = {
 
 
 def _movi_ui_theme_tokens() -> dict[str, str]:
-    tid = st.session_state.get("movi_ui_theme", "origen")
+    tid = st.session_state.get("movi_ui_theme", MOVI_UI_THEME_DEFAULT)
     if tid not in MOVI_UI_THEMES:
-        tid = "origen"
+        tid = MOVI_UI_THEME_DEFAULT
     row = dict(MOVI_UI_THEMES[tid])
     row.pop("label", None)
     return row
@@ -648,9 +650,9 @@ def render_movi_ui_theme_styles() -> None:
 
 def render_movi_theme_picker(*, key_suffix: str) -> None:
     opts = MOVI_UI_THEME_ORDER
-    cur = st.session_state.get("movi_ui_theme", "origen")
+    cur = st.session_state.get("movi_ui_theme", MOVI_UI_THEME_DEFAULT)
     if cur not in opts:
-        cur = "origen"
+        cur = MOVI_UI_THEME_DEFAULT
     sel = st.selectbox(
         "Tema visual",
         options=opts,
@@ -673,6 +675,59 @@ st.set_page_config(
 )
 
 render_movi_ui_theme_styles()
+
+
+def _movi_ss_pop_keys(*keys: str) -> None:
+    for k in keys:
+        st.session_state.pop(k, None)
+
+
+def _movi_ss_pop_key_prefixes(*prefixes: str) -> None:
+    for k in list(st.session_state.keys()):
+        if any(str(k).startswith(p) for p in prefixes):
+            st.session_state.pop(k, None)
+
+
+def _movi_bump_form_nonce(name: str) -> None:
+    st.session_state[name] = int(st.session_state.get(name, 0)) + 1
+
+
+def _movi_reset_venta_form_fields() -> None:
+    _movi_ss_pop_key_prefixes("vp_", "vq_", "vpu_", "vcb_", "vca_")
+    _movi_ss_pop_keys("venta_doc_tasa_bs", "venta_abono_credito")
+
+
+def _movi_reset_compra_form_fields() -> None:
+    _movi_ss_pop_key_prefixes("cp_", "cq_", "ccu_")
+    _movi_ss_pop_keys("forma_compra", "caja_compra", "fv_compra", "compra_doc_tasa_bs")
+
+
+def _movi_reset_producto_alta_fields() -> None:
+    _movi_ss_pop_keys(
+        "inv_alta_prod_desc",
+        "inv_alta_prod_cat",
+        "inv_alta_marca_prod",
+        "inv_alta_cond",
+        "inv_alta_cod_auto",
+        "inv_alta_prod_codigo",
+        "inv_alta_prod_sku_oem",
+        "inv_alta_marcas_pick",
+        "inv_alta_marcas_veh",
+        "inv_alta_anos",
+        "inv_alta_ubic",
+        "inv_alta_img",
+    )
+
+
+def _movi_reset_inv_ficha_product_keys(product_id: str) -> None:
+    pid = str(product_id).strip()
+    if not pid:
+        return
+    suf = f"_{pid}"
+    for k in list(st.session_state.keys()):
+        sk = str(k)
+        if sk.startswith("inv_ficha_") and sk.endswith(suf):
+            st.session_state.pop(k, None)
 
 
 def _secrets_ready() -> bool:
@@ -3103,7 +3158,7 @@ def _dashboard_seccion_cambios_tesoreria(
         return
 
     with st.expander("Registrar cambio (bitácora)", expanded=False):
-        with st.form("f_cambio_tesoreria_dash"):
+        with st.form(f"f_cambio_tesoreria_dash_{int(st.session_state.get('dash_cambio_teso_form_nonce', 0))}"):
             opt_none = "__none__"
             opt_o = [opt_none] + ves_ids
             opt_d = [opt_none] + stab_ids
@@ -3163,6 +3218,16 @@ def _dashboard_seccion_cambios_tesoreria(
                         payload_rpc["p_nota"] = nn
                     sb.rpc("registrar_cambio_tesoreria_erp", payload_rpc).execute()
                     st.success("Registro guardado.")
+                    _movi_bump_form_nonce("dash_cambio_teso_form_nonce")
+                    _movi_ss_pop_keys(
+                        "dash_ct_orig",
+                        "dash_ct_dest",
+                        "dash_ct_mves",
+                        "dash_ct_musd",
+                        "dash_ct_tcompra",
+                        "dash_ct_tcomp",
+                        "dash_ct_nota",
+                    )
                     st.rerun()
                 except Exception as ex:
                     st.error(str(ex))
@@ -3776,7 +3841,8 @@ def module_tasas(sb: Client, *, embedded: bool = False) -> None:
         else dv("tasa_usdt", 1.0)
     )
 
-    _form_id = "f_tasa_embed" if embedded else "f_tasa"
+    _tasa_fn = int(st.session_state.get("tasa_form_nonce", 0))
+    _form_id = (f"f_tasa_embed_{_tasa_fn}" if embedded else f"f_tasa_{_tasa_fn}")
     _oper_opts = ("BCV oficial (campo 1)", "Mercado P2P Binance — Bs/USD (campo 2)")
     with st.form(_form_id):
         f = st.date_input("Fecha", value=date.today())
@@ -3851,6 +3917,7 @@ def module_tasas(sb: Client, *, embedded: bool = False) -> None:
                 try:
                     sb.table("tasas_dia").upsert(row, on_conflict="fecha").execute()
                     st.success("Tasas guardadas." + _refresh_productos_bs_equiv_note(sb, float(t_oper)))
+                    _movi_bump_form_nonce("tasa_form_nonce")
                     st.rerun()
                 except Exception as e:
                     st.error(str(e))
@@ -4038,7 +4105,9 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                             _cond_ini = _rw.get("condicion")
                             if _cond_ini not in ("Nuevo", "Usado"):
                                 _cond_ini = "Nuevo"
-                            with st.form(f"inv_ficha_prod_form_{_pid}"):
+                            with st.form(
+                                f"inv_ficha_prod_form_{_pid}_{int(st.session_state.get(f'inv_ficha_form_nonce_{_pid}', 0))}"
+                            ):
                                 st.caption(f"ID interno: `{_pid}` · Los cambios reemplazan el registro en la base.")
                                 fa, fb = st.columns(2)
                                 _fcod = fa.text_input(
@@ -4186,6 +4255,8 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                     try:
                                         sb.table("productos").update(_upd_f).eq("id", _pid).execute()
                                         st.success("Producto actualizado.")
+                                        _movi_reset_inv_ficha_product_keys(_pid)
+                                        _movi_bump_form_nonce(f"inv_ficha_form_nonce_{_pid}")
                                         st.rerun()
                                     except Exception as ex:
                                         st.error(
@@ -4194,7 +4265,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
         with _t_prod:
             with st.expander("Nueva categoría", expanded=False):
                 st.caption("Creá la categoría acá si aún no existe; después elegila en el formulario de abajo.")
-                with st.form("f_cat"):
+                with st.form(f"f_cat_{int(st.session_state.get('inv_cat_form_nonce', 0))}"):
                     cn = st.text_input("Nombre categoría", key="inv_alta_cat_nombre")
                     submitted_cat = st.form_submit_button("Crear categoría")
                     if submitted_cat:
@@ -4204,12 +4275,14 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                             try:
                                 sb.table("categorias").insert({"nombre": cn.strip()}).execute()
                                 st.success("Categoría guardada en la base.")
+                                _movi_ss_pop_keys("inv_alta_cat_nombre")
+                                _movi_bump_form_nonce("inv_cat_form_nonce")
                                 st.rerun()
                             except Exception as ex:
                                 st.error(
                                     f"No se pudo guardar. Si el nombre ya existe, elegí otro (las categorías son únicas). Detalle: {ex}"
                                 )
-            with st.form("f_prod"):
+            with st.form(f"f_prod_{int(st.session_state.get('inv_prod_form_nonce', 0))}"):
                 desc = st.text_input("Descripción", max_chars=500, key="inv_alta_prod_desc")
                 cx, mx = st.columns(2)
                 cname = cx.selectbox(
@@ -4327,6 +4400,8 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                             raise
                                 if _insert_ok:
                                     st.success(f"Producto guardado con código **{codigo_final}**.")
+                                    _movi_reset_producto_alta_fields()
+                                    _movi_bump_form_nonce("inv_prod_form_nonce")
                                     st.rerun()
                                 else:
                                     st.error(
@@ -4358,6 +4433,8 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                     }
                                 ).execute()
                                 st.success("Producto guardado en la base.")
+                                _movi_reset_producto_alta_fields()
+                                _movi_bump_form_nonce("inv_prod_form_nonce")
                                 st.rerun()
                     except Exception as ex:
                         st.error(
@@ -4552,7 +4629,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                     _dz = (_export_cell_txt(_rz.get("descripcion")) or "")[:56]
                     _lab_z[f"{_cz} · {_dz}"] = _iz
                 _keys_z = sorted(_lab_z.keys(), key=str.casefold)
-                with st.form("inv_form_del_prod"):
+                with st.form(f"inv_form_del_prod_{int(st.session_state.get('inv_del_prod_form_nonce', 0))}"):
                     _sel_z = st.selectbox("Producto a eliminar", options=_keys_z, key="inv_del_prod_sel")
                     _cf_z = st.text_input('Confirmación: escribí **ELIMINAR**', key="inv_del_prod_conf")
                     if st.form_submit_button("Eliminar definitivamente"):
@@ -4563,6 +4640,8 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                             _ok_z, _msg_z = _inv_eliminar_producto_stock_cero(sb, _pid_z, _cf_z)
                             if _ok_z:
                                 st.success(_msg_z)
+                                _movi_ss_pop_keys("inv_del_prod_sel", "inv_del_prod_conf")
+                                _movi_bump_form_nonce("inv_del_prod_form_nonce")
                                 st.rerun()
                             else:
                                 st.error(_msg_z)
@@ -4617,7 +4696,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                         "(el stock del kit lo movés vendiendo el kit o ajustando cada **componente**)."
                     )
                 else:
-                    with st.form("inv_form_mov_stock"):
+                    with st.form(f"inv_form_mov_stock_{int(st.session_state.get('inv_mov_stock_form_nonce', 0))}"):
                         _sel_m = st.selectbox("Producto", options=_keys_m, key="inv_mov_prod_sel")
                         _tipo_m = st.radio("Movimiento", ["Entrada", "Salida"], horizontal=True, key="inv_mov_tipo")
                         _cant_m = st.number_input(
@@ -4650,6 +4729,8 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                 )
                                 if _ok_m:
                                     st.success(_msg_m)
+                                    _movi_ss_pop_keys("inv_mov_prod_sel", "inv_mov_tipo", "inv_mov_cant", "inv_mov_mot")
+                                    _movi_bump_form_nonce("inv_mov_stock_form_nonce")
                                     st.rerun()
                                 else:
                                     st.error(_msg_m)
@@ -4954,7 +5035,7 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             st.session_state["venta_n_cobros"] = 1
             st.rerun()
 
-    with st.form("f_venta"):
+    with st.form(f"f_venta_{int(st.session_state.get('venta_form_nonce', 0))}"):
         cliente = st.text_input("Cliente")
         forma = st.selectbox(
             "Forma de pago",
@@ -5150,6 +5231,8 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                                     }
                                 ]
                                 st.session_state["venta_n_cobros"] = 1
+                                _movi_reset_venta_form_fields()
+                                _movi_bump_form_nonce("venta_form_nonce")
                                 st.rerun()
                             except Exception as e:
                                 err = str(e)
@@ -5202,6 +5285,8 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                                         }
                                     ]
                                     st.session_state["venta_n_cobros"] = 1
+                                    _movi_reset_venta_form_fields()
+                                    _movi_bump_form_nonce("venta_form_nonce")
                                     st.rerun()
                                 except Exception as e:
                                     err = str(e)
@@ -5224,6 +5309,8 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                                 }
                             ]
                             st.session_state["venta_n_cobros"] = 1
+                            _movi_reset_venta_form_fields()
+                            _movi_bump_form_nonce("venta_form_nonce")
                             st.rerun()
                         except Exception as e:
                             st.error(f"No se pudo registrar: {e}")
@@ -5311,6 +5398,7 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                         },
                     ).execute()
                     st.success("Cobro registrado.")
+                    _movi_ss_pop_keys("cxc_caja", "cxc_mon", "cxc_monto_nat", "cxc_nota_op")
                     st.rerun()
                 except Exception as e:
                     err = str(e)
@@ -5358,7 +5446,7 @@ def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             {"producto_id": str(plist[0]["id"]), "cantidad": 1, "costo_unitario_usd": id_to_cost[str(plist[0]["id"])]}
         ]
 
-    with st.form("f_compra"):
+    with st.form(f"f_compra_{int(st.session_state.get('compra_form_nonce', 0))}"):
         prov = st.text_input("Proveedor")
         forma = st.selectbox("Forma de pago compra", ["contado", "credito"], key="forma_compra")
         caja_id_compra = (
@@ -5429,6 +5517,8 @@ def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                                 "costo_unitario_usd": id_to_cost[str(plist[0]["id"])],
                             }
                         ]
+                        _movi_reset_compra_form_fields()
+                        _movi_bump_form_nonce("compra_form_nonce")
                         st.rerun()
                     except Exception as e:
                         st.error(f"No se pudo registrar: {e}")
@@ -5463,7 +5553,7 @@ def module_cajas(sb: Client, erp_uid: str) -> None:
 
     with st.expander("Nueva caja / cuenta"):
         st.caption("Si falla al guardar, ejecutá en Supabase `supabase/patch_015_cajas_detalle.sql`.")
-        with st.form("f_caja"):
+        with st.form(f"f_caja_{int(st.session_state.get('caja_alta_form_nonce', 0))}"):
             entidad = st.text_input("Banco / entidad (ej. Banesco, Bancamiga)", placeholder="Opcional si es efectivo")
             nombre = st.text_input("Nombre o alias en el ERP", help="Ej. Corriente USD proveedores")
             tipo = st.selectbox("Tipo", ["Banco", "Wallet", "Efectivo"])
@@ -5487,6 +5577,7 @@ def module_cajas(sb: Client, erp_uid: str) -> None:
                             }
                         ).execute()
                         st.success("Caja creada.")
+                        _movi_bump_form_nonce("caja_alta_form_nonce")
                         st.rerun()
                     except Exception as e:
                         st.error(
@@ -5500,7 +5591,7 @@ def module_cajas(sb: Client, erp_uid: str) -> None:
         st.stop()
 
     st.caption("Movimiento manual (ajuste de caja)")
-    with st.form("f_mov"):
+    with st.form(f"f_mov_{int(st.session_state.get('caja_mov_form_nonce', 0))}"):
         cid_mov = st.selectbox("Caja", options=caja_ids_mov, format_func=caja_fmt_mov)
         tipo_m = st.selectbox("Tipo movimiento", ["Ingreso", "Egreso"])
         monto = st.number_input("Monto USD", min_value=0.01, format="%.2f")
@@ -5525,6 +5616,8 @@ def module_cajas(sb: Client, erp_uid: str) -> None:
                     _rpc_mov["p_nota_operacion"] = (nota_mov or "").strip()
                 sb.rpc("registrar_movimiento_caja_erp", _rpc_mov).execute()
                 st.success("Movimiento registrado.")
+                _movi_ss_pop_keys("caja_mov_nota_op")
+                _movi_bump_form_nonce("caja_mov_form_nonce")
                 st.rerun()
             except Exception as e:
                 st.error(str(e))
@@ -6327,7 +6420,7 @@ def module_usuarios(sb: Client) -> None:
 
     st.divider()
     st.markdown("#### Nuevo usuario")
-    with st.form("f_new_user"):
+    with st.form(f"f_new_user_{int(st.session_state.get('erp_new_user_form_nonce', 0))}"):
         nu = st.text_input("Usuario (solo letras/números, sin espacios)", key="nu_user")
         nn = st.text_input("Nombre completo", key="nu_nom")
         ne = st.text_input("Correo (opcional)", key="nu_mail")
@@ -6368,6 +6461,8 @@ def module_usuarios(sb: Client) -> None:
                         }
                     ).execute()
                     st.success(f"Usuario **{un}** creado. Ya puede iniciar sesión.")
+                    _movi_ss_pop_keys("nu_user", "nu_nom", "nu_mail", "nu_rol", "nu_p1", "nu_p2")
+                    _movi_bump_form_nonce("erp_new_user_form_nonce")
                     st.rerun()
 
     if not rows:
@@ -6379,7 +6474,7 @@ def module_usuarios(sb: Client) -> None:
     pick = st.selectbox("Seleccionar", options=list(labels.keys()))
     u = labels[pick]
     uid = str(u["id"])
-    with st.form("f_edit_user"):
+    with st.form(f"f_edit_user_{uid}_{int(st.session_state.get(f'erp_edit_user_form_nonce_{uid}', 0))}"):
         act = st.checkbox("Activo", value=bool(u.get("activo", True)), key="ed_act")
         _roles = ["vendedor", "admin", "almacen", "superuser"]
         _ri = _roles.index(u["rol"]) if u["rol"] in _roles else 0
@@ -6412,10 +6507,14 @@ def module_usuarios(sb: Client) -> None:
                         }
                     ).eq("id", uid).execute()
                     st.success("Usuario actualizado.")
+                    _movi_ss_pop_keys("ed_act", "ed_rol", "ed_p1", "ed_p2")
+                    _movi_bump_form_nonce(f"erp_edit_user_form_nonce_{uid}")
                     st.rerun()
             else:
                 sb.table("erp_users").update({"activo": act, "rol": new_rol}).eq("id", uid).execute()
                 st.success("Usuario actualizado.")
+                _movi_ss_pop_keys("ed_act", "ed_rol", "ed_p1", "ed_p2")
+                _movi_bump_form_nonce(f"erp_edit_user_form_nonce_{uid}")
                 st.rerun()
 
     st.caption(
@@ -6427,7 +6526,7 @@ def render_cambiar_mi_password(sb: Client, erp_uid: str) -> None:
     if st.session_state.pop("pwd_updated_ok", False):
         st.success("Contraseña actualizada correctamente.")
     with st.expander("Cambiar mi contraseña", expanded=False):
-        with st.form("f_mi_password"):
+        with st.form(f"f_mi_password_{int(st.session_state.get('mi_pwd_form_nonce', 0))}"):
             cur = st.text_input("Contraseña actual", type="password", autocomplete="current-password")
             n1 = st.text_input("Nueva contraseña", type="password", autocomplete="new-password")
             n2 = st.text_input("Confirmar nueva contraseña", type="password", autocomplete="new-password")
@@ -6455,6 +6554,7 @@ def render_cambiar_mi_password(sb: Client, erp_uid: str) -> None:
                     else:
                         sb.table("erp_users").update({"password_hash": _hash_password(n1)}).eq("id", erp_uid).execute()
                         st.session_state["pwd_updated_ok"] = True
+                        _movi_bump_form_nonce("mi_pwd_form_nonce")
                         st.rerun()
 
 
