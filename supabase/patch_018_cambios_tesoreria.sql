@@ -1,5 +1,5 @@
--- patch_018: bitácora cambios Bs → USD/estable (seguimiento vs tasa referencia) + RPC.
--- Ejecutar en Supabase SQL Editor después de patch_015 (cajas detalle) u orden habitual de patches.
+-- patch_018: bitácora cambios Bs → USD/estable + RPC.
+-- Ejecutar después de patch_015. Luego ejecutá patch_019 (precio pactado vs comparación opcional).
 
 CREATE TABLE IF NOT EXISTS public.cambios_tesoreria (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

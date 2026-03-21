@@ -270,7 +270,8 @@ CREATE TABLE IF NOT EXISTS public.cambios_tesoreria (
   caja_destino_id UUID REFERENCES public.cajas_bancos (id) ON DELETE SET NULL,
   monto_ves NUMERIC(22, 4) NOT NULL CHECK (monto_ves > 0),
   monto_usd_obtenido NUMERIC(18, 4) NOT NULL CHECK (monto_usd_obtenido > 0),
-  tasa_referencia_bs_por_usd NUMERIC(24, 8) NOT NULL CHECK (tasa_referencia_bs_por_usd > 0),
+  tasa_compra_bs_por_usd NUMERIC(24, 8) NOT NULL CHECK (tasa_compra_bs_por_usd > 0),
+  tasa_referencia_bs_por_usd NUMERIC(24, 8) CHECK (tasa_referencia_bs_por_usd IS NULL OR tasa_referencia_bs_por_usd > 0),
   nota TEXT,
   usuario_id UUID REFERENCES public.erp_users (id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -858,7 +859,7 @@ REVOKE ALL ON FUNCTION public.registrar_movimiento_caja_erp(UUID, UUID, TEXT, NU
 GRANT EXECUTE ON FUNCTION public.registrar_movimiento_caja_erp(UUID, UUID, TEXT, NUMERIC, TEXT, TEXT, TEXT) TO service_role;
 
 -- -----------------------------------------------------------------------------
--- RPC: registrar cambio Bs → estable (seguimiento; comparación vs tasa referencia)
+-- RPC: registrar cambio Bs → estable (tasa pactada + comparación opcional vs BCV/mercado)
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.registrar_cambio_tesoreria_erp(
   p_usuario_id UUID,
@@ -866,7 +867,8 @@ CREATE OR REPLACE FUNCTION public.registrar_cambio_tesoreria_erp(
   p_caja_destino_id UUID,
   p_monto_ves NUMERIC,
   p_monto_usd_obtenido NUMERIC,
-  p_tasa_referencia_bs_por_usd NUMERIC,
+  p_tasa_compra_bs_por_usd NUMERIC,
+  p_tasa_comparacion_bs_por_usd NUMERIC DEFAULT NULL,
   p_nota TEXT DEFAULT NULL,
   p_fecha TIMESTAMPTZ DEFAULT NULL
 )
@@ -888,8 +890,11 @@ BEGIN
   IF p_monto_usd_obtenido IS NULL OR p_monto_usd_obtenido <= 0 THEN
     RAISE EXCEPTION 'Monto USD obtenido inválido';
   END IF;
-  IF p_tasa_referencia_bs_por_usd IS NULL OR p_tasa_referencia_bs_por_usd <= 0 THEN
-    RAISE EXCEPTION 'Tasa referencia Bs/USD inválida';
+  IF p_tasa_compra_bs_por_usd IS NULL OR p_tasa_compra_bs_por_usd <= 0 THEN
+    RAISE EXCEPTION 'Tasa de compra Bs/USD inválida';
+  END IF;
+  IF p_tasa_comparacion_bs_por_usd IS NOT NULL AND p_tasa_comparacion_bs_por_usd <= 0 THEN
+    RAISE EXCEPTION 'Tasa de comparación Bs/USD inválida (debe ser NULL o > 0)';
   END IF;
 
   IF p_caja_origen_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.cajas_bancos WHERE id = p_caja_origen_id) THEN
@@ -905,6 +910,7 @@ BEGIN
     caja_destino_id,
     monto_ves,
     monto_usd_obtenido,
+    tasa_compra_bs_por_usd,
     tasa_referencia_bs_por_usd,
     nota,
     usuario_id
@@ -914,7 +920,8 @@ BEGIN
     p_caja_destino_id,
     ROUND(p_monto_ves, 4),
     ROUND(p_monto_usd_obtenido, 4),
-    p_tasa_referencia_bs_por_usd,
+    p_tasa_compra_bs_por_usd,
+    p_tasa_comparacion_bs_por_usd,
     NULLIF(TRIM(p_nota), ''),
     p_usuario_id
   )
@@ -924,8 +931,8 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.registrar_cambio_tesoreria_erp(UUID, UUID, UUID, NUMERIC, NUMERIC, NUMERIC, TEXT, TIMESTAMPTZ) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.registrar_cambio_tesoreria_erp(UUID, UUID, UUID, NUMERIC, NUMERIC, NUMERIC, TEXT, TIMESTAMPTZ) TO service_role;
+REVOKE ALL ON FUNCTION public.registrar_cambio_tesoreria_erp(UUID, UUID, UUID, NUMERIC, NUMERIC, NUMERIC, NUMERIC, TEXT, TIMESTAMPTZ) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.registrar_cambio_tesoreria_erp(UUID, UUID, UUID, NUMERIC, NUMERIC, NUMERIC, NUMERIC, TEXT, TIMESTAMPTZ) TO service_role;
 
 -- -----------------------------------------------------------------------------
 -- -----------------------------------------------------------------------------

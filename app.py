@@ -2987,13 +2987,14 @@ def _dashboard_seccion_cambios_tesoreria(
     d_b: date,
     r_fut: str,
 ) -> None:
-    """Bitácora Bs→USD: formulario (RPC) + tabla con diff vs tasa de referencia en el rango del dashboard."""
+    """Bitácora Bs→USD: precio pactado con el cambista + comparación opcional vs BCV/mercado."""
     erp_uid = str(st.session_state.get("erp_uid") or "").strip()
     st.markdown('<div class="dash-bento">', unsafe_allow_html=True)
     st.markdown("##### Seguimiento: cambios de bolívares a moneda más estable")
     st.caption(
-        "Esto **no mueve saldos** en las cajas: es un **registro** para comparar lo que obtuviste en USD con lo que hubieras tenido "
-        "a la **tasa Bs/USD de referencia** que elijas (ej. BCV o mercado). Los movimientos reales van en **Cajas**."
+        "Esto **no mueve saldos**. Registrás el **precio al que te vendieron el dólar** (Bs/USD de ese cambista). "
+        "Si querés ver ganancia/pérdida vs **otra tasa** (BCV, paralelo, otro comprador), cargala en *Comparar con*; si no, dejala en **0**. "
+        "Los movimientos reales van en **Cajas**."
     )
 
     try:
@@ -3007,7 +3008,7 @@ def _dashboard_seccion_cambios_tesoreria(
         )
     except Exception as ex:
         st.info(
-            f"Para usar esta sección ejecutá en Supabase **`supabase/patch_018_cambios_tesoreria.sql`**. Detalle: {ex}"
+            f"Ejecutá en Supabase **`supabase/patch_018_cambios_tesoreria.sql`** y luego **`supabase/patch_019_cambios_tesoreria_tasa_compra.sql`**. Detalle: {ex}"
         )
         st.markdown("</div>", unsafe_allow_html=True)
         return
@@ -3019,12 +3020,18 @@ def _dashboard_seccion_cambios_tesoreria(
 
     raw_rows = cambios_q.data or []
     recs: list[dict[str, Any]] = []
+    diffs_comp: list[float] = []
     for r in raw_rows:
         m_ves = float(r.get("monto_ves") or 0)
         m_usd = float(r.get("monto_usd_obtenido") or 0)
-        t_ref = float(r.get("tasa_referencia_bs_por_usd") or 0)
-        usd_a_ref = (m_ves / t_ref) if t_ref > 0 else 0.0
-        diff_usd = m_usd - usd_a_ref
+        tc_raw = r.get("tasa_compra_bs_por_usd")
+        t_compra = float(tc_raw) if tc_raw is not None else ((m_ves / m_usd) if m_usd > 0 else 0.0)
+        tr_raw = r.get("tasa_referencia_bs_por_usd")
+        t_comp = float(tr_raw) if tr_raw is not None and float(tr_raw) > 0 else None
+        usd_a_comp = (m_ves / t_comp) if t_comp and t_comp > 0 else None
+        diff_usd = (m_usd - usd_a_comp) if usd_a_comp is not None else None
+        if diff_usd is not None:
+            diffs_comp.append(float(diff_usd))
         oid = r.get("caja_origen_id")
         did = r.get("caja_destino_id")
         recs.append(
@@ -3034,9 +3041,10 @@ def _dashboard_seccion_cambios_tesoreria(
                 "Destino": id_to_et.get(str(did), "—") if did else "—",
                 "Bs": m_ves,
                 "USD obtenido": m_usd,
-                "Tasa ref. (Bs/USD)": t_ref,
-                "USD a tasa ref.": round(usd_a_ref, 4),
-                "Diff vs ref. (USD)": round(diff_usd, 4),
+                "Precio compra (Bs/USD)": round(t_compra, 6) if t_compra else None,
+                "Comparar con (Bs/USD)": round(t_comp, 6) if t_comp else None,
+                "USD a esa comparación": round(usd_a_comp, 4) if usd_a_comp is not None else None,
+                "Diff vs comparación (USD)": round(diff_usd, 4) if diff_usd is not None else None,
                 "Nota": (r.get("nota") or "")[:120],
             }
         )
@@ -3045,8 +3053,12 @@ def _dashboard_seccion_cambios_tesoreria(
     with m1:
         st.metric("Cambios registrados (período)", f"{len(recs)}")
     with m2:
-        tot_diff = sum(float(x["Diff vs ref. (USD)"]) for x in recs) if recs else 0.0
-        st.metric("Suma diff vs referencia (USD)", f"{tot_diff:+,.4f}", help="Positivo = más USD que la tasa de referencia.")
+        tot_diff = sum(diffs_comp) if diffs_comp else None
+        st.metric(
+            "Suma diff vs comparación (USD)",
+            f"{tot_diff:+,.4f}" if tot_diff is not None else "—",
+            help="Solo suma filas donde cargaste *Comparar con*. Positivo = mejor que esa tasa.",
+        )
     with m3:
         st.metric(
             "Equiv. USD en cuentas VES (ahora)",
@@ -3063,9 +3075,10 @@ def _dashboard_seccion_cambios_tesoreria(
             column_config={
                 "Bs": st.column_config.NumberColumn(format="%.2f"),
                 "USD obtenido": st.column_config.NumberColumn(format="%.4f"),
-                "Tasa ref. (Bs/USD)": st.column_config.NumberColumn(format="%.4f"),
-                "USD a tasa ref.": st.column_config.NumberColumn(format="%.4f"),
-                "Diff vs ref. (USD)": st.column_config.NumberColumn(format="%.4f"),
+                "Precio compra (Bs/USD)": st.column_config.NumberColumn(format="%.4f"),
+                "Comparar con (Bs/USD)": st.column_config.NumberColumn(format="%.4f"),
+                "USD a esa comparación": st.column_config.NumberColumn(format="%.4f"),
+                "Diff vs comparación (USD)": st.column_config.NumberColumn(format="%.4f"),
             },
         )
     else:
@@ -3104,25 +3117,47 @@ def _dashboard_seccion_cambios_tesoreria(
             sd = st.selectbox("Caja destino (USD/USDT)", options=opt_d, format_func=_fmt_caja, key="dash_ct_dest")
             m_ves_in = st.number_input("Monto en bolívares (Bs)", min_value=0.0001, format="%.4f", key="dash_ct_mves")
             m_usd_in = st.number_input("USD obtenidos en el cambio", min_value=0.0001, format="%.4f", key="dash_ct_musd")
-            tasa_in = st.number_input(
-                "Tasa de referencia Bs por 1 USD (comparación)",
+            implied = (float(m_ves_in) / float(m_usd_in)) if float(m_usd_in) > 1e-12 else 0.0
+            if implied > 0:
+                st.caption(f"Precio **implícito** Bs/USD según montos: **{implied:,.4f}** (podés usarlo abajo si es el pactado).")
+            t_compra_in = st.number_input(
+                "A qué precio compraste (Bs por 1 USD)",
                 min_value=0.00000001,
-                value=float(def_tasa),
+                value=float(implied) if implied > 0 else 1.0,
                 format="%.6f",
-                key="dash_ct_tasa",
-                help="Ej.: BCV o la cotización que tomás como referencia para saber si ganaste o perdiste.",
+                key="dash_ct_tcompra",
+                help="Lo que acordaste con ese cambista: cuántos Bs te cobraron por cada dólar.",
             )
+            t_comp_in = st.number_input(
+                "Comparar con (Bs por 1 USD, opcional — 0 = no comparar)",
+                min_value=0.0,
+                value=0.0,
+                format="%.6f",
+                key="dash_ct_tcomp",
+                help="Ej.: BCV u otra cotización. Si es 0, no se calcula diff vs ‘mercado’.",
+            )
+            if float(t_comp_in) <= 0 and def_tasa > 0:
+                st.caption(f"Sugerido para comparar (BCV/ref. guardada): **{def_tasa:,.4f}** — copiá si querés medir vs eso.")
             nota_in = st.text_input("Nota (opcional)", key="dash_ct_nota")
             if st.form_submit_button("Guardar registro"):
                 try:
+                    if float(m_usd_in) > 1e-12:
+                        usd_impl = float(m_ves_in) / float(t_compra_in)
+                        if abs(usd_impl - float(m_usd_in)) > max(0.02, float(m_usd_in) * 0.002):
+                            st.warning(
+                                f"El precio compra ({t_compra_in:,.4f}) no cuadra del todo con Bs/USD ingresados "
+                                f"(implicaría ~{usd_impl:,.4f} USD). Revisá montos o la tasa pactada."
+                            )
                     payload_rpc: dict[str, Any] = {
                         "p_usuario_id": erp_uid,
                         "p_caja_origen_id": None if so == opt_none else str(so),
                         "p_caja_destino_id": None if sd == opt_none else str(sd),
                         "p_monto_ves": float(m_ves_in),
                         "p_monto_usd_obtenido": float(m_usd_in),
-                        "p_tasa_referencia_bs_por_usd": float(tasa_in),
+                        "p_tasa_compra_bs_por_usd": float(t_compra_in),
                     }
+                    if float(t_comp_in) > 0:
+                        payload_rpc["p_tasa_comparacion_bs_por_usd"] = float(t_comp_in)
                     nn = (nota_in or "").strip()
                     if nn:
                         payload_rpc["p_nota"] = nn
