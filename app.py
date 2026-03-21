@@ -18,6 +18,7 @@ que pulses **Salir** o venza la vigencia (p. ej. 90 días).
 from __future__ import annotations
 
 import base64
+from collections import Counter
 import gzip
 import hashlib
 import hmac
@@ -1737,6 +1738,20 @@ def _xlsx_inventario_bytes(df_flat: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
+def _reporte_tabla_a_excel(df: pd.DataFrame, *, nombre_hoja: str = "Datos") -> bytes:
+    """Excel genérico para reportes (hoja única). Requiere openpyxl."""
+    hn = (nombre_hoja or "Datos")[:31]
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=hn)
+    return buf.getvalue()
+
+
+def _reporte_tabla_a_csv(df: pd.DataFrame) -> bytes:
+    """CSV con BOM para que Excel en Windows abra bien las tildes."""
+    return df.to_csv(index=False).encode("utf-8-sig")
+
+
 def _pdf_short_txt(val: Any, max_len: int) -> str:
     if val is None or (isinstance(val, float) and pd.isna(val)):
         s = ""
@@ -2727,8 +2742,8 @@ def _plotly_apply_dash_theme(fig: Any, *, title: str | None = None) -> Any:
     return fig
 
 
-def _dash_liquidity_bucket(*, tipo: str, nombre: str) -> str:
-    n = (nombre or "").lower()
+def _dash_liquidity_bucket(*, tipo: str, nombre: str, entidad: str = "") -> str:
+    n = f"{nombre or ''} {entidad or ''}".lower()
     if "binance" in n or "usdt" in n or "crypto" in n:
         return "Binance (crypto)"
     t = (tipo or "").strip()
@@ -2739,6 +2754,69 @@ def _dash_liquidity_bucket(*, tipo: str, nombre: str) -> str:
     if t == "Wallet":
         return "Binance (crypto)"
     return "Otros"
+
+
+def _caja_etiqueta_lista(c: dict[str, Any]) -> str:
+    """Texto para selectores: banco + alias + moneda de cuenta + Nº + titular."""
+    nom = str(c.get("nombre") or "").strip()
+    ent = str(c.get("entidad") or "").strip()
+    mon = (str(c.get("moneda_cuenta") or "USD")).strip().upper() or "USD"
+    num = str(c.get("numero_cuenta") or "").strip()
+    tit = str(c.get("titular") or "").strip()
+    tipo = str(c.get("tipo") or "").strip()
+    bits: list[str] = []
+    if ent:
+        bits.append(ent)
+    if nom:
+        bits.append(nom)
+    if not bits:
+        bits.append("Caja")
+    bits.append(mon)
+    if num:
+        bits.append(f"Nº {num}")
+    if tit:
+        bits.append(tit)
+    s = " · ".join(bits)
+    return f"{s} ({tipo})" if tipo else s
+
+
+def _cajas_fetch_rows(sb: Client, *, solo_activas: bool) -> list[dict[str, Any]]:
+    q = (
+        sb.table("cajas_bancos")
+        .select("id,nombre,tipo,saldo_actual_usd,activo,entidad,numero_cuenta,titular,moneda_cuenta")
+        .order("nombre")
+    )
+    if solo_activas:
+        q = q.eq("activo", True)
+    try:
+        return q.execute().data or []
+    except Exception:
+        q2 = sb.table("cajas_bancos").select("id,nombre,tipo,saldo_actual_usd,activo").order("nombre")
+        if solo_activas:
+            q2 = q2.eq("activo", True)
+        rows = q2.execute().data or []
+        for r in rows:
+            r.setdefault("entidad", None)
+            r.setdefault("numero_cuenta", None)
+            r.setdefault("titular", None)
+            r.setdefault("moneda_cuenta", "USD")
+        return rows
+
+
+def _caja_select_options(rows: list[dict[str, Any]]) -> tuple[list[str], Any]:
+    """(ids, format_func) para st.selectbox por id único."""
+    by_id = {str(r["id"]): r for r in rows}
+    ids = [str(r["id"]) for r in rows]
+    bases = [_caja_etiqueta_lista(by_id[i]) for i in ids]
+    dup = Counter(bases)
+
+    def fmt(cid: str) -> str:
+        b = _caja_etiqueta_lista(by_id[cid])
+        if dup[b] > 1:
+            return f"{b} · ref {cid[:8]}…"
+        return b
+
+    return ids, fmt
 
 
 def _dash_trend_pct(curr: float, prev: float) -> float | None:
@@ -2807,10 +2885,7 @@ def _dashboard_resumen_cobros_por_moneda(sb: Client, *, d_a: date, r_fut: str) -
         st.caption("Sin ingresos de caja en el período.")
         return
 
-    caj_map = {
-        str(c["id"]): f"{c.get('nombre', '')} ({c.get('tipo', '')})"
-        for c in (sb.table("cajas_bancos").select("id,nombre,tipo").execute().data or [])
-    }
+    caj_map = {str(c["id"]): _caja_etiqueta_lista(c) for c in _cajas_fetch_rows(sb, solo_activas=False)}
 
     recs: list[dict[str, Any]] = []
     tot_ves = tot_usdt = tot_usd_cash = 0.0
@@ -3018,12 +3093,27 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
     with row2a:
         st.markdown('<div class="dash-bento">', unsafe_allow_html=True)
         st.markdown("**Origen de la liquidez** (USD por tipo de caja)")
-        caj_df = pd.DataFrame(sb.table("cajas_bancos").select("nombre, tipo, saldo_actual_usd").eq("activo", True).execute().data or [])
+        _caj_liq = _cajas_fetch_rows(sb, solo_activas=True)
+        caj_df = pd.DataFrame(
+            [
+                {
+                    "nombre": r.get("nombre"),
+                    "tipo": r.get("tipo"),
+                    "saldo_actual_usd": r.get("saldo_actual_usd"),
+                    "entidad": r.get("entidad") or "",
+                }
+                for r in _caj_liq
+            ]
+        )
         if caj_df.empty:
             st.caption("No hay cajas activas.")
         else:
             caj_df["origen"] = caj_df.apply(
-                lambda r: _dash_liquidity_bucket(tipo=str(r.get("tipo", "")), nombre=str(r.get("nombre", ""))),
+                lambda r: _dash_liquidity_bucket(
+                    tipo=str(r.get("tipo", "")),
+                    nombre=str(r.get("nombre", "")),
+                    entidad=str(r.get("entidad", "") or ""),
+                ),
                 axis=1,
             )
             caj_df["saldo_actual_usd"] = pd.to_numeric(caj_df["saldo_actual_usd"], errors="coerce").fillna(0)
@@ -3318,13 +3408,20 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
     st.markdown("##### Últimos movimientos de caja")
     mov = (
         sb.table("movimientos_caja")
-        .select("created_at, tipo, monto_usd, concepto")
+        .select("created_at, tipo, monto_usd, concepto, caja_id")
         .order("created_at", desc=True)
         .limit(15)
         .execute()
     )
     if mov.data:
-        st.dataframe(pd.DataFrame(mov.data), use_container_width=True, hide_index=True)
+        _mc_cajas = _cajas_fetch_rows(sb, solo_activas=False)
+        _mc_map = {str(c["id"]): _caja_etiqueta_lista(c) for c in _mc_cajas}
+        df_mc = pd.DataFrame(mov.data)
+        df_mc["caja"] = df_mc["caja_id"].map(lambda x: _mc_map.get(str(x), str(x)[:8] + "…"))
+        df_mc = df_mc.drop(columns=["caja_id"], errors="ignore")
+        cols = ["created_at", "tipo", "monto_usd", "caja", "concepto"]
+        df_mc = df_mc[[c for c in cols if c in df_mc.columns]]
+        st.dataframe(df_mc, use_container_width=True, hide_index=True)
     else:
         st.caption("Sin movimientos.")
 
@@ -4579,8 +4676,8 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
     id_to_label = {str(p["id"]): _venta_prod_label(p) for p in plist}
     id_to_price = {str(p["id"]): float(p["precio_v_usd"]) for p in plist}
 
-    cajas = sb.table("cajas_bancos").select("id,nombre,tipo").eq("activo", True).execute()
-    cj = {f"{c['nombre']} ({c['tipo']})": str(c["id"]) for c in (cajas.data or [])}
+    caja_rows_act = _cajas_fetch_rows(sb, solo_activas=True)
+    caja_ids, caja_fmt = _caja_select_options(caja_rows_act) if caja_rows_act else ([], lambda x: str(x))
 
     if "venta_lines" not in st.session_state:
         st.session_state["venta_lines"] = [
@@ -4590,19 +4687,34 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
     st.session_state.setdefault("venta_n_cobros", 1)
     b1, b2 = st.columns([1, 3])
     with b1:
-        if st.button("➕ Otro medio de cobro", help="Suma una fila VES / USD / USDT en la misma venta al contado"):
+        if st.button(
+            "➕ Otra fila de cobro o abono",
+            help="Sirve para venta al contado (varios medios) o para venta a crédito con seña (varias cuentas).",
+        ):
             st.session_state["venta_n_cobros"] = min(10, int(st.session_state.get("venta_n_cobros", 1)) + 1)
             st.rerun()
     with b2:
-        if st.button("↺ Una sola fila de cobro", help="Vuelve a un solo medio de pago"):
+        if st.button("↺ Dejar una sola fila", help="Vuelve a una sola línea de caja (contado o abono)."):
             st.session_state["venta_n_cobros"] = 1
             st.rerun()
 
     with st.form("f_venta"):
         cliente = st.text_input("Cliente")
-        forma = st.selectbox("Forma de pago", ["contado", "credito"])
-        fv = st.date_input("Vencimiento (crédito)", value=date.today() + timedelta(days=30))
-        notas = st.text_area("Notas")
+        forma = st.selectbox(
+            "Forma de pago",
+            ["contado", "credito"],
+            help="**Crédito:** el cliente se lleva la mercancía y debe el saldo hasta la fecha límite. "
+            "Podés marcar abono el mismo día (apartado con seña). **Contado:** debe pagar todo en el acto.",
+        )
+        fv = st.date_input(
+            "Fecha límite para saldar (solo venta a crédito)",
+            value=date.today() + timedelta(days=30),
+            help="Es la fecha en que en teoría debería estar pagado lo que quede debiendo. No bloquea el sistema; sirve para reportes y seguimiento.",
+        )
+        notas = st.text_area(
+            "Notas (opcional)",
+            help="Podés escribir por ejemplo: Apartado, entrega en taller, teléfono del cliente, etc.",
+        )
 
         doc_tasa = st.radio(
             "Tasa Bs/USD para esta venta (equivalente en bolívares y registro en BD):",
@@ -4644,12 +4756,17 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                 f"Total venta **US$ {est_total:,.2f}**. La suma en USD equivalente de las filas debe coincidir (±0,05). "
                 "**VES** = bolívares cobrados; **USDT** = unidades USDT; **USD** = dólares en efectivo/banco."
             )
-            if not cj:
+            if not caja_ids:
                 st.error("No hay cajas activas. Cree una en el módulo Cajas.")
             n_cob = int(st.session_state.get("venta_n_cobros", 1))
-            for i in range(n_cob):
+            for i in range(n_cob if caja_ids else 0):
                 r1, r2, r3 = st.columns([2, 1, 1])
-                ck = r1.selectbox(f"Caja cobro {i + 1}", options=list(cj.keys()), key=f"vcb_ck_{i}")
+                cid = r1.selectbox(
+                    f"Caja cobro {i + 1}",
+                    options=caja_ids,
+                    format_func=caja_fmt,
+                    key=f"vcb_ck_{i}",
+                )
                 mon = r2.selectbox(
                     "Moneda",
                     options=["USD", "VES", "USDT"],
@@ -4664,7 +4781,46 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                     format="%.4f" if mon != "USD" else "%.2f",
                     key=f"vcb_mv_{i}",
                 )
-                cobros_pl.append({"caja_key": ck, "moneda": mon, "monto": float(mval)})
+                cobros_pl.append({"caja_id": str(cid), "moneda": mon, "monto": float(mval)})
+
+        abono_hoy = False
+        if forma == "credito":
+            abono_hoy = st.checkbox(
+                "El cliente deja **seña o abono hoy** (apartado: entra dinero a caja y el resto queda por cobrar)",
+                value=False,
+                key="venta_abono_credito",
+            )
+            if abono_hoy:
+                st.markdown("**Dinero que entra hoy (seña o abono)**")
+                st.caption(
+                    f"Total de la venta **US$ {est_total:,.2f}**. El abono en dólares equivalente debe ser **menor** que ese total; "
+                    "lo que falte aparecerá en **cuentas por cobrar** para cobrarlo después (misma sección **Registrar cobro** de abajo). "
+                    "Si el cliente paga todo hoy, usá forma de pago **contado**."
+                )
+                if not caja_ids:
+                    st.error("No hay cuentas activas en Cajas. Creá una para registrar el abono.")
+                n_ab = int(st.session_state.get("venta_n_cobros", 1))
+                for i in range(n_ab if caja_ids else 0):
+                    r1, r2, r3 = st.columns([2, 1, 1])
+                    cid = r1.selectbox(
+                        f"Cuenta del abono {i + 1}",
+                        options=caja_ids,
+                        format_func=caja_fmt,
+                        key=f"vca_ck_{i}",
+                    )
+                    mon = r2.selectbox(
+                        "Moneda",
+                        options=["USD", "VES", "USDT"],
+                        key=f"vca_mon_{i}",
+                    )
+                    mval = r3.number_input(
+                        f"Monto ({mon})",
+                        min_value=0.0,
+                        value=0.0,
+                        format="%.4f" if mon != "USD" else "%.2f",
+                        key=f"vca_mv_{i}",
+                    )
+                    cobros_pl.append({"caja_id": str(cid), "moneda": mon, "monto": float(mval)})
 
         if st.form_submit_button("Registrar venta (atómica)"):
             try:
@@ -4684,11 +4840,11 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                     "p_lineas": new_lines,
                 }
                 if forma == "contado":
-                    if not cj:
+                    if not caja_ids:
                         st.error("Sin cajas.")
                     else:
                         p_cobros = [
-                            {"caja_id": str(cj[row["caja_key"]]), "moneda": row["moneda"], "monto": row["monto"]}
+                            {"caja_id": str(row["caja_id"]), "moneda": row["moneda"], "monto": row["monto"]}
                             for row in cobros_pl
                         ]
                         sum_eq = round(
@@ -4727,20 +4883,73 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                                 else:
                                     st.error(f"No se pudo registrar: {e}")
                 else:
-                    try:
-                        sb.rpc("crear_venta_erp", payload).execute()
-                        st.success("Venta registrada.")
-                        st.session_state["venta_lines"] = [
-                            {
-                                "producto_id": str(plist[0]["id"]),
-                                "cantidad": 1,
-                                "precio_unitario_usd": id_to_price[str(plist[0]["id"])],
-                            }
-                        ]
-                        st.session_state["venta_n_cobros"] = 1
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"No se pudo registrar: {e}")
+                    if abono_hoy:
+                        if not caja_ids:
+                            st.error("Sin cuentas activas para el abono.")
+                        elif not cobros_pl:
+                            st.error("Marcaste abono hoy pero no hay líneas de cobro.")
+                        else:
+                            p_cobros = [
+                                {"caja_id": str(row["caja_id"]), "moneda": row["moneda"], "monto": row["monto"]}
+                                for row in cobros_pl
+                            ]
+                            sum_eq = round(
+                                sum(
+                                    _monto_nativo_a_usd(r["moneda"], r["monto"], t_bs_doc, t_usdt)
+                                    for r in p_cobros
+                                ),
+                                2,
+                            )
+                            if any(r["monto"] <= 0 for r in p_cobros):
+                                st.error("Cada línea del abono debe tener monto mayor a cero.")
+                            elif sum_eq >= est_total - 0.05:
+                                st.error(
+                                    "El abono cubre casi todo el total. Para eso usá **contado**. "
+                                    "El abono en crédito debe dejar **algo pendiente** por cobrar."
+                                )
+                            elif sum_eq <= 0.05:
+                                st.error("El abono en dólares equivalente es casi cero. Quitá el tilde de abono o cargá el monto.")
+                            else:
+                                payload["p_cobros"] = p_cobros
+                                try:
+                                    sb.rpc("crear_venta_erp", payload).execute()
+                                    st.success(
+                                        f"Venta a crédito registrada. Abono ~US$ {sum_eq:,.2f}; "
+                                        f"pendiente ~US$ {est_total - sum_eq:,.2f} en cuentas por cobrar."
+                                    )
+                                    st.session_state["venta_lines"] = [
+                                        {
+                                            "producto_id": str(plist[0]["id"]),
+                                            "cantidad": 1,
+                                            "precio_unitario_usd": id_to_price[str(plist[0]["id"])],
+                                        }
+                                    ]
+                                    st.session_state["venta_n_cobros"] = 1
+                                    st.rerun()
+                                except Exception as e:
+                                    err = str(e)
+                                    if "abono" in err.lower() or "cobros" in err.lower():
+                                        st.error(
+                                            f"{err} · Si la base aún no acepta abono en crédito, ejecutá "
+                                            "`supabase/patch_016_venta_credito_abono_inicial.sql` en Supabase."
+                                        )
+                                    else:
+                                        st.error(f"No se pudo registrar: {e}")
+                    else:
+                        try:
+                            sb.rpc("crear_venta_erp", payload).execute()
+                            st.success("Venta a crédito registrada (todo pendiente de cobro).")
+                            st.session_state["venta_lines"] = [
+                                {
+                                    "producto_id": str(plist[0]["id"]),
+                                    "cantidad": 1,
+                                    "precio_unitario_usd": id_to_price[str(plist[0]["id"])],
+                                }
+                            ]
+                            st.session_state["venta_n_cobros"] = 1
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"No se pudo registrar: {e}")
 
     if st.button("Añadir línea"):
         st.session_state["venta_lines"].append(
@@ -4749,7 +4958,10 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
         st.rerun()
 
     st.divider()
-    st.caption("Cobrar CXC (ingreso a caja + baja de pendiente)")
+    st.caption(
+        "**Cobrar lo que falta:** cada fila es una venta a crédito (con o sin abono inicial). "
+        "Podés cobrar el total pendiente o **solo una parte**; el sistema marca *Parcial* hasta que se liquide."
+    )
     cxc = (
         sb.table("cuentas_por_cobrar")
         .select("id, venta_id, monto_pendiente_usd, fecha_vencimiento, estado")
@@ -4761,15 +4973,19 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
         st.dataframe(df, use_container_width=True, hide_index=True)
         row_id = st.selectbox("ID CXC", options=[str(x["id"]) for x in cxc.data])
         monto = st.number_input("Monto a cobrar USD", min_value=0.01, value=float(next(x["monto_pendiente_usd"] for x in cxc.data if str(x["id"]) == row_id)), format="%.2f")
-        caja_cobro = st.selectbox("Caja cobro", options=list(cj.keys()), key="cxc_caja")
-        if st.button("Registrar cobro CXC"):
+        if not caja_ids:
+            st.warning("No hay cajas activas para registrar el cobro.")
+        caja_cobro = (
+            st.selectbox("Caja cobro", options=caja_ids, format_func=caja_fmt, key="cxc_caja") if caja_ids else None
+        )
+        if st.button("Registrar cobro CXC", disabled=not caja_ids):
             try:
                 sb.rpc(
                     "cobrar_cxc_erp",
                     {
                         "p_usuario_id": erp_uid,
                         "p_cxc_id": row_id,
-                        "p_caja_id": cj[caja_cobro],
+                        "p_caja_id": str(caja_cobro),
                         "p_monto_usd": float(monto),
                     },
                 ).execute()
@@ -4806,8 +5022,8 @@ def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
     id_to_label = {str(p["id"]): p["descripcion"] for p in plist}
     id_to_cost = {str(p["id"]): float(p["costo_usd"]) for p in plist}
 
-    cajas = sb.table("cajas_bancos").select("id,nombre,tipo").eq("activo", True).execute()
-    cj = {f"{c['nombre']} ({c['tipo']})": str(c["id"]) for c in (cajas.data or [])}
+    caja_rows_act_c = _cajas_fetch_rows(sb, solo_activas=True)
+    caja_ids_c, caja_fmt_c = _caja_select_options(caja_rows_act_c) if caja_rows_act_c else ([], lambda x: str(x))
 
     if "compra_lines" not in st.session_state:
         st.session_state["compra_lines"] = [
@@ -4817,7 +5033,11 @@ def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
     with st.form("f_compra"):
         prov = st.text_input("Proveedor")
         forma = st.selectbox("Forma de pago compra", ["contado", "credito"], key="forma_compra")
-        caja_label = st.selectbox("Caja (solo contado)", options=list(cj.keys()), key="caja_compra") if cj else None
+        caja_id_compra = (
+            st.selectbox("Caja (solo contado)", options=caja_ids_c, format_func=caja_fmt_c, key="caja_compra")
+            if caja_ids_c
+            else None
+        )
         fv = st.date_input("Vencimiento (crédito compra)", value=date.today() + timedelta(days=30), key="fv_compra")
         notas = st.text_area("Notas compra")
 
@@ -4861,26 +5081,29 @@ def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                     "p_usuario_id": erp_uid,
                     "p_proveedor": prov,
                     "p_forma_pago": forma,
-                    "p_caja_id": cj[caja_label] if forma == "contado" and caja_label else None,
+                    "p_caja_id": str(caja_id_compra) if forma == "contado" and caja_id_compra else None,
                     "p_tasa_bs": t_bs_doc,
                     "p_tasa_usdt": t_usdt,
                     "p_fecha_vencimiento": str(fv) if forma == "credito" else None,
                     "p_notas": notas,
                     "p_lineas": new_lines,
                 }
-                try:
-                    sb.rpc("crear_compra_erp", payload).execute()
-                    st.success("Compra registrada.")
-                    st.session_state["compra_lines"] = [
-                        {
-                            "producto_id": str(plist[0]["id"]),
-                            "cantidad": 1,
-                            "costo_unitario_usd": id_to_cost[str(plist[0]["id"])],
-                        }
-                    ]
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"No se pudo registrar: {e}")
+                if forma == "contado" and not caja_id_compra:
+                    st.error("Elegí una caja activa para compra al contado (o creá una en Cajas).")
+                else:
+                    try:
+                        sb.rpc("crear_compra_erp", payload).execute()
+                        st.success("Compra registrada.")
+                        st.session_state["compra_lines"] = [
+                            {
+                                "producto_id": str(plist[0]["id"]),
+                                "cantidad": 1,
+                                "costo_unitario_usd": id_to_cost[str(plist[0]["id"])],
+                            }
+                        ]
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo registrar: {e}")
 
     if st.button("Añadir línea compra"):
         st.session_state["compra_lines"].append(
@@ -4891,28 +5114,67 @@ def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
 
 def module_cajas(sb: Client, erp_uid: str) -> None:
     st.subheader("Cajas y bancos")
+    st.caption(
+        "Cada fila es una **cuenta concreta**: banco o entidad (Banesco, Bancamiga…), alias interno, moneda de la cuenta (VES/USD/USDT), número y titular."
+    )
     rows = sb.table("cajas_bancos").select("*").order("nombre").execute()
     if rows.data:
-        st.dataframe(pd.DataFrame(rows.data), use_container_width=True, hide_index=True)
+        df_c = pd.DataFrame(rows.data)
+        pref = [
+            "entidad",
+            "nombre",
+            "tipo",
+            "moneda_cuenta",
+            "numero_cuenta",
+            "titular",
+            "saldo_actual_usd",
+            "activo",
+        ]
+        cols_show = [c for c in pref if c in df_c.columns] + [c for c in df_c.columns if c not in pref]
+        st.dataframe(df_c[cols_show], use_container_width=True, hide_index=True)
 
     with st.expander("Nueva caja / cuenta"):
+        st.caption("Si falla al guardar, ejecutá en Supabase `supabase/patch_015_cajas_detalle.sql`.")
         with st.form("f_caja"):
-            nombre = st.text_input("Nombre")
+            entidad = st.text_input("Banco / entidad (ej. Banesco, Bancamiga)", placeholder="Opcional si es efectivo")
+            nombre = st.text_input("Nombre o alias en el ERP", help="Ej. Corriente USD proveedores")
             tipo = st.selectbox("Tipo", ["Banco", "Wallet", "Efectivo"])
+            moneda_cuenta = st.selectbox("Moneda de la cuenta", ["USD", "VES", "USDT"], index=0)
+            numero_cuenta = st.text_input("Número de cuenta (últimos dígitos o completo)", placeholder="Opcional")
+            titular = st.text_input("Titular", placeholder="Opcional")
             if st.form_submit_button("Crear"):
-                sb.table("cajas_bancos").insert({"nombre": nombre.strip(), "tipo": tipo, "saldo_actual_usd": 0}).execute()
-                st.success("Caja creada.")
-                st.rerun()
+                if not nombre or not str(nombre).strip():
+                    st.error("El nombre es obligatorio.")
+                else:
+                    try:
+                        sb.table("cajas_bancos").insert(
+                            {
+                                "nombre": nombre.strip(),
+                                "tipo": tipo,
+                                "saldo_actual_usd": 0,
+                                "entidad": entidad.strip() or None,
+                                "numero_cuenta": numero_cuenta.strip() or None,
+                                "titular": titular.strip() or None,
+                                "moneda_cuenta": moneda_cuenta,
+                            }
+                        ).execute()
+                        st.success("Caja creada.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(
+                            f"{e} · Si falta columna en BD, aplicá el parche **patch_015_cajas_detalle** en Supabase."
+                        )
 
-    cjrows = sb.table("cajas_bancos").select("id,nombre,tipo").eq("activo", True).execute()
-    cj = {f"{c['nombre']} ({c['tipo']})": str(c["id"]) for c in (cjrows.data or [])}
-    if not cj:
+    caja_rows_mov = _cajas_fetch_rows(sb, solo_activas=True)
+    caja_ids_mov, caja_fmt_mov = _caja_select_options(caja_rows_mov) if caja_rows_mov else ([], lambda x: str(x))
+    if not caja_ids_mov:
+        st.info("No hay cajas activas: creá al menos una para movimientos manuales.")
         st.stop()
 
     st.caption("Movimiento manual (ajuste de caja)")
     with st.form("f_mov"):
-        lbl = st.selectbox("Caja", options=list(cj.keys()))
-        tipo = st.selectbox("Tipo movimiento", ["Ingreso", "Egreso"])
+        cid_mov = st.selectbox("Caja", options=caja_ids_mov, format_func=caja_fmt_mov)
+        tipo_m = st.selectbox("Tipo movimiento", ["Ingreso", "Egreso"])
         monto = st.number_input("Monto USD", min_value=0.01, format="%.2f")
         concepto = st.text_input("Concepto")
         ref = st.text_input("Referencia")
@@ -4922,8 +5184,8 @@ def module_cajas(sb: Client, erp_uid: str) -> None:
                     "registrar_movimiento_caja_erp",
                     {
                         "p_usuario_id": erp_uid,
-                        "p_caja_id": cj[lbl],
-                        "p_tipo": tipo,
+                        "p_caja_id": str(cid_mov),
+                        "p_tipo": tipo_m,
                         "p_monto_usd": float(monto),
                         "p_concepto": concepto,
                         "p_referencia": ref,
@@ -4940,8 +5202,8 @@ def panel_reportes_inventario_export(sb: Client, t: dict[str, Any] | None) -> No
         st.warning("Registrá tasas en el **Dashboard** para que el reporte muestre referencias en Bs.")
         return
     st.caption(
-        "Filtrá por categoría, costo o precio; descargá **Excel**, **PDF** o **HTML** para imprimir. "
-        "Requiere `openpyxl` y `reportlab`."
+        "Podés filtrar por categoría, costo o precio y bajar el listado en **Excel**, **PDF** o una página **HTML** para imprimir. "
+        "Si el botón de Excel no aparece, avisá a quien instaló el programa (hace falta una librería llamada openpyxl; el PDF usa reportlab)."
     )
     try:
         cats_list_rp = (sb.table("categorias").select("id,nombre").order("nombre").execute().data or [])
@@ -5092,69 +5354,297 @@ def panel_reportes_inventario_export(sb: Client, t: dict[str, Any] | None) -> No
     components.html(_html_inv, height=480, scrolling=True)
 
 
+def _rep_parse_fecha_venc(x: Any) -> date | None:
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return None
+    if isinstance(x, date) and not isinstance(x, datetime):
+        return x
+    try:
+        return pd.to_datetime(x).date()
+    except Exception:
+        return None
+
+
+def _rep_texto_plazo_vencimiento(fv: Any) -> str:
+    """Explicación en palabras según la fecha límite de pago o cobro."""
+    d = _rep_parse_fecha_venc(x=fv)
+    if d is None:
+        return "Sin fecha cargada"
+    hoy = date.today()
+    dias = (hoy - d).days
+    if dias < 0:
+        faltan = -dias
+        if faltan == 1:
+            return "Todavía a tiempo — vence mañana"
+        return f"Todavía a tiempo — faltan {faltan} días"
+    if dias == 0:
+        return "La fecha límite es hoy"
+    if dias <= 30:
+        return f"Vencido hace {dias} día(s) (menos de un mes)"
+    if dias <= 60:
+        return f"Vencido hace {dias} días (entre 1 y 2 meses)"
+    if dias <= 90:
+        return f"Vencido hace {dias} días (entre 2 y 3 meses)"
+    return f"Muy atrasado — más de 3 meses ({dias} días)"
+
+
+def _rep_bucket_antiguedad(fv: Any) -> str:
+    """Grupo corto para totales (quién debe / a quién debemos)."""
+    d = _rep_parse_fecha_venc(x=fv)
+    if d is None:
+        return "Sin fecha"
+    hoy = date.today()
+    dias = (hoy - d).days
+    if dias < 0:
+        return "Aún no vence"
+    if dias == 0:
+        return "Vence hoy"
+    if dias <= 30:
+        return "Vencido 1–30 días"
+    if dias <= 60:
+        return "Vencido 31–60 días"
+    if dias <= 90:
+        return "Vencido 61–90 días"
+    return "Vencido más de 90 días"
+
+
+def _rep_movimientos_caja_filtrados(
+    sb: Client, *, desde: date, hasta: date, caja_id: str | None, tipo_mov: str | None
+) -> list[dict[str, Any]]:
+    ds = desde.isoformat()
+    hf = f"{hasta.isoformat()}T23:59:59"
+    try:
+        q = (
+            sb.table("movimientos_caja")
+            .select("created_at, tipo, monto_usd, moneda, monto_moneda, concepto, referencia, caja_id, usuario_id")
+            .gte("created_at", ds)
+            .lte("created_at", hf)
+            .order("created_at", desc=True)
+        )
+        r = q.execute()
+    except Exception:
+        q = (
+            sb.table("movimientos_caja")
+            .select("created_at, tipo, monto_usd, concepto, referencia, caja_id, usuario_id")
+            .gte("created_at", ds)
+            .lte("created_at", hf)
+            .order("created_at", desc=True)
+        )
+        r = q.execute()
+        for row in r.data or []:
+            row.setdefault("moneda", None)
+            row.setdefault("monto_moneda", None)
+    rows = r.data or []
+    if caja_id:
+        rows = [x for x in rows if str(x.get("caja_id")) == caja_id]
+    if tipo_mov in ("Ingreso", "Egreso"):
+        rows = [x for x in rows if str(x.get("tipo") or "") == tipo_mov]
+    return rows
+
+
 def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
     st.subheader("Reportes")
+    st.caption(
+        "Resúmenes para revisar cómo va el negocio. Podés **bajar tablas en Excel o CSV** y abrirlas en la computadora, "
+        "imprimirlas o mandarlas por WhatsApp. Los montos en **dólares (USD)** son los que usa el sistema para los totales; "
+        "las columnas en bolívares son **referencia** según la tasa del día guardada abajo."
+    )
     if not t:
+        st.warning("Primero cargá las **tasas del día** en el panel principal para ver referencias en bolívares.")
         st.stop()
     t_bs = float(t["tasa_bs"])
     t_usdt = float(t["tasa_usdt"])
+    st.caption(fmt_tri(1.0, t_bs, t_usdt).replace("**USD** 1.00", "Referencia: 1 USD equivale a"))
 
-    tab_inv, tab_ven, tab_comp = st.tabs(["Inventario", "Ventas y cobranzas", "Compras y pagos"])
+    tab_inv, tab_caja, tab_ven, tab_comp, tab_cartera = st.tabs(
+        [
+            "Inventario",
+            "Entradas y salidas de caja",
+            "Ventas",
+            "Compras",
+            "Quién debe / a quién debemos",
+        ]
+    )
+
     with tab_inv:
-        st.markdown("#### Listados de inventario")
+        st.markdown("#### Listado de repuestos y productos")
+        st.caption(
+            "Filtrá lo que necesites y descargá **Excel**, **PDF** o una página **HTML** para imprimir. "
+            "Si no tenés Excel instalado en el servidor, igual podés usar **HTML** y imprimir desde el navegador."
+        )
         panel_reportes_inventario_export(sb, t)
 
+    with tab_caja:
+        st.markdown("#### Dinero que entró y salió de cada cuenta")
+        st.caption(
+            "Cada fila es un movimiento registrado en el sistema (ventas al contado, compras pagadas, ajustes manuales, etc.). "
+            "Servicio para revisar un período o compartir con quien lleva la contabilidad."
+        )
+        c1, c2, c3 = st.columns(3)
+        d_caja_a = c1.date_input("Desde", value=date.today() - timedelta(days=30), key="rep_caja_desde")
+        d_caja_b = c2.date_input("Hasta", value=date.today(), key="rep_caja_hasta")
+        tipo_sel = c3.selectbox(
+            "Qué mostrar",
+            options=["Todo", "Solo entradas de dinero", "Solo salidas de dinero"],
+            key="rep_caja_tipo",
+            help="Entrada = cobraste o ingresó dinero a la cuenta. Salida = pagaste o retiraste.",
+        )
+        tipo_f = None
+        if tipo_sel == "Solo entradas de dinero":
+            tipo_f = "Ingreso"
+        elif tipo_sel == "Solo salidas de dinero":
+            tipo_f = "Egreso"
+
+        cajas_r = _cajas_fetch_rows(sb, solo_activas=False)
+        caja_ids_all, caja_fmt_all = _caja_select_options(cajas_r) if cajas_r else ([], lambda x: str(x))
+        cuenta_opciones = ["(Todas las cuentas)"] + caja_ids_all
+
+        def _fmt_cuenta_opt(x: str) -> str:
+            if x == "(Todas las cuentas)":
+                return "Todas las cuentas"
+            return caja_fmt_all(x)
+
+        caja_pick = st.selectbox(
+            "Cuenta o caja",
+            options=cuenta_opciones,
+            format_func=_fmt_cuenta_opt,
+            key="rep_caja_cuenta",
+            help="Elegí una cuenta suelta (por ejemplo un banco en bolívares) o dejá **Todas** para ver todo junto.",
+        )
+        caja_f = None if caja_pick == "(Todas las cuentas)" else str(caja_pick)
+
+        movs = _rep_movimientos_caja_filtrados(sb, desde=d_caja_a, hasta=d_caja_b, caja_id=caja_f, tipo_mov=tipo_f)
+        umap = {
+            str(u["id"]): (u.get("nombre") or u.get("username") or "")
+            for u in (sb.table("erp_users").select("id,nombre,username").execute().data or [])
+        }
+        cmap = {str(c["id"]): _caja_etiqueta_lista(c) for c in cajas_r}
+
+        filas_mc: list[dict[str, Any]] = []
+        for m in movs:
+            mon = (m.get("moneda") or "USD") or "USD"
+            mm = m.get("monto_moneda")
+            filas_mc.append(
+                {
+                    "Fecha y hora": str(m.get("created_at", ""))[:19],
+                    "Cuenta": cmap.get(str(m.get("caja_id")), "—"),
+                    "Entrada o salida": "Entrada (cobro / ingreso)" if m.get("tipo") == "Ingreso" else "Salida (pago / egreso)",
+                    "Monto en USD (sistema)": float(m.get("monto_usd") or 0),
+                    "Moneda original": str(mon).upper(),
+                    "Monto en moneda original": float(mm) if mm is not None else "",
+                    "Concepto": (m.get("concepto") or "")[:120],
+                    "Referencia": (m.get("referencia") or "")[:80],
+                    "Registrado por": umap.get(str(m.get("usuario_id")), "—"),
+                }
+            )
+        df_mc = pd.DataFrame(filas_mc)
+        if df_mc.empty:
+            st.info("No hay movimientos en esas fechas y filtros. Probá ampliar el rango o elegir **Todas las cuentas**.")
+        else:
+            st.dataframe(df_mc, use_container_width=True, hide_index=True)
+            tot_in = df_mc[df_mc["Entrada o salida"].str.startswith("Entrada")]["Monto en USD (sistema)"].sum()
+            tot_out = df_mc[df_mc["Entrada o salida"].str.startswith("Salida")]["Monto en USD (sistema)"].sum()
+            m1, m2 = st.columns(2)
+            with m1:
+                st.metric("Total entradas (USD en el sistema)", f"{tot_in:,.2f}")
+            with m2:
+                st.metric("Total salidas (USD en el sistema)", f"{tot_out:,.2f}")
+            st.caption(
+                "Los **USD** son el equivalente que guardó el sistema al momento del movimiento (bolívares y USDT convertidos con la tasa de entonces)."
+            )
+
+        ts_c = _backup_file_timestamp()
+        colx, colc = st.columns(2)
+        with colx:
+            try:
+                st.download_button(
+                    label=f"Descargar Excel — movimientos_caja_{ts_c}.xlsx",
+                    data=_reporte_tabla_a_excel(df_mc if not df_mc.empty else pd.DataFrame(), nombre_hoja="Movimientos"),
+                    file_name=f"movimientos_caja_{ts_c}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="rep_dl_caja_xlsx",
+                    use_container_width=True,
+                )
+            except ImportError:
+                st.caption("Para Excel hace falta instalar **openpyxl** (ya viene en los requisitos del programa).")
+        with colc:
+            st.download_button(
+                label=f"Descargar CSV — movimientos_caja_{ts_c}.csv",
+                data=_reporte_tabla_a_csv(df_mc if not df_mc.empty else pd.DataFrame()),
+                file_name=f"movimientos_caja_{ts_c}.csv",
+                mime="text/csv",
+                key="rep_dl_caja_csv",
+                use_container_width=True,
+            )
+
     with tab_ven:
-        st.markdown("#### Ventas y análisis")
+        st.markdown("#### Ventas")
+        st.caption("Resumen de facturación, ganancia aproximada por producto y detalle línea por línea para revisar o compartir.")
         d1, d2 = st.columns(2)
         a = d1.date_input("Desde", value=date.today() - timedelta(days=30), key="rep_ven_desde")
         b = d2.date_input("Hasta", value=date.today(), key="rep_ven_hasta")
 
         ventas = (
             sb.table("ventas")
-            .select("numero, cliente, fecha, total_usd, forma_pago")
+            .select("id, numero, cliente, fecha, total_usd, forma_pago, usuario_id")
             .gte("fecha", str(a))
             .lte("fecha", f"{b}T23:59:59")
             .order("fecha", desc=True)
             .execute()
         )
-        st.markdown("##### Ventas en el rango")
+        umap_v = {
+            str(u["id"]): (u.get("nombre") or u.get("username") or "—")
+            for u in (sb.table("erp_users").select("id,nombre,username").execute().data or [])
+        }
+
+        st.markdown("##### Resumen por venta")
         if ventas.data:
             dfv = pd.DataFrame(ventas.data)
-            dfv["equiv_bs"] = dfv["total_usd"].astype(float) * t_bs
-            dfv["fecha_d"] = pd.to_datetime(dfv["fecha"]).dt.date.astype(str)
-            st.dataframe(dfv, use_container_width=True, hide_index=True)
+            dfv["Equiv. aprox. en Bs (según tasa de hoy)"] = dfv["total_usd"].astype(float) * t_bs
+            dfv["Fecha"] = pd.to_datetime(dfv["fecha"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+            dfv["Quién la registró"] = dfv["usuario_id"].map(lambda x: umap_v.get(str(x), "—"))
+            dfv_disp = dfv.rename(
+                columns={
+                    "numero": "Nº interno",
+                    "cliente": "Cliente",
+                    "total_usd": "Total USD",
+                    "forma_pago": "Forma de pago",
+                }
+            )[["Nº interno", "Fecha", "Cliente", "Forma de pago", "Total USD", "Equiv. aprox. en Bs (según tasa de hoy)", "Quién la registró"]]
+            st.dataframe(dfv_disp, use_container_width=True, hide_index=True)
+            dfv["fecha_d"] = pd.to_datetime(dfv["fecha"], errors="coerce").dt.strftime("%Y-%m-%d")
             agg = dfv.groupby("fecha_d", as_index=False)["total_usd"].sum()
-            fig = px.bar(agg, x="fecha_d", y="total_usd", title="Total USD por día")
+            fig = px.bar(
+                agg,
+                x="fecha_d",
+                y="total_usd",
+                labels={"fecha_d": "Día", "total_usd": "Dólares (USD)"},
+                title="Vendido en dólares por día (total del día)",
+            )
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("Sin ventas en el rango.")
+            st.info("No hay ventas registradas entre esas fechas.")
 
-        st.markdown("##### Utilidad bruta por producto (mismo rango)")
-        vr = (
-            sb.table("ventas")
-            .select("id")
-            .gte("fecha", str(a))
-            .lte("fecha", f"{b}T23:59:59")
-            .execute()
-        )
-        vids = [str(x["id"]) for x in (vr.data or [])]
+        vids = [str(x["id"]) for x in (ventas.data or [])]
         det_rows: list[dict[str, Any]] = []
         if vids:
             det = (
                 sb.table("ventas_detalles")
-                .select("producto_id, cantidad, precio_unitario_usd")
+                .select("venta_id, producto_id, cantidad, precio_unitario_usd, subtotal_usd")
                 .in_("venta_id", vids)
                 .execute()
             )
             det_rows = det.data or []
 
+        st.markdown("##### Cuánto ganaste aproximado por producto (mismo período)")
+        st.caption("Es una **ganancia bruta** simple: precio de venta menos costo del producto, por las cantidades vendidas. No incluye gastos fijos.")
         if det_rows:
             pmap = {
                 str(p["id"]): p
-                for p in (sb.table("productos").select("id,descripcion,costo_usd").execute().data or [])
+                for p in (sb.table("productos").select("id,descripcion,codigo,costo_usd").execute().data or [])
             }
-            rows = []
+            vhead = {str(v["id"]): v for v in (ventas.data or [])}
+            rows_m = []
             for row in det_rows:
                 pid = str(row["producto_id"])
                 pr = pmap.get(pid, {})
@@ -5163,39 +5653,327 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
                 cant = float(row["cantidad"])
                 pu = float(row["precio_unitario_usd"])
                 margin = (pu - costo) * cant
-                rows.append({"producto": desc, "utilidad_bruta_usd": margin})
-            dfm = pd.DataFrame(rows).groupby("producto", as_index=False)["utilidad_bruta_usd"].sum()
+                rows_m.append({"producto": desc, "utilidad_bruta_usd": margin})
+            dfm = pd.DataFrame(rows_m).groupby("producto", as_index=False)["utilidad_bruta_usd"].sum()
+            dfm = dfm.rename(columns={"producto": "Producto", "utilidad_bruta_usd": "Ganancia bruta USD (aprox.)"})
             st.dataframe(dfm, use_container_width=True, hide_index=True)
-            st.caption(fmt_tri(float(dfm["utilidad_bruta_usd"].sum()), t_bs, t_usdt))
+            st.caption(fmt_tri(float(dfm["Ganancia bruta USD (aprox.)"].sum()), t_bs, t_usdt))
         else:
-            st.info("Sin líneas de venta en el rango.")
+            st.info("No hay líneas de venta en ese período.")
 
-        st.markdown("##### Cuentas por cobrar")
-        cxc = sb.table("cuentas_por_cobrar").select("*").execute()
-        if cxc.data:
-            dfc = pd.DataFrame(cxc.data)
-            st.dataframe(dfc, use_container_width=True, hide_index=True)
-            pend = dfc[dfc["estado"].isin(["Pendiente", "Parcial"])]["monto_pendiente_usd"].astype(float).sum()
-            st.metric("Pendiente total USD", f"{pend:,.2f}")
-            st.caption(fmt_tri(pend, t_bs, t_usdt))
+        st.markdown("##### Detalle: cada artículo en cada venta (para revisar o compartir)")
+        st.caption("Una fila por cada línea facturada: útil para buscar un repuesto o armar un archivo para otra persona.")
+        filas_det: list[dict[str, Any]] = []
+        if det_rows and ventas.data:
+            pmap2 = {
+                str(p["id"]): p
+                for p in (sb.table("productos").select("id,descripcion,codigo").execute().data or [])
+            }
+            vhead = {str(v["id"]): v for v in ventas.data}
+            for row in det_rows:
+                vid = str(row.get("venta_id"))
+                vh = vhead.get(vid, {})
+                pid = str(row["producto_id"])
+                pr = pmap2.get(pid, {})
+                filas_det.append(
+                    {
+                        "Nº venta": vh.get("numero", ""),
+                        "Fecha venta": str(vh.get("fecha", ""))[:19],
+                        "Cliente": vh.get("cliente", ""),
+                        "Forma de pago": vh.get("forma_pago", ""),
+                        "Quién registró": umap_v.get(str(vh.get("usuario_id")), "—"),
+                        "Código": _export_cell_txt(pr.get("codigo")) or "—",
+                        "Descripción": _export_cell_txt(pr.get("descripcion")) or pid,
+                        "Cantidad": float(row.get("cantidad") or 0),
+                        "Precio unitario USD": float(row.get("precio_unitario_usd") or 0),
+                        "Subtotal USD": float(row.get("subtotal_usd") or 0),
+                    }
+                )
+        df_det = pd.DataFrame(filas_det)
+        if df_det.empty:
+            st.info("No hay detalle para mostrar en esas fechas.")
         else:
-            st.info("Sin CXC.")
+            st.dataframe(df_det, use_container_width=True, hide_index=True)
+        ts_v = _backup_file_timestamp()
+        vx, vc = st.columns(2)
+        with vx:
+            try:
+                st.download_button(
+                    label=f"Excel — detalle_ventas_{ts_v}.xlsx",
+                    data=_reporte_tabla_a_excel(df_det, nombre_hoja="Ventas detalle"),
+                    file_name=f"detalle_ventas_{ts_v}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="rep_dl_ven_det_xlsx",
+                    use_container_width=True,
+                )
+            except ImportError:
+                pass
+        with vc:
+            st.download_button(
+                label=f"CSV — detalle_ventas_{ts_v}.csv",
+                data=_reporte_tabla_a_csv(df_det),
+                file_name=f"detalle_ventas_{ts_v}.csv",
+                mime="text/csv",
+                key="rep_dl_ven_det_csv",
+                use_container_width=True,
+            )
 
     with tab_comp:
-        st.markdown("#### Compras y cuentas por pagar")
-        st.caption("Listado de compras por fechas: usá el módulo **Compras** para el detalle operativo.")
-        st.markdown("##### Cuentas por pagar")
+        st.markdown("#### Compras a proveedores")
+        st.caption("Lo que compraste en un período y lo que aún debes pagar (cuentas por pagar).")
+        d1c, d2c = st.columns(2)
+        ac = d1c.date_input("Desde", value=date.today() - timedelta(days=30), key="rep_comp_desde")
+        bc = d2c.date_input("Hasta", value=date.today(), key="rep_comp_hasta")
+
+        compras_r = (
+            sb.table("compras")
+            .select("id, numero, proveedor, fecha, total_usd, forma_pago, usuario_id")
+            .gte("fecha", str(ac))
+            .lte("fecha", f"{bc}T23:59:59")
+            .order("fecha", desc=True)
+            .execute()
+        )
+        umap_c = {
+            str(u["id"]): (u.get("nombre") or u.get("username") or "—")
+            for u in (sb.table("erp_users").select("id,nombre,username").execute().data or [])
+        }
+
+        st.markdown("##### Compras en el rango")
+        if compras_r.data:
+            dfcmp = pd.DataFrame(compras_r.data)
+            dfcmp["Equiv. aprox. en Bs (tasa de hoy)"] = dfcmp["total_usd"].astype(float) * t_bs
+            dfcmp["Fecha"] = pd.to_datetime(dfcmp["fecha"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+            dfcmp["Quién la registró"] = dfcmp["usuario_id"].map(lambda x: umap_c.get(str(x), "—"))
+            dfc_disp = dfcmp.rename(
+                columns={
+                    "numero": "Nº interno",
+                    "proveedor": "Proveedor",
+                    "total_usd": "Total USD",
+                    "forma_pago": "Forma de pago",
+                }
+            )[["Nº interno", "Fecha", "Proveedor", "Forma de pago", "Total USD", "Equiv. aprox. en Bs (tasa de hoy)", "Quién la registró"]]
+            st.dataframe(dfc_disp, use_container_width=True, hide_index=True)
+            dfcmp["fecha_d"] = pd.to_datetime(dfcmp["fecha"], errors="coerce").dt.strftime("%Y-%m-%d")
+            aggc = dfcmp.groupby("fecha_d", as_index=False)["total_usd"].sum()
+            figc = px.bar(
+                aggc,
+                x="fecha_d",
+                y="total_usd",
+                labels={"fecha_d": "Día", "total_usd": "Dólares (USD)"},
+                title="Compras en dólares por día",
+            )
+            st.plotly_chart(figc, use_container_width=True)
+        else:
+            st.info("No hay compras entre esas fechas.")
+
+        cids = [str(x["id"]) for x in (compras_r.data or [])]
+        det_c: list[dict[str, Any]] = []
+        if cids:
+            dc = (
+                sb.table("compras_detalles")
+                .select("compra_id, producto_id, cantidad, costo_unitario_usd, subtotal_usd")
+                .in_("compra_id", cids)
+                .execute()
+            )
+            det_c = dc.data or []
+
+        st.markdown("##### Detalle por artículo comprado")
+        filas_cd: list[dict[str, Any]] = []
+        if det_c and compras_r.data:
+            pmap_c = {
+                str(p["id"]): p
+                for p in (sb.table("productos").select("id,descripcion,codigo").execute().data or [])
+            }
+            head_c = {str(v["id"]): v for v in compras_r.data}
+            for row in det_c:
+                cid = str(row.get("compra_id"))
+                ch = head_c.get(cid, {})
+                pid = str(row["producto_id"])
+                pr = pmap_c.get(pid, {})
+                filas_cd.append(
+                    {
+                        "Nº compra": ch.get("numero", ""),
+                        "Fecha": str(ch.get("fecha", ""))[:19],
+                        "Proveedor": ch.get("proveedor", ""),
+                        "Código": _export_cell_txt(pr.get("codigo")) or "—",
+                        "Descripción": _export_cell_txt(pr.get("descripcion")) or pid,
+                        "Cantidad": float(row.get("cantidad") or 0),
+                        "Costo unit. USD": float(row.get("costo_unitario_usd") or 0),
+                        "Subtotal USD": float(row.get("subtotal_usd") or 0),
+                    }
+                )
+        df_cd = pd.DataFrame(filas_cd)
+        if df_cd.empty:
+            st.info("No hay líneas de compra en ese período.")
+        else:
+            st.dataframe(df_cd, use_container_width=True, hide_index=True)
+        ts_cp = _backup_file_timestamp()
+        cpx, cpc = st.columns(2)
+        with cpx:
+            try:
+                st.download_button(
+                    label=f"Excel — detalle_compras_{ts_cp}.xlsx",
+                    data=_reporte_tabla_a_excel(df_cd, nombre_hoja="Compras detalle"),
+                    file_name=f"detalle_compras_{ts_cp}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="rep_dl_comp_det_xlsx",
+                    use_container_width=True,
+                )
+            except ImportError:
+                pass
+        with cpc:
+            st.download_button(
+                label=f"CSV — detalle_compras_{ts_cp}.csv",
+                data=_reporte_tabla_a_csv(df_cd),
+                file_name=f"detalle_compras_{ts_cp}.csv",
+                mime="text/csv",
+                key="rep_dl_comp_det_csv",
+                use_container_width=True,
+            )
+
+        st.divider()
+        st.markdown("##### Facturas o deudas pendientes de pagar al proveedor")
         cxp = sb.table("cuentas_por_pagar").select("*").execute()
         if cxp.data:
             dfp = pd.DataFrame(cxp.data)
             st.dataframe(dfp, use_container_width=True, hide_index=True)
             pend_p = dfp[dfp["estado"].isin(["Pendiente", "Parcial"])]["monto_pendiente_usd"].astype(float).sum()
-            st.metric("Por pagar total USD", f"{pend_p:,.2f}")
+            st.metric("Total aún por pagar (USD)", f"{pend_p:,.2f}")
             st.caption(fmt_tri(pend_p, t_bs, t_usdt))
         else:
-            st.info("Sin CXP.")
+            st.info("No hay cuentas por pagar cargadas.")
 
+    with tab_cartera:
+        st.markdown("#### Clientes que deben y proveedores a los que debes")
+        st.caption(
+            "**Cuentas por cobrar:** ventas a crédito que aún no cobraste. **Cuentas por pagar:** compras a crédito que aún no pagaste. "
+            "La columna *¿Qué tan al día está?* te ayuda a ver si la fecha límite ya pasó."
+        )
 
+        ventas_all = {str(v["id"]): v for v in (sb.table("ventas").select("id, numero, cliente").execute().data or [])}
+        compras_all = {str(c["id"]): c for c in (sb.table("compras").select("id, numero, proveedor").execute().data or [])}
+
+        df_dl_cob = pd.DataFrame()
+        df_dl_pag = pd.DataFrame()
+
+        cxc = sb.table("cuentas_por_cobrar").select("*").execute()
+        if cxc.data:
+            st.markdown("##### Te deben (clientes)")
+            rows_cxc: list[dict[str, Any]] = []
+            for r in cxc.data:
+                vid = str(r.get("venta_id") or "")
+                vh = ventas_all.get(vid, {})
+                rows_cxc.append(
+                    {
+                        "Cliente": vh.get("cliente", "—"),
+                        "Nº venta": vh.get("numero", "—"),
+                        "Estado del crédito": r.get("estado", ""),
+                        "Fecha límite de cobro": str(r.get("fecha_vencimiento") or "")[:10],
+                        "¿Qué tan al día está?": _rep_texto_plazo_vencimiento(r.get("fecha_vencimiento")),
+                        "Grupo (para totales)": _rep_bucket_antiguedad(r.get("fecha_vencimiento")),
+                        "Adeudado USD": float(r.get("monto_pendiente_usd") or 0),
+                    }
+                )
+            df_cxc = pd.DataFrame(rows_cxc)
+            df_dl_cob = df_cxc
+            pend_c = df_cxc[df_cxc["Estado del crédito"].isin(["Pendiente", "Parcial"])]["Adeudado USD"].sum()
+            st.metric("Total que te deben (pendiente, USD)", f"{pend_c:,.2f}")
+            st.caption(fmt_tri(pend_c, t_bs, t_usdt))
+
+            res_c = (
+                df_cxc[df_cxc["Estado del crédito"].isin(["Pendiente", "Parcial"])]
+                .groupby("Grupo (para totales)", as_index=False)["Adeudado USD"]
+                .sum()
+                .sort_values("Adeudado USD", ascending=False)
+            )
+            st.markdown("**Resumen: te deben — agrupado por plazo**")
+            st.dataframe(res_c, use_container_width=True, hide_index=True)
+            st.dataframe(df_cxc, use_container_width=True, hide_index=True)
+        else:
+            st.info("No hay cuentas por cobrar.")
+
+        st.divider()
+        cxp2 = sb.table("cuentas_por_pagar").select("*").execute()
+        if cxp2.data:
+            st.markdown("##### Debes a proveedores")
+            rows_cxp: list[dict[str, Any]] = []
+            for r in cxp2.data:
+                cid = str(r.get("compra_id") or "")
+                ch = compras_all.get(cid, {})
+                rows_cxp.append(
+                    {
+                        "Proveedor": ch.get("proveedor", "—"),
+                        "Nº compra": ch.get("numero", "—"),
+                        "Estado": r.get("estado", ""),
+                        "Fecha límite de pago": str(r.get("fecha_vencimiento") or "")[:10],
+                        "¿Qué tan al día está?": _rep_texto_plazo_vencimiento(r.get("fecha_vencimiento")),
+                        "Grupo (para totales)": _rep_bucket_antiguedad(r.get("fecha_vencimiento")),
+                        "Debes USD": float(r.get("monto_pendiente_usd") or 0),
+                    }
+                )
+            df_cxp = pd.DataFrame(rows_cxp)
+            df_dl_pag = df_cxp
+            pend_x = df_cxp[df_cxp["Estado"].isin(["Pendiente", "Parcial"])]["Debes USD"].sum()
+            st.metric("Total que debes pagar (pendiente, USD)", f"{pend_x:,.2f}")
+            st.caption(fmt_tri(pend_x, t_bs, t_usdt))
+            res_x = (
+                df_cxp[df_cxp["Estado"].isin(["Pendiente", "Parcial"])]
+                .groupby("Grupo (para totales)", as_index=False)["Debes USD"]
+                .sum()
+                .sort_values("Debes USD", ascending=False)
+            )
+            st.markdown("**Resumen: debes — agrupado por plazo**")
+            st.dataframe(res_x, use_container_width=True, hide_index=True)
+            st.dataframe(df_cxp, use_container_width=True, hide_index=True)
+        else:
+            st.info("No hay cuentas por pagar.")
+
+        st.markdown("##### Bajar estos listados a tu computadora")
+        ts_car = _backup_file_timestamp()
+        _parts_dl = []
+        if not df_dl_cob.empty:
+            _parts_dl.append(df_dl_cob.assign(**{"Listado": "Clientes que te deben"}))
+        if not df_dl_pag.empty:
+            _parts_dl.append(df_dl_pag.assign(**{"Listado": "Proveedores a pagar"}))
+        df_car_csv = pd.concat(_parts_dl, ignore_index=True) if _parts_dl else pd.DataFrame()
+
+        ca1, ca2, ca3 = st.columns(3)
+        with ca1:
+            try:
+                st.download_button(
+                    label=f"Excel — clientes_que_deben_{ts_car}.xlsx",
+                    data=_reporte_tabla_a_excel(df_dl_cob, nombre_hoja="Te deben"),
+                    file_name=f"clientes_que_deben_{ts_car}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="rep_dl_car_cxc_xlsx",
+                    use_container_width=True,
+                    disabled=df_dl_cob.empty,
+                )
+            except ImportError:
+                st.caption("Instalá **openpyxl** para generar Excel.")
+        with ca2:
+            try:
+                st.download_button(
+                    label=f"Excel — proveedores_a_pagar_{ts_car}.xlsx",
+                    data=_reporte_tabla_a_excel(df_dl_pag, nombre_hoja="Debes pagar"),
+                    file_name=f"proveedores_a_pagar_{ts_car}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="rep_dl_car_cxp_xlsx",
+                    use_container_width=True,
+                    disabled=df_dl_pag.empty,
+                )
+            except ImportError:
+                pass
+        with ca3:
+            st.download_button(
+                label=f"CSV — todo_junto_{ts_car}.csv",
+                data=_reporte_tabla_a_csv(df_car_csv),
+                file_name=f"cartera_cobrar_y_pagar_{ts_car}.csv",
+                mime="text/csv",
+                key="rep_dl_car_csv",
+                use_container_width=True,
+                disabled=df_car_csv.empty,
+            )
 def module_usuarios(sb: Client) -> None:
     st.subheader("Usuarios del sistema")
     st.caption("Solo el superusuario puede crear cuentas y definir la contraseña inicial de cada persona.")

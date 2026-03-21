@@ -147,6 +147,10 @@ CREATE TABLE IF NOT EXISTS public.cajas_bancos (
   nombre TEXT NOT NULL,
   tipo TEXT NOT NULL CHECK (tipo IN ('Banco', 'Wallet', 'Efectivo')),
   saldo_actual_usd NUMERIC(18, 2) NOT NULL DEFAULT 0,
+  entidad TEXT,
+  numero_cuenta TEXT,
+  titular TEXT,
+  moneda_cuenta TEXT NOT NULL DEFAULT 'USD' CHECK (moneda_cuenta IN ('USD', 'VES', 'USDT')),
   activo BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -545,8 +549,62 @@ BEGIN
       );
     END IF;
   ELSE
-    INSERT INTO public.cuentas_por_cobrar (venta_id, monto_pendiente_usd, fecha_vencimiento, estado)
-    VALUES (v_venta_id, v_total, p_fecha_vencimiento, 'Pendiente');
+    -- Crédito: opcional p_cobros = abono / seña el mismo día; el resto queda en cuenta por cobrar
+    v_sum_cobros := 0;
+    IF p_cobros IS NOT NULL AND jsonb_array_length(p_cobros) > 0 THEN
+      FOR r IN SELECT * FROM jsonb_array_elements(p_cobros)
+      LOOP
+        v_caja_line := (r->>'caja_id')::UUID;
+        v_mon := upper(trim(r->>'moneda'));
+        v_monto := (r->>'monto')::NUMERIC;
+
+        IF v_caja_line IS NULL OR NOT EXISTS (SELECT 1 FROM public.cajas_bancos WHERE id = v_caja_line AND activo = TRUE) THEN
+          RAISE EXCEPTION 'Caja inválida en abono de venta a crédito';
+        END IF;
+        IF v_mon NOT IN ('VES', 'USD', 'USDT') THEN
+          RAISE EXCEPTION 'moneda inválida (use VES, USD o USDT)';
+        END IF;
+        IF v_monto IS NULL OR v_monto <= 0 THEN
+          RAISE EXCEPTION 'Monto de abono inválido';
+        END IF;
+
+        v_eq := CASE v_mon
+          WHEN 'USD' THEN ROUND(v_monto, 4)
+          WHEN 'USDT' THEN ROUND(v_monto / p_tasa_usdt, 4)
+          WHEN 'VES' THEN ROUND(v_monto / p_tasa_bs, 4)
+        END;
+
+        v_sum_cobros := v_sum_cobros + v_eq;
+
+        INSERT INTO public.movimientos_caja (
+          caja_id, tipo, monto_usd, moneda, monto_moneda,
+          concepto, referencia, venta_id, compra_id, usuario_id
+        ) VALUES (
+          v_caja_line,
+          'Ingreso',
+          ROUND(v_eq, 2),
+          v_mon,
+          ROUND(v_monto, 4),
+          'Abono / seña — venta crédito #' || v_num::TEXT,
+          NULL,
+          v_venta_id,
+          NULL,
+          p_usuario_id
+        );
+      END LOOP;
+
+      v_sum_cobros := ROUND(v_sum_cobros, 2);
+      IF v_sum_cobros > v_total + 0.05 THEN
+        RAISE EXCEPTION 'El abono (≈ % USD) no puede ser mayor al total de la venta (% USD)', v_sum_cobros, v_total;
+      END IF;
+      IF (v_total - v_sum_cobros) > 0.05 THEN
+        INSERT INTO public.cuentas_por_cobrar (venta_id, monto_pendiente_usd, fecha_vencimiento, estado)
+        VALUES (v_venta_id, ROUND(v_total - v_sum_cobros, 2), p_fecha_vencimiento, 'Pendiente');
+      END IF;
+    ELSE
+      INSERT INTO public.cuentas_por_cobrar (venta_id, monto_pendiente_usd, fecha_vencimiento, estado)
+      VALUES (v_venta_id, v_total, p_fecha_vencimiento, 'Pendiente');
+    END IF;
   END IF;
 
   RETURN v_venta_id;
