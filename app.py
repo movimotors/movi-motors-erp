@@ -2974,8 +2974,8 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
     st.markdown("##### Buscar y modificar productos")
     st.caption(
         "El **stock** baja con las **ventas** y sube con las **compras** (y cargas nuevas). "
-        "Repuestos **nuevos y usados**: buscá por código interno, **OEM**, descripción, **marca del repuesto** "
-        "o **marcas de carro** guardadas en compatibilidad."
+        "Buscá por código, **OEM**, descripción, **marca del repuesto** o **marcas de carro**. "
+        "La **tabla masiva** quedó **al final** del módulo (después de alta y CSV)."
     )
     _fc1, _fc2 = st.columns([2, 1])
     with _fc1:
@@ -3235,131 +3235,6 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
         if len(crit_all):
             st.error(f"Alertas de stock crítico: {len(crit_all)} ítems")
             st.dataframe(crit_all, use_container_width=True, hide_index=True)
-
-        st.markdown("**Tabla de productos** (podés editar varias filas y guardar una vez)")
-        st.caption(
-            "**OEM** = código de parte; **marca del repuesto** (ej. Bosch); **vehículos** = marcas de carro separadas por coma. "
-            "Columnas **precio_v_bs_ref** / **costo_bs_ref**: referencia en Bs según **tasa_bs** del Dashboard."
-        )
-
-        _inv_skip_cols = {"id", "categoria_id", "compatibilidad"}
-        _inv_editor_order = [
-            "codigo",
-            "sku_oem",
-            "descripcion",
-            "marca_producto",
-            "condicion",
-            "vehiculos_compat",
-            "años_compat",
-            "ubicacion",
-            "imagen_url",
-            "stock_actual",
-            "stock_minimo",
-            "costo_usd",
-            "precio_v_usd",
-            "precio_v_bs_ref",
-            "costo_bs_ref",
-            "activo",
-            "categoria",
-        ]
-        _editor_cols = [c for c in _inv_editor_order if c in df_view.columns]
-        for c in df_view.columns:
-            if c not in _editor_cols and c not in _inv_skip_cols:
-                _editor_cols.append(c)
-        _ed_df = df_view[_editor_cols].copy()
-        _disabled_cols = ["id"]
-        if "precio_v_bs_ref" in _ed_df.columns:
-            _disabled_cols.extend(["precio_v_bs_ref", "costo_bs_ref"])
-        _inv_col_cfg: dict[str, Any] = {
-            "categoria": st.column_config.SelectboxColumn(
-                "Categoría",
-                options=_cat_select_opts,
-            ),
-            "condicion": st.column_config.SelectboxColumn(
-                "Condición",
-                options=["Nuevo", "Usado"],
-                required=True,
-            ),
-            "stock_actual": st.column_config.NumberColumn(
-                "Stock",
-                min_value=0,
-                step=1,
-                format="%d",
-            ),
-            "stock_minimo": st.column_config.NumberColumn(
-                "Stock mín.",
-                min_value=0,
-                step=1,
-                format="%d",
-            ),
-        }
-        edited = st.data_editor(
-            _ed_df,
-            num_rows="fixed",
-            disabled=_disabled_cols,
-            column_config=_inv_col_cfg,
-            use_container_width=True,
-            key="editor_prod",
-        )
-        if st.button("Guardar cambios de inventario"):
-            for _, row in edited.iterrows():
-                _cv = row.get("categoria")
-                if _cv is None or (isinstance(_cv, float) and pd.isna(_cv)):
-                    _cv = ""
-                _cv = str(_cv).strip()
-                _cid_up = _nombre_a_id_cat.get(_cv) if _cv else None
-                _cond = row.get("condicion")
-                if _cond not in ("Nuevo", "Usado"):
-                    _cond = "Nuevo"
-                _sku = row.get("sku_oem")
-                _sku = None if _sku is None or (isinstance(_sku, float) and pd.isna(_sku)) else str(_sku).strip() or None
-                _mprod = row.get("marca_producto")
-                _mprod = (
-                    None
-                    if _mprod is None or (isinstance(_mprod, float) and pd.isna(_mprod))
-                    else str(_mprod).strip() or None
-                )
-                _ubi = row.get("ubicacion")
-                _ubi = None if _ubi is None or (isinstance(_ubi, float) and pd.isna(_ubi)) else str(_ubi).strip() or None
-                _img = row.get("imagen_url")
-                _img = None if _img is None or (isinstance(_img, float) and pd.isna(_img)) else str(_img).strip() or None
-                _compat = _inv_build_compat_dict(
-                    str(row.get("vehiculos_compat") or ""),
-                    str(row.get("años_compat") or ""),
-                )
-                _upd: dict[str, Any] = {
-                    "codigo": None
-                    if row.get("codigo") is None
-                    or (isinstance(row.get("codigo"), float) and pd.isna(row.get("codigo")))
-                    else (str(row.get("codigo")).strip() or None),
-                    "descripcion": str(row.get("descripcion") or ""),
-                    "stock_actual": _inv_stock_int(row.get("stock_actual")),
-                    "stock_minimo": _inv_stock_int(row.get("stock_minimo")),
-                    "costo_usd": float(row.get("costo_usd", 0)),
-                    "precio_v_usd": float(row.get("precio_v_usd", 0)),
-                    "activo": bool(row.get("activo", True)),
-                    "categoria_id": _cid_up,
-                    "condicion": _cond,
-                    "compatibilidad": _compat,
-                }
-                if "sku_oem" in df_view.columns:
-                    _upd["sku_oem"] = _sku
-                if "marca_producto" in df_view.columns:
-                    _upd["marca_producto"] = _mprod
-                if "ubicacion" in df_view.columns:
-                    _upd["ubicacion"] = _ubi
-                if "imagen_url" in df_view.columns:
-                    _upd["imagen_url"] = _img
-                try:
-                    sb.table("productos").update(_upd).eq("id", str(row["id"])).execute()
-                except Exception as ex:
-                    st.error(
-                        f"Error al guardar fila id={row.get('id')}: {ex}. "
-                        "¿Ejecutaste **supabase/patch_011_productos_repuestos.sql** en Supabase?"
-                    )
-                    st.stop()
-            st.success("Productos actualizados.")
-            st.rerun()
 
     if not df.empty and df_view.empty:
         crit_all = df.loc[df["stock_actual"].map(_inv_stock_int) <= df["stock_minimo"].map(_inv_stock_int)]
@@ -3624,6 +3499,140 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                     _insert_rows_batched(sb, "productos", batch_ins)
                     st.success(f"Insertados {len(batch_ins)} productos.")
                     st.rerun()
+
+    st.divider()
+    st.markdown("##### Tabla de productos (edición masiva — al final del módulo)")
+    st.caption(
+        "Mismos **filtros de búsqueda y categoría** de arriba. Podés editar **varias filas** y guardar una vez. "
+        "**OEM** = código de parte; **vehículos** = marcas de carro separadas por coma. "
+        "**precio_v_bs_ref** / **costo_bs_ref**: solo referencia en Bs (solo lectura aquí)."
+    )
+    if df.empty:
+        st.info("Cuando cargues productos en la base, la tabla aparecerá acá.")
+    elif df_view.empty:
+        st.info(
+            "No hay filas con el filtro actual. Cambiá la búsqueda o la categoría para ver la tabla, "
+            "o usá **Editar un producto** más arriba."
+        )
+    else:
+        _inv_skip_cols = {"id", "categoria_id", "compatibilidad"}
+        _inv_editor_order = [
+            "codigo",
+            "sku_oem",
+            "descripcion",
+            "marca_producto",
+            "condicion",
+            "vehiculos_compat",
+            "años_compat",
+            "ubicacion",
+            "imagen_url",
+            "stock_actual",
+            "stock_minimo",
+            "costo_usd",
+            "precio_v_usd",
+            "precio_v_bs_ref",
+            "costo_bs_ref",
+            "activo",
+            "categoria",
+        ]
+        _editor_cols = [c for c in _inv_editor_order if c in df_view.columns]
+        for c in df_view.columns:
+            if c not in _editor_cols and c not in _inv_skip_cols:
+                _editor_cols.append(c)
+        _ed_df = df_view[_editor_cols].copy()
+        _disabled_cols = ["id"]
+        if "precio_v_bs_ref" in _ed_df.columns:
+            _disabled_cols.extend(["precio_v_bs_ref", "costo_bs_ref"])
+        _inv_col_cfg_tbl: dict[str, Any] = {
+            "categoria": st.column_config.SelectboxColumn(
+                "Categoría",
+                options=_cat_select_opts,
+            ),
+            "condicion": st.column_config.SelectboxColumn(
+                "Condición",
+                options=["Nuevo", "Usado"],
+                required=True,
+            ),
+            "stock_actual": st.column_config.NumberColumn(
+                "Stock",
+                min_value=0,
+                step=1,
+                format="%d",
+            ),
+            "stock_minimo": st.column_config.NumberColumn(
+                "Stock mín.",
+                min_value=0,
+                step=1,
+                format="%d",
+            ),
+        }
+        edited = st.data_editor(
+            _ed_df,
+            num_rows="fixed",
+            disabled=_disabled_cols,
+            column_config=_inv_col_cfg_tbl,
+            use_container_width=True,
+            key="editor_prod",
+        )
+        if st.button("Guardar cambios de inventario", key="inv_btn_guardar_tabla"):
+            for _, row in edited.iterrows():
+                _cv = row.get("categoria")
+                if _cv is None or (isinstance(_cv, float) and pd.isna(_cv)):
+                    _cv = ""
+                _cv = str(_cv).strip()
+                _cid_up = _nombre_a_id_cat.get(_cv) if _cv else None
+                _cond = row.get("condicion")
+                if _cond not in ("Nuevo", "Usado"):
+                    _cond = "Nuevo"
+                _sku = row.get("sku_oem")
+                _sku = None if _sku is None or (isinstance(_sku, float) and pd.isna(_sku)) else str(_sku).strip() or None
+                _mprod = row.get("marca_producto")
+                _mprod = (
+                    None
+                    if _mprod is None or (isinstance(_mprod, float) and pd.isna(_mprod))
+                    else str(_mprod).strip() or None
+                )
+                _ubi = row.get("ubicacion")
+                _ubi = None if _ubi is None or (isinstance(_ubi, float) and pd.isna(_ubi)) else str(_ubi).strip() or None
+                _img = row.get("imagen_url")
+                _img = None if _img is None or (isinstance(_img, float) and pd.isna(_img)) else str(_img).strip() or None
+                _compat = _inv_build_compat_dict(
+                    str(row.get("vehiculos_compat") or ""),
+                    str(row.get("años_compat") or ""),
+                )
+                _upd: dict[str, Any] = {
+                    "codigo": None
+                    if row.get("codigo") is None
+                    or (isinstance(row.get("codigo"), float) and pd.isna(row.get("codigo")))
+                    else (str(row.get("codigo")).strip() or None),
+                    "descripcion": str(row.get("descripcion") or ""),
+                    "stock_actual": _inv_stock_int(row.get("stock_actual")),
+                    "stock_minimo": _inv_stock_int(row.get("stock_minimo")),
+                    "costo_usd": float(row.get("costo_usd", 0)),
+                    "precio_v_usd": float(row.get("precio_v_usd", 0)),
+                    "activo": bool(row.get("activo", True)),
+                    "categoria_id": _cid_up,
+                    "condicion": _cond,
+                    "compatibilidad": _compat,
+                }
+                if "sku_oem" in df_view.columns:
+                    _upd["sku_oem"] = _sku
+                if "marca_producto" in df_view.columns:
+                    _upd["marca_producto"] = _mprod
+                if "ubicacion" in df_view.columns:
+                    _upd["ubicacion"] = _ubi
+                if "imagen_url" in df_view.columns:
+                    _upd["imagen_url"] = _img
+                try:
+                    sb.table("productos").update(_upd).eq("id", str(row["id"])).execute()
+                except Exception as ex:
+                    st.error(
+                        f"Error al guardar fila id={row.get('id')}: {ex}. "
+                        "¿Ejecutaste **supabase/patch_011_productos_repuestos.sql** en Supabase?"
+                    )
+                    st.stop()
+            st.success("Productos actualizados.")
+            st.rerun()
 
 
 def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
