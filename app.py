@@ -2984,12 +2984,12 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
     elif df_view.empty:
         st.info("No hay productos que coincidan con la búsqueda o la categoría elegida.")
     else:
-        with st.expander("Ficha rápida: cambiar precio o stock de **un** producto", expanded=False):
+        with st.expander("Editar **un** producto (todos los campos)", expanded=False):
             _max_ficha = 200
             if len(df_view) > _max_ficha:
                 st.caption(
                     f"Hay **{len(df_view)}** productos en pantalla. Afiná la búsqueda o la categoría "
-                    f"(menos de {_max_ficha}) para usar la ficha rápida."
+                    f"(menos de {_max_ficha}) para usar esta ficha."
                 )
             else:
                 _labels: dict[str, str] = {}
@@ -3005,10 +3005,11 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                     _labels[_lab] = _lid
                 _pick_labs = sorted(_labels.keys(), key=str.casefold)
                 _sel_lab = st.selectbox(
-                    "Elegí el producto",
+                    "Elegí el producto a editar",
                     options=["—"] + _pick_labs,
                     index=0,
                     key="inv_ficha_producto_pick",
+                    help="El listado respeta búsqueda y categoría. Cambiá acá de ítem sin guardar el formulario.",
                 )
                 if _sel_lab != "—" and _sel_lab in _labels:
                     _pid = _labels[_sel_lab]
@@ -3017,51 +3018,177 @@ def module_inventario(sb: Client, t: dict[str, Any] | None) -> None:
                         st.error("No se encontró el producto.")
                     else:
                         _rw = _row.iloc[0]
-                        with st.form("inv_ficha_prod_form"):
-                            st.caption(f"ID interno: `{_pid}` · Stock y precios se guardan en la base.")
-                            _ns = st.number_input(
+                        _d_comp = _inv_compat_as_dict(_rw.get("compatibilidad"))
+                        _marcas_act: list[str] = []
+                        for _m in _d_comp.get("marcas_vehiculo") or _d_comp.get("marcas") or []:
+                            _s = str(_m).strip()
+                            if _s:
+                                _marcas_act.append(_s)
+                        _en_cat = [m for m in _marcas_act if m in _marcas_veh_catalogo]
+                        _extras_list = [m for m in _marcas_act if m not in _marcas_veh_catalogo]
+                        _extras_str = ", ".join(_extras_list)
+                        _anos_ini = _inv_compat_anos_str(_d_comp)
+                        _cat_nm = _export_cell_txt(_rw.get("categoria"))
+                        try:
+                            _cat_ix = _cat_select_opts.index(_cat_nm) if _cat_nm in _cat_select_opts else 0
+                        except ValueError:
+                            _cat_ix = 0
+                        _cond_ini = _rw.get("condicion")
+                        if _cond_ini not in ("Nuevo", "Usado"):
+                            _cond_ini = "Nuevo"
+                        with st.form(f"inv_ficha_prod_form_{_pid}"):
+                            st.caption(f"ID interno: `{_pid}` · Los cambios reemplazan el registro en la base.")
+                            fa, fb = st.columns(2)
+                            _fcod = fa.text_input(
+                                "Código interno",
+                                value=_export_cell_txt(_rw.get("codigo")),
+                                key=f"inv_ficha_cod_{_pid}",
+                            )
+                            _fsku = fb.text_input(
+                                "OEM / código parte",
+                                value=_export_cell_txt(_rw.get("sku_oem")),
+                                key=f"inv_ficha_sku_{_pid}",
+                            )
+                            _fdesc = st.text_input(
+                                "Descripción",
+                                value=_export_cell_txt(_rw.get("descripcion")) or "Sin descripción",
+                                max_chars=500,
+                                key=f"inv_ficha_desc_{_pid}",
+                            )
+                            fm1, fm2 = st.columns(2)
+                            _fmprod = fm1.text_input(
+                                "Marca del repuesto (ej. Bosch)",
+                                value=_export_cell_txt(_rw.get("marca_producto")),
+                                key=f"inv_ficha_mprod_{_pid}",
+                            )
+                            _fcond = fm2.selectbox(
+                                "Condición",
+                                ["Nuevo", "Usado"],
+                                index=0 if _cond_ini == "Nuevo" else 1,
+                                key=f"inv_ficha_cond_{_pid}",
+                            )
+                            st.markdown("**Compatibilidad (marcas de carro)**")
+                            if _marcas_veh_catalogo:
+                                _fpick_mv = st.multiselect(
+                                    "Del catálogo en base",
+                                    options=_marcas_veh_catalogo,
+                                    default=_en_cat,
+                                    key=f"inv_ficha_mv_{_pid}",
+                                )
+                            else:
+                                st.caption("Sin catálogo: ejecutá **patch_012** o escribí las marcas solo en texto.")
+                                _fpick_mv = []
+                            fc1, fc2 = st.columns(2)
+                            _fextra_mv = fc1.text_input(
+                                "Otras marcas (coma)",
+                                value=_extras_str,
+                                key=f"inv_ficha_mvx_{_pid}",
+                            )
+                            _fanos = fc2.text_input(
+                                "Años / rango",
+                                value=_anos_ini,
+                                key=f"inv_ficha_anos_{_pid}",
+                            )
+                            fu1, fu2 = st.columns(2)
+                            _fubi = fu1.text_input(
+                                "Ubicación en almacén",
+                                value=_export_cell_txt(_rw.get("ubicacion")),
+                                key=f"inv_ficha_ubi_{_pid}",
+                            )
+                            _fimg = fu2.text_input(
+                                "URL imagen",
+                                value=_export_cell_txt(_rw.get("imagen_url")),
+                                key=f"inv_ficha_img_{_pid}",
+                            )
+                            st.markdown("**Stock y precios (USD)**")
+                            fs1, fs2 = st.columns(2)
+                            _ns = fs1.number_input(
                                 "Stock actual (unidades)",
                                 min_value=0,
                                 value=_inv_stock_int(_rw.get("stock_actual")),
                                 step=1,
                                 format="%d",
-                                help="Piezas enteras. Las ventas/compras también mueven este valor.",
+                                key=f"inv_ficha_st_{_pid}",
                             )
-                            _nsmin = st.number_input(
+                            _nsmin = fs2.number_input(
                                 "Stock mínimo (alerta)",
                                 min_value=0,
                                 value=_inv_stock_int(_rw.get("stock_minimo")),
                                 step=1,
                                 format="%d",
+                                key=f"inv_ficha_smin_{_pid}",
                             )
-                            _npv = st.number_input(
-                                "Precio venta USD",
-                                min_value=0.0,
-                                value=float(_rw.get("precio_v_usd") or 0),
-                                step=0.01,
-                                format="%.2f",
-                            )
-                            _nco = st.number_input(
+                            fp1, fp2 = st.columns(2)
+                            _nco = fp1.number_input(
                                 "Costo USD",
                                 min_value=0.0,
                                 value=float(_rw.get("costo_usd") or 0),
                                 step=0.01,
                                 format="%.2f",
+                                key=f"inv_ficha_co_{_pid}",
                             )
-                            if st.form_submit_button("Guardar este producto"):
+                            _npv = fp2.number_input(
+                                "Precio venta USD (precio_v_usd)",
+                                min_value=0.0,
+                                value=float(_rw.get("precio_v_usd") or 0),
+                                step=0.01,
+                                format="%.2f",
+                                key=f"inv_ficha_pv_{_pid}",
+                            )
+                            if float(_nco) > 0:
+                                st.caption(
+                                    f"Margen bruto: **{((float(_npv) - float(_nco)) / float(_nco) * 100):.1f}%** "
+                                    f"· Diferencia USD: **{float(_npv) - float(_nco):.2f}**"
+                                )
+                            st.markdown("**Estado y categoría**")
+                            fx1, fx2 = st.columns(2)
+                            _factivo = fx1.checkbox(
+                                "Producto activo",
+                                value=bool(_rw.get("activo", True)),
+                                key=f"inv_ficha_act_{_pid}",
+                            )
+                            _fsel_cat = fx2.selectbox(
+                                "Categoría",
+                                options=_cat_select_opts,
+                                index=_cat_ix,
+                                key=f"inv_ficha_cat_{_pid}",
+                            )
+                            if st.form_submit_button("Guardar cambios del producto"):
+                                _merged_mv = _inv_merge_marcas_catalogo_texto(_fpick_mv, _fextra_mv)
+                                _compat_f = _inv_build_compat_dict(_merged_mv, _fanos)
+                                _cid_f = (
+                                    _nombre_a_id_cat.get(str(_fsel_cat).strip())
+                                    if str(_fsel_cat or "").strip()
+                                    else None
+                                )
+                                _upd_f: dict[str, Any] = {
+                                    "codigo": str(_fcod).strip() or None,
+                                    "descripcion": str(_fdesc).strip() or "Sin descripción",
+                                    "stock_actual": int(_ns),
+                                    "stock_minimo": int(_nsmin),
+                                    "costo_usd": float(_nco),
+                                    "precio_v_usd": float(_npv),
+                                    "activo": bool(_factivo),
+                                    "categoria_id": _cid_f,
+                                    "condicion": _fcond if _fcond in ("Nuevo", "Usado") else "Nuevo",
+                                    "compatibilidad": _compat_f,
+                                }
+                                if "sku_oem" in df_view.columns:
+                                    _upd_f["sku_oem"] = str(_fsku).strip() or None
+                                if "marca_producto" in df_view.columns:
+                                    _upd_f["marca_producto"] = str(_fmprod).strip() or None
+                                if "ubicacion" in df_view.columns:
+                                    _upd_f["ubicacion"] = str(_fubi).strip() or None
+                                if "imagen_url" in df_view.columns:
+                                    _upd_f["imagen_url"] = str(_fimg).strip() or None
                                 try:
-                                    sb.table("productos").update(
-                                        {
-                                            "stock_actual": int(_ns),
-                                            "stock_minimo": int(_nsmin),
-                                            "precio_v_usd": float(_npv),
-                                            "costo_usd": float(_nco),
-                                        }
-                                    ).eq("id", _pid).execute()
-                                    st.success("Cambios guardados.")
+                                    sb.table("productos").update(_upd_f).eq("id", _pid).execute()
+                                    st.success("Producto actualizado.")
                                     st.rerun()
                                 except Exception as ex:
-                                    st.error(str(ex))
+                                    st.error(
+                                        f"{ex} · Revisá que esté aplicado **patch_011** (columnas repuestos) en Supabase."
+                                    )
 
         _sa = df["stock_actual"].map(_inv_stock_int)
         _sm = df["stock_minimo"].map(_inv_stock_int)
