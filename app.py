@@ -1680,28 +1680,78 @@ INV_REP_SYNTH_USDT_KEYS: frozenset[str] = frozenset({"_pv_usdt_ref", "_cu_usdt_r
 
 INV_REP_META_KEYS_SIN_SYNTH: frozenset[str] = frozenset(k for k, _ in INV_REP_COL_META if k not in INV_REP_SYNTH_USDT_KEYS)
 
-# None = todas las columnas disponibles según la tabla
+# Columnas “de detalle”: por defecto fuera del reporte; el usuario las activa con checkboxes (presets).
+INV_REP_DETAIL_OPT_KEYS: frozenset[str] = frozenset(
+    {"marca_producto", "condicion", "_veh_rep", "_anos_rep", "stock_minimo", "ubicacion"}
+)
+
+# Pesos relativos para repartir ancho (HTML colgroup + PDF). Más alto = más ancho.
+_INV_REP_COL_W: dict[str, float] = {
+    "codigo": 0.95,
+    "sku_oem": 0.85,
+    "descripcion": 14.0,
+    "marca_producto": 0.9,
+    "condicion": 0.55,
+    "_veh_rep": 1.05,
+    "_anos_rep": 0.75,
+    "categoria_display": 1.05,
+    "stock_actual": 0.62,
+    "stock_minimo": 0.55,
+    "costo_usd": 0.92,
+    "precio_v_usd": 0.92,
+    "precio_v_bs_ref": 0.88,
+    "costo_bs_ref": 0.88,
+    "_pv_usdt_ref": 0.92,
+    "_cu_usdt_ref": 0.92,
+    "ubicacion": 0.85,
+    "activo": 0.48,
+}
+
+
+def _inv_rep_col_width_fracs(keys: list[str]) -> list[float]:
+    wts = [_INV_REP_COL_W.get(k, 1.0) for k in keys]
+    s = sum(wts) or 1.0
+    fr = [w / s for w in wts]
+    if "descripcion" in keys:
+        i = keys.index("descripcion")
+        min_f = 0.30
+        if fr[i] < min_f:
+            rest = 1.0 - min_f
+            sum_other = sum(fr[j] for j in range(len(fr)) if j != i)
+            if sum_other <= 1e-9:
+                n = len(fr)
+                return [1.0 / n] * n
+            for j in range(len(fr)):
+                if j == i:
+                    fr[j] = min_f
+                else:
+                    fr[j] = (fr[j] / sum_other) * rest
+    return fr
+
+
+INV_REP_PRESET_INTERNO_CORE: frozenset[str] = frozenset(
+    {
+        "codigo",
+        "sku_oem",
+        "descripcion",
+        "categoria_display",
+        "stock_actual",
+        "costo_usd",
+        "precio_v_usd",
+        "precio_v_bs_ref",
+        "costo_bs_ref",
+        "activo",
+    }
+)
+
 INV_REP_PRESET_COLS: dict[str, frozenset[str] | None] = {
-    "interno": None,
-    "lista_cliente": frozenset(
-        {
-            "codigo",
-            "descripcion",
-            "categoria_display",
-            "marca_producto",
-            "condicion",
-            "_veh_rep",
-            "precio_v_usd",
-        }
-    ),
+    "interno": INV_REP_PRESET_INTERNO_CORE,
+    "lista_cliente": frozenset({"codigo", "descripcion", "categoria_display", "precio_v_usd"}),
     "analisis_precios": frozenset(
         {
             "codigo",
             "sku_oem",
             "descripcion",
-            "marca_producto",
-            "condicion",
-            "_veh_rep",
             "categoria_display",
             "stock_actual",
             "costo_usd",
@@ -1712,7 +1762,7 @@ INV_REP_PRESET_COLS: dict[str, frozenset[str] | None] = {
 
 
 def _inv_rep_merge_template_keys(column_keys: frozenset[str] | None) -> frozenset[str]:
-    """Plantilla `None` = todas las columnas físicas (sin USDT sintéticas; esas van con el checkbox)."""
+    """`None` = personalizado vacío → todas las columnas físicas (sin USDT sintéticas)."""
     if column_keys is None:
         return frozenset(INV_REP_META_KEYS_SIN_SYNTH)
     return column_keys
@@ -1750,6 +1800,33 @@ def _inv_rep_apply_currency_prefs(
     if not show_usdt:
         drop.update(INV_REP_SYNTH_USDT_KEYS)
     return frozenset(k for k in keys if k not in drop)
+
+
+def _inv_rep_extend_detail_columns(
+    keys: frozenset[str],
+    *,
+    marca: bool,
+    cond: bool,
+    veh: bool,
+    anos: bool,
+    stock_min: bool,
+    ubi: bool,
+) -> frozenset[str]:
+    """Añade columnas de detalle solo si el usuario las pidió (presets interno / lista / análisis)."""
+    k = set(keys)
+    if marca:
+        k.add("marca_producto")
+    if cond:
+        k.add("condicion")
+    if veh:
+        k.add("_veh_rep")
+    if anos:
+        k.add("_anos_rep")
+    if stock_min:
+        k.add("stock_minimo")
+    if ubi:
+        k.add("ubicacion")
+    return frozenset(k)
 
 
 def _inv_format_usdt_ref_cell(val_usd: Any, tasa_usdt: float | None) -> str:
@@ -1823,6 +1900,13 @@ def _html_inventario_listado(
     _t_bs_rep = float(t["tasa_bs"]) if (t and _nf(t.get("tasa_bs")) is not None) else None
     _t_usdt_rep = float(t["tasa_usdt"]) if (t and _nf(t.get("tasa_usdt")) is not None) else None
 
+    _k_list = [k for k, _ in cols_print]
+    _fracs = _inv_rep_col_width_fracs(_k_list)
+    _col_parts: list[str] = []
+    for _fk, _f in zip(_k_list, _fracs):
+        _cls = ' class="col-desc"' if _fk == "descripcion" else ""
+        _col_parts.append(f'<col{_cls} style="width:{100 * _f:.2f}%" />')
+    _colgroup = "".join(_col_parts)
     ths = "".join(f"<th>{html.escape(lab)}</th>" for _k, lab in cols_print)
     body_rows: list[str] = []
     current_cat: str | None = None
@@ -1898,10 +1982,9 @@ def _html_inventario_listado(
   body {{
     font-family: Segoe UI, Roboto, Arial, sans-serif;
     margin: 0;
-    padding: 1rem 1.25rem;
-    max-width: 210mm;
-    margin-left: auto;
-    margin-right: auto;
+    padding: 0.75rem 0.5rem;
+    width: 100%;
+    max-width: none;
     color: #111;
   }}
   .logo-wrap {{
@@ -1924,19 +2007,20 @@ def _html_inventario_listado(
   h1 {{ font-size: 1.1rem; margin: 0 0 0.35rem 0; text-align: center; color: #2a1f45; }}
   .meta {{ color: #444; font-size: 0.82rem; margin-bottom: 0.65rem; text-align: center; }}
   .sub {{ font-size: 0.78rem; color: #333; margin: 0.3rem 0; text-align: center; }}
-  table.inv-grid {{ border-collapse: collapse; width: 100%; font-size: 0.72rem; table-layout: fixed; }}
+  table.inv-grid {{ border-collapse: collapse; width: 100%; min-width: 100%; font-size: 0.72rem; table-layout: fixed; }}
+  col.col-desc {{ min-width: 12rem; }}
   th, td {{ border: 1px solid #bbb; padding: 0.35rem 0.45rem; text-align: left; vertical-align: top;
-    word-wrap: break-word; overflow-wrap: anywhere; hyphens: auto; }}
+    word-wrap: break-word; overflow-wrap: break-word; hyphens: auto; }}
   th {{ background: #2a1f45; color: #fff; font-weight: 600; }}
   th.num, td.num {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
-  td.desc {{ white-space: normal; }}
+  td.desc {{ white-space: normal; font-size: 0.8rem; line-height: 1.4; }}
   tr.catgrp td {{ background: #fff3e0; font-weight: 700; color: #e65100; border-color: #ffcc80;
     font-family: Segoe UI, Roboto, Arial, sans-serif; font-style: normal; }}
   tr:nth-child(even) td {{ background: #fafafa; }}
   .foot {{ margin-top: 0.85rem; font-size: 0.75rem; color: #555; text-align: center; }}
   .print-actions {{ margin-top: 0.75rem; text-align: center; }}
   @media print {{
-    body {{ padding: 0; max-width: none; }}
+    body {{ padding: 0; max-width: 210mm; margin-left: auto; margin-right: auto; }}
     .print-actions {{ display: none !important; }}
     tr.catgrp td {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
     th {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
@@ -1951,6 +2035,7 @@ def _html_inventario_listado(
   {tasa_note}
   {filt_html}
   <table class="inv-grid">
+    <colgroup>{_colgroup}</colgroup>
     <thead><tr>{ths}</tr></thead>
     <tbody>
       {''.join(body_rows)}
@@ -2078,7 +2163,10 @@ def _xlsx_inventario_bytes(df_flat: pd.DataFrame) -> bytes:
         for i, col in enumerate(df_flat.columns, start=1):
             lens = df_flat[col].astype(str).map(len)
             m = max(int(lens.max()) if len(lens) > 0 else 0, len(str(col)))
-            ws.column_dimensions[get_column_letter(i)].width = float(min(48, max(10, m + 2)))
+            base = max(10, m + 2)
+            if "escripci" in str(col).lower() or str(col).lower() == "descripción":
+                base = max(base, 44)
+            ws.column_dimensions[get_column_letter(i)].width = float(min(56, base))
     return buf.getvalue()
 
 
@@ -2096,26 +2184,10 @@ def _reporte_tabla_a_csv(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
 
 
-def _pdf_inventario_col_widths(n_cols: int, total_w: float) -> list[float]:
-    """Proporciones para **A4 vertical** (ancho útil ≈ 210 mm − márgenes). Suman 1.0."""
-    if n_cols == 7:
-        parts = [0.09, 0.30, 0.14, 0.09, 0.09, 0.145, 0.145]
-    elif n_cols == 8:
-        parts = [0.08, 0.26, 0.12, 0.08, 0.08, 0.13, 0.13, 0.13]
-    elif n_cols == 9:
-        parts = [0.07, 0.22, 0.11, 0.07, 0.07, 0.12, 0.12, 0.12, 0.12]
-    elif n_cols == 10:
-        # Cód OEM Desc Cond Vehíc Cat St Mín C.U. P.V.
-        parts = [0.055, 0.062, 0.26, 0.045, 0.118, 0.072, 0.036, 0.036, 0.088, 0.088]
-    elif n_cols == 11:
-        parts = [0.052, 0.058, 0.22, 0.042, 0.105, 0.068, 0.032, 0.032, 0.078, 0.078, 0.087]
-    elif n_cols == 12:
-        parts = [0.048, 0.054, 0.195, 0.04, 0.098, 0.065, 0.03, 0.03, 0.074, 0.074, 0.076, 0.076]
-    else:
-        parts = [1.0 / max(1, n_cols)] * max(1, n_cols)
-    s = sum(parts)
-    parts = [p / s for p in parts]
-    return [total_w * p for p in parts]
+def _pdf_inventario_col_widths_for_keys(keys: list[str], total_w: float) -> list[float]:
+    """Ancho PDF según columnas visibles; **descripcion** toma más espacio si hay pocas columnas angostas."""
+    fr = _inv_rep_col_width_fracs(keys)
+    return [total_w * f for f in fr]
 
 
 def _pdf_inventario_bytes(
@@ -2215,7 +2287,7 @@ def _pdf_inventario_bytes(
         return buf.getvalue()
     headers = [INV_REP_PDF_ABBR.get(k, k) for k in pdf_key_list]
     n_h = len(headers)
-    col_ws = _pdf_inventario_col_widths(n_h, tw)
+    col_ws = _pdf_inventario_col_widths_for_keys(pdf_key_list, tw)
     t_bs_pdf = _nf(t.get("tasa_bs")) if t else None
 
     cell_l = ParagraphStyle(
@@ -6006,13 +6078,13 @@ def panel_reportes_inventario_export(sb: Client, t: dict[str, Any] | None) -> No
         "Qué columnas incluir (PDF, HTML y Excel)",
         options=["interno", "lista_cliente", "analisis_precios", "personalizado"],
         format_func=lambda x: {
-            "interno": "Completo — operación interna",
-            "lista_cliente": "Lista de precios (cliente: sin costos, OEM, stock, años…)",
-            "analisis_precios": "Análisis de precios (sin años ni stock mínimo)",
-            "personalizado": "Personalizado — elijo columnas",
+            "interno": "Completo — núcleo + detalles opcionales (marca, ubicación…)",
+            "lista_cliente": "Lista de precios (cliente) — núcleo + detalles opcionales",
+            "analisis_precios": "Análisis de precios — núcleo + detalles opcionales",
+            "personalizado": "Personalizado — elijo columnas en el multiselect",
         }[x],
         key="rep_inv_col_mode",
-        help="Para listas que ves al cliente ocultá costos y datos internos. En análisis podés quitar años o stock mínimo.",
+        help="En los tres primeros modos, **descripción** usa más ancho si no marcás columnas de detalle. En personalizado, todo sale del multiselect.",
     )
     _col_keys_f: frozenset[str] | None
     if _inv_col_mode == "personalizado":
@@ -6040,6 +6112,32 @@ def panel_reportes_inventario_export(sb: Client, t: dict[str, Any] | None) -> No
     _col_keys_export = _inv_rep_apply_currency_prefs(
         _k_ext, show_usd=_show_usd, show_bs=_show_bs, show_usdt=_show_usdt
     )
+    _det_marca = _det_cond = _det_veh = _det_anos = _det_smin = _det_ubi = False
+    if _inv_col_mode != "personalizado":
+        st.markdown("**Columnas de detalle (opcional)** — desmarcadas = más espacio horizontal para **descripción**")
+        _d1, _d2, _d3 = st.columns(3)
+        with _d1:
+            _det_marca = st.checkbox("Marca del repuesto", value=False, key="rep_inv_det_marca")
+            _det_cond = st.checkbox("Condición", value=False, key="rep_inv_det_cond")
+        with _d2:
+            _det_veh = st.checkbox("Marcas carro (compatibilidad)", value=False, key="rep_inv_det_veh")
+            _det_anos = st.checkbox("Años (compatibilidad)", value=False, key="rep_inv_det_anos")
+        with _d3:
+            _det_smin = st.checkbox("Stock mínimo", value=False, key="rep_inv_det_smin")
+            _det_ubi = st.checkbox("Ubicación", value=False, key="rep_inv_det_ubi")
+        _col_keys_export = _inv_rep_extend_detail_columns(
+            _col_keys_export,
+            marca=_det_marca,
+            cond=_det_cond,
+            veh=_det_veh,
+            anos=_det_anos,
+            stock_min=_det_smin,
+            ubi=_det_ubi,
+        )
+    else:
+        st.caption(
+            "Modo **personalizado**: activá marca, condición, años, ubicación, etc. desde el **multiselect** de columnas."
+        )
     _ic1, _ic2 = st.columns(2)
     with _ic1:
         _solo_act = st.checkbox("Solo productos activos", value=True, key="rep_inv_print_act")
@@ -6097,12 +6195,30 @@ def panel_reportes_inventario_export(sb: Client, t: dict[str, Any] | None) -> No
         _parts_sub.append("agrupado por categoría")
     _parts_sub.append(
         {
-            "interno": "columnas: todas",
-            "lista_cliente": "columnas: lista cliente",
-            "analisis_precios": "columnas: análisis precios",
-            "personalizado": "columnas: personalizado",
+            "interno": "plantilla: completo (núcleo)",
+            "lista_cliente": "plantilla: lista cliente",
+            "analisis_precios": "plantilla: análisis precios",
+            "personalizado": "plantilla: personalizado",
         }[_inv_col_mode]
     )
+    if _inv_col_mode != "personalizado":
+        _det_bits: list[str] = []
+        if _det_marca:
+            _det_bits.append("marca")
+        if _det_cond:
+            _det_bits.append("cond.")
+        if _det_veh:
+            _det_bits.append("marcas carro")
+        if _det_anos:
+            _det_bits.append("años")
+        if _det_smin:
+            _det_bits.append("st.mín")
+        if _det_ubi:
+            _det_bits.append("ubic.")
+        if _det_bits:
+            _parts_sub.append("detalle: " + ", ".join(_det_bits))
+        else:
+            _parts_sub.append("detalle: solo núcleo (descripción amplia)")
     _mon_lbl: list[str] = []
     if _show_usd:
         _mon_lbl.append("USD")
@@ -6171,7 +6287,7 @@ def panel_reportes_inventario_export(sb: Client, t: dict[str, Any] | None) -> No
         key="rep_inv_dl_html",
     )
     st.caption("Vista previa (Ctrl+P desde el recuadro o abrí el HTML descargado).")
-    components.html(_html_inv, height=480, scrolling=True)
+    components.html(_html_inv, height=560, scrolling=True)
 
 
 def _rep_parse_fecha_venc(x: Any) -> date | None:
