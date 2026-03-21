@@ -100,6 +100,25 @@ CREATE INDEX IF NOT EXISTS idx_marcas_vehiculo_activo_orden
 
 COMMENT ON TABLE public.marcas_vehiculo IS 'Marcas de vehículo para compatibilidad de repuestos (catálogo maestro).';
 
+-- Ajustes de stock manuales (carga/descarga; ver patch_013 en bases ya existentes)
+CREATE TABLE IF NOT EXISTS public.movimientos_inventario (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  producto_id UUID NOT NULL REFERENCES public.productos (id) ON DELETE CASCADE,
+  tipo TEXT NOT NULL CHECK (tipo IN ('Entrada', 'Salida')),
+  cantidad INT NOT NULL CHECK (cantidad > 0),
+  motivo TEXT NOT NULL DEFAULT '',
+  stock_antes INT NOT NULL,
+  stock_despues INT NOT NULL,
+  usuario_id UUID REFERENCES public.erp_users (id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_movimientos_inventario_producto
+  ON public.movimientos_inventario (producto_id, created_at DESC);
+
+COMMENT ON TABLE public.movimientos_inventario IS
+  'Entrada/Salida manual de stock (ajuste, merma, etc.).';
+
 -- -----------------------------------------------------------------------------
 -- Cajas / bancos / wallets
 -- -----------------------------------------------------------------------------
@@ -976,7 +995,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
   public.compras,
   public.compras_detalles,
   public.cuentas_por_pagar,
-  public.movimientos_caja
+  public.movimientos_caja,
+  public.movimientos_inventario
 TO service_role;
 GRANT USAGE, SELECT ON SEQUENCE public.ventas_numero_seq TO service_role;
 GRANT USAGE, SELECT ON SEQUENCE public.compras_numero_seq TO service_role;
