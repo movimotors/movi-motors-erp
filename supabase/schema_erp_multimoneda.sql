@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS public.productos (
   precio_v_bs_ref NUMERIC(18, 4),
   costo_bs_ref NUMERIC(18, 4),
   categoria_id UUID REFERENCES public.categorias (id) ON DELETE SET NULL,
+  es_compuesto BOOLEAN NOT NULL DEFAULT FALSE,
   activo BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -84,6 +85,25 @@ CREATE INDEX IF NOT EXISTS idx_productos_sku_oem_lower ON public.productos (lowe
   WHERE sku_oem IS NOT NULL AND btrim(sku_oem) <> '';
 CREATE INDEX IF NOT EXISTS idx_productos_marca_prod_lower ON public.productos (lower(marca_producto))
   WHERE marca_producto IS NOT NULL AND btrim(marca_producto) <> '';
+
+-- Kits / productos compuestos (BOM por unidad de kit; ver patch_014 en bases existentes)
+CREATE TABLE IF NOT EXISTS public.productos_kit_items (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  kit_producto_id UUID NOT NULL REFERENCES public.productos (id) ON DELETE CASCADE,
+  componente_producto_id UUID NOT NULL REFERENCES public.productos (id) ON DELETE RESTRICT,
+  cantidad NUMERIC(14, 3) NOT NULL CHECK (cantidad > 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT productos_kit_items_kit_neq_comp CHECK (kit_producto_id <> componente_producto_id),
+  CONSTRAINT productos_kit_items_kit_comp_unique UNIQUE (kit_producto_id, componente_producto_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_productos_kit_items_kit
+  ON public.productos_kit_items (kit_producto_id);
+CREATE INDEX IF NOT EXISTS idx_productos_kit_items_comp
+  ON public.productos_kit_items (componente_producto_id);
+
+COMMENT ON TABLE public.productos_kit_items IS
+  'Componentes por 1 unidad del kit (producto con es_compuesto = true).';
 
 -- Catálogo de marcas de vehículo (compatibilidad repuestos; ver patch_012 seed)
 CREATE TABLE IF NOT EXISTS public.marcas_vehiculo (
@@ -319,6 +339,11 @@ DECLARE
   v_eq NUMERIC(16, 4);
   v_sum_cobros NUMERIC(16, 4) := 0;
   v_first_caja UUID;
+  v_es_comp BOOLEAN;
+  kit_rec RECORD;
+  v_comp_id UUID;
+  v_comp_cant NUMERIC(14, 3);
+  v_need INT;
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM public.erp_users WHERE id = p_usuario_id AND activo = TRUE) THEN
     RAISE EXCEPTION 'Usuario ERP inválido o inactivo';
@@ -361,17 +386,43 @@ BEGIN
       RAISE EXCEPTION 'Línea de venta inválida';
     END IF;
 
-    SELECT stock_actual INTO v_stock
-    FROM public.productos
-    WHERE id = v_pid AND activo = TRUE
+    SELECT p.stock_actual, COALESCE(p.es_compuesto, FALSE)
+    INTO v_stock, v_es_comp
+    FROM public.productos p
+    WHERE p.id = v_pid AND p.activo = TRUE
     FOR UPDATE;
 
     IF NOT FOUND THEN
       RAISE EXCEPTION 'Producto no encontrado o inactivo: %', v_pid;
     END IF;
 
-    IF v_stock < v_cant THEN
-      RAISE EXCEPTION 'Stock insuficiente para producto %', v_pid;
+    IF v_es_comp THEN
+      IF NOT EXISTS (SELECT 1 FROM public.productos_kit_items k WHERE k.kit_producto_id = v_pid) THEN
+        RAISE EXCEPTION 'Producto compuesto sin componentes definidos (id %)', v_pid;
+      END IF;
+      FOR kit_rec IN
+        SELECT k.componente_producto_id, k.cantidad
+        FROM public.productos_kit_items k
+        WHERE k.kit_producto_id = v_pid
+      LOOP
+        v_comp_id := kit_rec.componente_producto_id;
+        v_comp_cant := kit_rec.cantidad;
+        SELECT p2.stock_actual INTO v_stock
+        FROM public.productos p2
+        WHERE p2.id = v_comp_id AND p2.activo = TRUE
+        FOR UPDATE;
+        IF NOT FOUND THEN
+          RAISE EXCEPTION 'Componente de kit no encontrado o inactivo: %', v_comp_id;
+        END IF;
+        v_need := CEIL(v_cant * v_comp_cant)::INT;
+        IF v_stock < v_need THEN
+          RAISE EXCEPTION 'Stock insuficiente para componente % del kit (necesita % unidades)', v_comp_id, v_need;
+        END IF;
+      END LOOP;
+    ELSE
+      IF v_stock < v_cant THEN
+        RAISE EXCEPTION 'Stock insuficiente para producto %', v_pid;
+      END IF;
     END IF;
 
     v_line := ROUND(v_cant * v_pu, 2);
@@ -410,9 +461,24 @@ BEGIN
     INSERT INTO public.ventas_detalles (venta_id, producto_id, cantidad, precio_unitario_usd, subtotal_usd)
     VALUES (v_venta_id, v_pid, v_cant, v_pu, v_line);
 
-    UPDATE public.productos
-    SET stock_actual = stock_actual - v_cant
-    WHERE id = v_pid;
+    SELECT COALESCE(es_compuesto, FALSE) INTO v_es_comp FROM public.productos WHERE id = v_pid;
+
+    IF v_es_comp THEN
+      FOR kit_rec IN
+        SELECT k.componente_producto_id, k.cantidad
+        FROM public.productos_kit_items k
+        WHERE k.kit_producto_id = v_pid
+      LOOP
+        v_need := CEIL(v_cant * kit_rec.cantidad)::INT;
+        UPDATE public.productos
+        SET stock_actual = stock_actual - v_need
+        WHERE id = kit_rec.componente_producto_id;
+      END LOOP;
+    ELSE
+      UPDATE public.productos
+      SET stock_actual = stock_actual - v_cant
+      WHERE id = v_pid;
+    END IF;
   END LOOP;
 
   IF p_forma_pago = 'contado' THEN
@@ -977,7 +1043,8 @@ INSERT INTO public.marcas_vehiculo (nombre, orden) VALUES
 ON CONFLICT (nombre) DO NOTHING;
 
 COMMENT ON TABLE public.erp_users IS 'Usuarios ERP: password_hash con bcrypt (crypt gen_salt bf o app Python).';
-COMMENT ON FUNCTION public.crear_venta_erp IS 'Transacción atómica: valida stock, inserta venta, descuenta stock, caja o CXC.';
+COMMENT ON FUNCTION public.crear_venta_erp IS
+  'Transacción atómica: valida stock, inserta venta, descuenta stock (kits descuentan componentes), caja o CXC.';
 COMMENT ON FUNCTION public.crear_compra_erp IS 'Transacción atómica: actualiza stock y costo promedio, compra, caja o CXP.';
 
 -- Permisos para la clave service_role (Streamlit en servidor / Edge)
@@ -987,6 +1054,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
   public.tasas_dia,
   public.categorias,
   public.productos,
+  public.productos_kit_items,
   public.marcas_vehiculo,
   public.cajas_bancos,
   public.ventas,

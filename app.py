@@ -651,6 +651,7 @@ _INV_PRODUCTO_COLS = [
     "costo_bs_ref",
     "activo",
     "categoria_id",
+    "es_compuesto",
 ]
 
 
@@ -881,6 +882,44 @@ def _inv_aplicar_movimiento_stock(
     return True, f"**{cd}** · Stock **{st_antes}** → **{st_desp}** ({tipo} **{cantidad}** unidades)."
 
 
+def _fetch_kit_items_by_kit(sb: Client) -> dict[str, list[dict[str, Any]]]:
+    try:
+        r = (
+            sb.table("productos_kit_items")
+            .select("kit_producto_id,componente_producto_id,cantidad")
+            .execute()
+        )
+    except Exception:
+        return {}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in r.data or []:
+        kid = str(row.get("kit_producto_id") or "").strip()
+        cid = str(row.get("componente_producto_id") or "").strip()
+        if not kid or not cid:
+            continue
+        try:
+            q = float(row.get("cantidad") or 0)
+        except (TypeError, ValueError):
+            continue
+        if q <= 0:
+            continue
+        out.setdefault(kid, []).append({"componente_producto_id": cid, "cantidad": q})
+    return out
+
+
+def _kit_cantidad_armable(stock_by_id: dict[str, int], items: list[dict[str, Any]]) -> int:
+    """Cantidad máxima de kits armables según stock de cada componente."""
+    mins: list[int] = []
+    for it in items:
+        cid = it["componente_producto_id"]
+        need = float(it["cantidad"])
+        st = int(stock_by_id.get(cid, 0))
+        if need <= 0:
+            continue
+        mins.append(max(0, int(st / need)))
+    return min(mins) if mins else 0
+
+
 def _inv_enrich_compat_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -904,7 +943,7 @@ def _inv_enrich_compat_columns(df: pd.DataFrame) -> pd.DataFrame:
 def _fetch_productos_inventario_df(sb: Client) -> pd.DataFrame:
     cols_full = (
         "id,codigo,sku_oem,descripcion,marca_producto,condicion,ubicacion,compatibilidad,imagen_url,"
-        "stock_actual,stock_minimo,costo_usd,precio_v_usd,precio_v_bs_ref,costo_bs_ref,activo,categoria_id"
+        "stock_actual,stock_minimo,costo_usd,precio_v_usd,precio_v_bs_ref,costo_bs_ref,activo,categoria_id,es_compuesto"
     )
     cols_base = (
         "id,codigo,descripcion,stock_actual,stock_minimo,costo_usd,precio_v_usd,"
@@ -1672,6 +1711,7 @@ def build_backup_erp_completo(sb: Client) -> dict[str, Any]:
     specs: list[tuple[str, str]] = [
         ("categorias", "*"),
         ("productos", "*"),
+        ("productos_kit_items", "*"),
         ("tasas_dia", "*"),
         ("cajas_bancos", "*"),
         ("erp_users", "id,username,nombre,email,rol,activo,created_at"),
@@ -1757,6 +1797,10 @@ def restore_erp_completo_desde_json(sb: Client, payload: dict[str, Any]) -> tupl
         _delete_all_rows(sb, "movimientos_caja")
         _delete_all_rows(sb, "ventas")
         _delete_all_rows(sb, "compras")
+        try:
+            _delete_all_rows(sb, "productos_kit_items")
+        except Exception:
+            pass
         _delete_all_rows(sb, "productos")
         _delete_all_rows(sb, "categorias")
         _delete_all_rows(sb, "tasas_dia")
@@ -1764,6 +1808,12 @@ def restore_erp_completo_desde_json(sb: Client, payload: dict[str, Any]) -> tupl
 
         _insert_rows_batched(sb, "categorias", list(payload.get("categorias") or []))
         _insert_rows_batched(sb, "productos", list(payload.get("productos") or []))
+        try:
+            _insert_rows_batched(sb, "productos_kit_items", list(payload.get("productos_kit_items") or []))
+        except Exception:
+            warns.append(
+                "No se pudieron restaurar filas de **productos_kit_items** (¿falta patch_014?). Los kits hay que redefinirlos en Inventario."
+            )
         _insert_rows_batched(sb, "tasas_dia", list(payload.get("tasas_dia") or []))
         _insert_rows_batched(sb, "cajas_bancos", list(payload.get("cajas_bancos") or []))
 
@@ -3120,13 +3170,14 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
 
     st.divider()
     with st.expander(
-        "Productos — Editar · Nuevo (incluye categoría) · Eliminar · Carga/descarga inventario",
+        "Productos — Editar · Nuevo · Kit/compuesto · Eliminar · Carga/descarga inventario",
         expanded=True,
     ):
-        _t_edit, _t_prod, _t_del, _t_mov = st.tabs(
+        _t_edit, _t_prod, _t_kit, _t_del, _t_mov = st.tabs(
             [
                 "Editar Productos",
                 "Nuevo Producto",
+                "Kit / compuesto",
                 "Eliminar Producto",
                 "Carga /Descarga de inventario",
             ]
@@ -3523,6 +3574,164 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                             "Si falta alguna columna, ejecutá **patch_011_productos_repuestos.sql** en Supabase."
                         )
 
+        with _t_kit:
+            st.caption(
+                "Creá el ítem cabecera en **Nuevo Producto** (ej. **Conversión Corsa**) con su **precio de venta**. "
+                "Acá definís los repuestos por cada **1 kit** vendido; en **Ventas** el detalle muestra el kit y el stock baja de los **componentes**. "
+                "Requiere **supabase/patch_014_productos_kit.sql** en Supabase."
+            )
+            _pxk = None
+            try:
+                _pxk = (
+                    sb.table("productos")
+                    .select("id,descripcion,stock_actual,es_compuesto,activo")
+                    .eq("activo", True)
+                    .order("descripcion")
+                    .limit(3000)
+                    .execute()
+                )
+            except Exception as _exk:
+                _msgk = str(_exk).lower()
+                if "es_compuesto" in _msgk or "column" in _msgk:
+                    try:
+                        _pxk = (
+                            sb.table("productos")
+                            .select("id,descripcion,stock_actual,activo")
+                            .eq("activo", True)
+                            .order("descripcion")
+                            .limit(3000)
+                            .execute()
+                        )
+                        for _zr in _pxk.data or []:
+                            _zr["es_compuesto"] = False
+                    except Exception as _exk2:
+                        st.error(str(_exk2))
+                else:
+                    st.error(str(_exk))
+            _plk = list(_pxk.data or []) if _pxk else []
+            if not _plk:
+                st.info("No hay productos activos.")
+            else:
+
+                def _kit_parse_comp_opt(opt: str) -> str:
+                    if not opt or " ‖ " not in opt:
+                        return ""
+                    return str(opt.split(" ‖ ", 1)[-1]).strip()
+
+                _lkp: dict[str, str] = {}
+                for _p in _plk:
+                    _i = str(_p.get("id") or "").strip()
+                    if not _i:
+                        continue
+                    _d = (_export_cell_txt(_p.get("descripcion")) or "—")[:56]
+                    _suf = " (kit)" if _p.get("es_compuesto") else ""
+                    _lkp[f"{_d}{_suf}"] = _i
+                _k_keys = sorted(_lkp.keys(), key=str.casefold)
+                _selk_lab = st.selectbox("Producto kit (cabecera)", options=_k_keys, key="inv_kit_parent_lab")
+                _kid = _lkp[str(_selk_lab)]
+                _comp_pool = [p for p in _plk if str(p.get("id")) != _kid and not p.get("es_compuesto")]
+                if not _comp_pool:
+                    _comp_pool = [p for p in _plk if str(p.get("id")) != _kid]
+                _opt_empty = ""
+                _kit_opt_vals = [_opt_empty] + [
+                    f"{(_export_cell_txt(p.get('descripcion')) or '—')[:55]} ‖ {p['id']}"
+                    for p in sorted(_comp_pool, key=lambda x: str(x.get("descripcion") or "").casefold())
+                ]
+                _kit_map = _fetch_kit_items_by_kit(sb)
+                _existing = _kit_map.get(_kid, [])
+                if _existing:
+                    _df_rows = []
+                    for it in _existing:
+                        _cid = str(it["componente_producto_id"])
+                        _match = next((v for v in _kit_opt_vals if v.endswith(f" ‖ {_cid}")), _opt_empty)
+                        _df_rows.append(
+                            {"componente": _match, "cantidad_por_kit": float(it["cantidad"])}
+                        )
+                else:
+                    _df_rows = [{"componente": _opt_empty, "cantidad_por_kit": 1.0}]
+                while len(_df_rows) < 3:
+                    _df_rows.append({"componente": _opt_empty, "cantidad_por_kit": 1.0})
+                _dfk = pd.DataFrame(_df_rows)
+                _rev_map = st.session_state.setdefault("_inv_kit_rev", {})
+                _ed_key = f"inv_kit_ed_{_kid}_{_rev_map.get(_kid, 0)}"
+                _kc0, _kc1 = st.columns([1, 2])
+                with _kc0:
+                    _kchk = st.checkbox(
+                        "Este producto es un kit (compuesto)",
+                        value=bool(next((p.get("es_compuesto") for p in _plk if str(p.get("id")) == _kid), False)),
+                        key=f"inv_kit_flag_{_kid}",
+                    )
+                with _kc1:
+                    _stk_by = {str(p["id"]): _inv_stock_int(p.get("stock_actual")) for p in _plk}
+                    _avail = _kit_cantidad_armable(_stk_by, _kit_map.get(_kid, []))
+                    st.caption(
+                        f"Según componentes en almacén: podés armar aprox. **{_avail}** kit(s). "
+                        "El **stock del ítem cabecera** no se usa al vender; valida la RPC con los repuestos."
+                    )
+                _ded = st.data_editor(
+                    _dfk,
+                    key=_ed_key,
+                    num_rows="dynamic",
+                    column_config={
+                        "componente": st.column_config.SelectboxColumn(
+                            "Componente",
+                            options=_kit_opt_vals,
+                            required=False,
+                        ),
+                        "cantidad_por_kit": st.column_config.NumberColumn(
+                            "Cant. por 1 kit",
+                            min_value=0.001,
+                            format="%.3f",
+                            required=True,
+                        ),
+                    },
+                    hide_index=True,
+                    use_container_width=True,
+                )
+                if st.button("Guardar definición del kit", key=f"inv_kit_save_{_kid}"):
+                    if not _kchk:
+                        try:
+                            sb.table("productos").update({"es_compuesto": False}).eq("id", _kid).execute()
+                            sb.table("productos_kit_items").delete().eq("kit_producto_id", _kid).execute()
+                            _rev_map[_kid] = int(_rev_map.get(_kid, 0)) + 1
+                            st.success("Kit desactivado; se quitaron los componentes de la definición.")
+                            st.rerun()
+                        except Exception as _ek:
+                            st.error(f"{_ek} · ¿Ejecutaste **patch_014_productos_kit.sql**?")
+                    else:
+                        _ins_rows: list[dict[str, Any]] = []
+                        for _, __r in _ded.iterrows():
+                            _cid = _kit_parse_comp_opt(str(__r.get("componente") or ""))
+                            try:
+                                _cq = float(__r.get("cantidad_por_kit") or 0)
+                            except (TypeError, ValueError):
+                                _cq = 0.0
+                            if not _cid or _cq <= 0:
+                                continue
+                            if _cid == _kid:
+                                st.error("Un kit no puede incluirse a sí mismo como componente.")
+                                _ins_rows = []
+                                break
+                            _ins_rows.append(
+                                {
+                                    "kit_producto_id": _kid,
+                                    "componente_producto_id": _cid,
+                                    "cantidad": _cq,
+                                }
+                            )
+                        if not _ins_rows:
+                            st.error("Definí al menos un componente con cantidad > 0.")
+                        else:
+                            try:
+                                sb.table("productos").update({"es_compuesto": True}).eq("id", _kid).execute()
+                                sb.table("productos_kit_items").delete().eq("kit_producto_id", _kid).execute()
+                                sb.table("productos_kit_items").insert(_ins_rows).execute()
+                                _rev_map[_kid] = int(_rev_map.get(_kid, 0)) + 1
+                                st.success("Kit guardado. Ya podés venderlo en **Ventas / CXC**.")
+                                st.rerun()
+                            except Exception as _ek:
+                                st.error(f"{_ek} · ¿Ejecutaste **patch_014_productos_kit.sql**?")
+
         with _t_del:
             st.caption(
                 "Solo con **stock en cero**. Si el producto ya tiene **ventas o compras**, la base suele **no dejar borrarlo**; "
@@ -3575,16 +3784,27 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
             try:
                 _pm = (
                     sb.table("productos")
-                    .select("id,codigo,descripcion,stock_actual")
+                    .select("id,codigo,descripcion,stock_actual,es_compuesto")
                     .eq("activo", True)
                     .order("descripcion")
                     .limit(2000)
                     .execute()
                 )
                 _rows_m = _pm.data or []
-            except Exception as exm:
-                _rows_m = []
-                st.error(str(exm))
+            except Exception:
+                try:
+                    _pm = (
+                        sb.table("productos")
+                        .select("id,codigo,descripcion,stock_actual")
+                        .eq("activo", True)
+                        .order("descripcion")
+                        .limit(2000)
+                        .execute()
+                    )
+                    _rows_m = _pm.data or []
+                except Exception as exm:
+                    _rows_m = []
+                    st.error(str(exm))
             if not _rows_m:
                 st.warning("No hay productos activos.")
             else:
@@ -3593,47 +3813,55 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                     _im = str(_rm.get("id") or "").strip()
                     if not _im:
                         continue
+                    if _rm.get("es_compuesto"):
+                        continue
                     _cm = _export_cell_txt(_rm.get("codigo")) or "—"
                     _dm = (_export_cell_txt(_rm.get("descripcion")) or "")[:48]
                     _stm = _inv_stock_int(_rm.get("stock_actual"))
                     _lab_m[f"{_cm} · {_dm} · stock {_stm}"] = _im
                 _keys_m = sorted(_lab_m.keys(), key=str.casefold)
-                with st.form("inv_form_mov_stock"):
-                    _sel_m = st.selectbox("Producto", options=_keys_m, key="inv_mov_prod_sel")
-                    _tipo_m = st.radio("Movimiento", ["Entrada", "Salida"], horizontal=True, key="inv_mov_tipo")
-                    _cant_m = st.number_input(
-                        "Cantidad (unidades)",
-                        min_value=1,
-                        value=1,
-                        step=1,
-                        format="%d",
-                        key="inv_mov_cant",
+                if not _keys_m:
+                    st.info(
+                        "No hay ítems simples para carga/descarga manual: los **kits** no se listan acá "
+                        "(el stock del kit lo movés vendiendo el kit o ajustando cada **componente**)."
                     )
-                    _mot_m = st.text_area(
-                        "Motivo (obligatorio)",
-                        key="inv_mov_mot",
-                        placeholder="Ej. Inventario físico, merma, hallazgo en bodega…",
-                    )
-                    if st.form_submit_button("Aplicar movimiento"):
-                        _pid_m = _lab_m.get(str(_sel_m))
-                        if not _pid_m:
-                            st.error("Elegí un producto.")
-                        elif not (_mot_m or "").strip():
-                            st.error("El **motivo** es obligatorio.")
-                        else:
-                            _ok_m, _msg_m = _inv_aplicar_movimiento_stock(
-                                sb,
-                                erp_uid,
-                                _pid_m,
-                                str(_tipo_m),
-                                int(_cant_m),
-                                str(_mot_m),
-                            )
-                            if _ok_m:
-                                st.success(_msg_m)
-                                st.rerun()
+                else:
+                    with st.form("inv_form_mov_stock"):
+                        _sel_m = st.selectbox("Producto", options=_keys_m, key="inv_mov_prod_sel")
+                        _tipo_m = st.radio("Movimiento", ["Entrada", "Salida"], horizontal=True, key="inv_mov_tipo")
+                        _cant_m = st.number_input(
+                            "Cantidad (unidades)",
+                            min_value=1,
+                            value=1,
+                            step=1,
+                            format="%d",
+                            key="inv_mov_cant",
+                        )
+                        _mot_m = st.text_area(
+                            "Motivo (obligatorio)",
+                            key="inv_mov_mot",
+                            placeholder="Ej. Inventario físico, merma, hallazgo en bodega…",
+                        )
+                        if st.form_submit_button("Aplicar movimiento"):
+                            _pid_m = _lab_m.get(str(_sel_m))
+                            if not _pid_m:
+                                st.error("Elegí un producto.")
+                            elif not (_mot_m or "").strip():
+                                st.error("El **motivo** es obligatorio.")
                             else:
-                                st.error(_msg_m)
+                                _ok_m, _msg_m = _inv_aplicar_movimiento_stock(
+                                    sb,
+                                    erp_uid,
+                                    _pid_m,
+                                    str(_tipo_m),
+                                    int(_cant_m),
+                                    str(_mot_m),
+                                )
+                                if _ok_m:
+                                    st.success(_msg_m)
+                                    st.rerun()
+                                else:
+                                    st.error(_msg_m)
                 try:
                     _hist = (
                         sb.table("movimientos_inventario")
@@ -3877,19 +4105,40 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
         "se guarda en la venta para equivalentes en Bs."
     )
 
-    prods = (
-        sb.table("productos")
-        .select("id,descripcion,precio_v_usd,stock_actual")
-        .eq("activo", True)
-        .order("descripcion")
-        .execute()
-    )
+    try:
+        prods = (
+            sb.table("productos")
+            .select("id,descripcion,precio_v_usd,stock_actual,es_compuesto")
+            .eq("activo", True)
+            .order("descripcion")
+            .execute()
+        )
+    except Exception:
+        prods = (
+            sb.table("productos")
+            .select("id,descripcion,precio_v_usd,stock_actual")
+            .eq("activo", True)
+            .order("descripcion")
+            .execute()
+        )
     plist = prods.data or []
+    for _p in plist:
+        _p.setdefault("es_compuesto", False)
     if not plist:
         st.warning("No hay productos activos.")
         st.stop()
 
-    id_to_label = {str(p["id"]): f"{p['descripcion']} (stock {p['stock_actual']})" for p in plist}
+    _kit_items_v = _fetch_kit_items_by_kit(sb)
+    _stock_v = {str(p["id"]): _inv_stock_int(p.get("stock_actual")) for p in plist}
+
+    def _venta_prod_label(p: dict[str, Any]) -> str:
+        pid = str(p["id"])
+        if p.get("es_compuesto") and _kit_items_v.get(pid):
+            k = _kit_cantidad_armable(_stock_v, _kit_items_v[pid])
+            return f"{p['descripcion']} · kit (~{k} armables)"
+        return f"{p['descripcion']} (stock {p['stock_actual']})"
+
+    id_to_label = {str(p["id"]): _venta_prod_label(p) for p in plist}
     id_to_price = {str(p["id"]): float(p["precio_v_usd"]) for p in plist}
 
     cajas = sb.table("cajas_bancos").select("id,nombre,tipo").eq("activo", True).execute()
