@@ -7004,7 +7004,93 @@ def panel_respaldo_inventario_mantenimiento(sb: Client) -> None:
                     st.error(msg_i)
 
 
-def module_mantenimiento(sb: Client) -> None:
+def panel_anular_venta_compra_mantenimiento(sb: Client, erp_uid: str) -> None:
+    st.markdown("#### Anular venta o compra (error de carga)")
+    st.warning(
+        "Usá esto solo si registraste **mal** una venta o compra. "
+        "Se revierten los **movimientos de caja** ligados al documento, se ajusta el **stock** (y el **costo** en compras) y se elimina el registro. "
+        "Hace falta ejecutar en Supabase **`supabase/patch_020_anular_venta_compra.sql`**."
+    )
+    t_an1, t_an2 = st.tabs(["Anular venta", "Anular compra"])
+    with t_an1:
+        try:
+            rv = (
+                sb.table("ventas")
+                .select("id,numero,cliente,fecha,total_usd,forma_pago")
+                .order("fecha", desc=True)
+                .limit(200)
+                .execute()
+            )
+            vrows = rv.data or []
+        except Exception as e:
+            st.error(str(e))
+            vrows = []
+        if not vrows:
+            st.info("No hay ventas en la base.")
+        else:
+            v_opts: dict[str, str] = {}
+            for x in vrows:
+                lab = (
+                    f"Venta #{x.get('numero')} — {str(x.get('cliente') or '')[:36]} — "
+                    f"US$ {x.get('total_usd')} — {str(x.get('fecha') or '')[:16]} — {x.get('forma_pago')}"
+                )
+                v_opts[lab] = str(x["id"])
+            pick_v = st.selectbox("Venta a anular", options=list(v_opts.keys()), key="mnt_anul_v_sel")
+            conf_v = st.text_input("Escribí **ANULAR_VENTA** para confirmar", key="mnt_anul_v_conf")
+            if st.button("Anular venta seleccionada", key="mnt_anul_v_btn"):
+                if conf_v.strip() != "ANULAR_VENTA":
+                    st.error("Confirmación incorrecta.")
+                else:
+                    try:
+                        sb.rpc(
+                            "anular_venta_erp",
+                            {"p_usuario_id": erp_uid, "p_venta_id": v_opts[pick_v]},
+                        ).execute()
+                        st.success("Venta anulada. Revisá caja y stock.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
+    with t_an2:
+        try:
+            rc = (
+                sb.table("compras")
+                .select("id,numero,proveedor,fecha,total_usd,forma_pago")
+                .order("fecha", desc=True)
+                .limit(200)
+                .execute()
+            )
+            crows = rc.data or []
+        except Exception as e:
+            st.error(str(e))
+            crows = []
+        if not crows:
+            st.info("No hay compras en la base.")
+        else:
+            c_opts: dict[str, str] = {}
+            for x in crows:
+                lab = (
+                    f"Compra #{x.get('numero')} — {str(x.get('proveedor') or '')[:36]} — "
+                    f"US$ {x.get('total_usd')} — {str(x.get('fecha') or '')[:16]} — {x.get('forma_pago')}"
+                )
+                c_opts[lab] = str(x["id"])
+            pick_c = st.selectbox("Compra a anular", options=list(c_opts.keys()), key="mnt_anul_c_sel")
+            conf_c = st.text_input("Escribí **ANULAR_COMPRA** para confirmar", key="mnt_anul_c_conf")
+            if st.button("Anular compra seleccionada", key="mnt_anul_c_btn"):
+                if conf_c.strip() != "ANULAR_COMPRA":
+                    st.error("Confirmación incorrecta.")
+                else:
+                    try:
+                        sb.rpc(
+                            "anular_compra_erp",
+                            {"p_usuario_id": erp_uid, "p_compra_id": c_opts[pick_c]},
+                        ).execute()
+                        st.success("Compra anulada. Revisá caja y costos de productos.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
+
+
+def module_mantenimiento(sb: Client, erp_uid: str) -> None:
     st.subheader("Mantenimiento")
     st.markdown("#### Respaldo de seguridad")
     st.caption(
@@ -7080,6 +7166,9 @@ def module_mantenimiento(sb: Client) -> None:
                     st.error(msg_r)
                     for w in warns_r:
                         st.warning(w)
+
+    st.divider()
+    panel_anular_venta_compra_mantenimiento(sb, erp_uid)
 
     st.divider()
     st.markdown("#### Depuración (peligroso)")
@@ -7192,7 +7281,7 @@ def main() -> None:
     elif mod == "Usuarios" and role_can(rol, "usuarios"):
         module_usuarios(sb)
     elif mod == "Mantenimiento" and rol == "superuser":
-        module_mantenimiento(sb)
+        module_mantenimiento(sb, erp_uid)
 
 
 if __name__ == "__main__":
