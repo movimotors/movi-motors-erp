@@ -51,3 +51,14 @@ Guarda. **Redeploy** la app si ya estaba creada.
 ## Actualizar la app
 
 Cada `git push` a la rama conectada puede redeployar solo (según tu configuración en Cloud). También puedes usar **Manage app → Reboot** o **Redeploy**.
+
+## No veo los últimos cambios en la URL `.streamlit.app`
+
+1. **GitHub:** abrí el repo `erp2movi` → rama **`main`** → confirmá que el último commit (fecha/mensaje) es el que acabás de subir.
+2. **Streamlit Cloud:** [share.streamlit.io](https://share.streamlit.io) → tu app → **⋮** o **Manage app**:
+   - **App source:** que el repo y la rama sean los correctos (no otra rama ni fork viejo).
+   - **Main file:** `app.py` en la raíz.
+3. Forzá redeploy: **Manage app → Reboot** o **Redeploy** (a veces el webhook de GitHub llega tarde o falla).
+4. Esperá **1–3 minutos** y revisá **Manage app → Logs** por errores de build o de import.
+5. En el navegador: recarga fuerte (**Ctrl+F5**) o probá en ventana privada (caché del cliente).
+6. Si la app pide login de sesión, **Cerrar sesión** y volvé a entrar por si quedó estado viejo en cookies.
