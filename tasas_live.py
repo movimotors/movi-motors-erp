@@ -9,17 +9,20 @@ from __future__ import annotations
 
 import json
 import ssl
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 USER_AGENT = "MoviMotors-ERP/1.0 (Streamlit; contacto local)"
+# En Streamlit Cloud el arranque debe responder pronto: varias APIs en serie (25s c/u) colgaba el health check.
+_HTTP_TIMEOUT = 10.0
 
 BINANCE_P2P_SEARCH = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
 
 
-def _urlopen(req: Request, timeout: float = 25.0):
+def _urlopen(req: Request, timeout: float = _HTTP_TIMEOUT):
     try:
         return urlopen(req, timeout=timeout, context=ssl.create_default_context())
     except ssl.SSLError:
@@ -29,13 +32,13 @@ def _urlopen(req: Request, timeout: float = 25.0):
         return urlopen(req, timeout=timeout, context=ctx)
 
 
-def _get_json(url: str, timeout: float = 25.0) -> dict[str, Any]:
+def _get_json(url: str, timeout: float = _HTTP_TIMEOUT) -> dict[str, Any]:
     req = Request(url, headers={"User-Agent": USER_AGENT})
     with _urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _post_json(url: str, body: dict[str, Any], *, headers: dict[str, str] | None = None, timeout: float = 25.0) -> dict[str, Any]:
+def _post_json(url: str, body: dict[str, Any], *, headers: dict[str, str] | None = None, timeout: float = _HTTP_TIMEOUT) -> dict[str, Any]:
     raw = json.dumps(body, separators=(",", ":")).encode("utf-8")
     h = {
         "User-Agent": USER_AGENT,
@@ -91,7 +94,7 @@ def fetch_binance_p2p_usdt_ves(
         "merchantCheck": False,
     }
     try:
-        d = _post_json(BINANCE_P2P_SEARCH, body, headers=_BINANCE_BROWSER_HEADERS, timeout=25.0)
+        d = _post_json(BINANCE_P2P_SEARCH, body, headers=_BINANCE_BROWSER_HEADERS, timeout=_HTTP_TIMEOUT)
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError, TypeError) as e:
         return None, f"Binance P2P: {e}"
 
@@ -126,6 +129,7 @@ def fetch_binance_p2p_usdt_ves(
 def fetch_live_rates() -> dict[str, Any]:
     """
     Devuelve tasas en vivo y metadatos. No lanza: errores van en 'errors'.
+    Las tres fuentes se consultan en paralelo para no superar el tiempo de arranque en Streamlit Cloud.
     """
     out: dict[str, Any] = {
         "ok": False,
@@ -140,27 +144,67 @@ def fetch_live_rates() -> dict[str, Any]:
         "usdt_x_ves_p2p_source": None,
     }
 
-    try:
-        d = _get_json("https://open.er-api.com/v6/latest/USD")
-        rates = d.get("rates") or {}
-        ves = rates.get("VES")
-        if ves is not None:
-            out["ves_bs_por_usd"] = float(ves)
-        out["sources"].append("open.er-api.com (USD→VES, referencia mercado)")
-        out["time_next_update_utc"] = d.get("time_next_update_utc")
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError, TypeError) as e:
-        out["errors"].append(f"USD/VES: {e}")
+    def _job_usd_ves() -> tuple[float | None, str | None, str | None]:
+        """(ves, time_next_update_utc, error_msg)"""
+        try:
+            d = _get_json("https://open.er-api.com/v6/latest/USD")
+            rates = d.get("rates") or {}
+            ves = rates.get("VES")
+            v = float(ves) if ves is not None else None
+            return v, str(d.get("time_next_update_utc") or "") or None, None
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError, TypeError) as e:
+            return None, None, f"USD/VES: {e}"
 
-    try:
-        d2 = _get_json("https://api.frankfurter.app/latest?from=EUR&to=USD")
-        usd = (d2.get("rates") or {}).get("USD")
-        if usd is not None:
-            out["usd_por_eur"] = float(usd)
-        out["sources"].append("api.frankfurter.app (1 EUR = X USD)")
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError, TypeError) as e:
-        out["errors"].append(f"EUR/USD: {e}")
+    def _job_eur_usd() -> tuple[float | None, str | None]:
+        try:
+            d2 = _get_json("https://api.frankfurter.app/latest?from=EUR&to=USD")
+            usd = (d2.get("rates") or {}).get("USD")
+            u = float(usd) if usd is not None else None
+            return u, None
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError, TypeError) as e:
+            return None, f"EUR/USD: {e}"
 
-    p2p_med, p2p_err = fetch_binance_p2p_usdt_ves(trade_type="BUY", rows=20)
+    p2p_med: float | None = None
+    p2p_err: str | None = None
+    wall = _HTTP_TIMEOUT + 4.0
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        f_uv = ex.submit(_job_usd_ves)
+        f_eu = ex.submit(_job_eur_usd)
+        f_p2 = ex.submit(fetch_binance_p2p_usdt_ves, trade_type="BUY", rows=20)
+        wait([f_uv, f_eu, f_p2], timeout=wall)
+        try:
+            if f_uv.done():
+                ves_v, ves_next, ves_e = f_uv.result()
+                if ves_e:
+                    out["errors"].append(ves_e)
+                elif ves_v is not None:
+                    out["ves_bs_por_usd"] = ves_v
+                    out["sources"].append("open.er-api.com (USD→VES, referencia mercado)")
+                if ves_next:
+                    out["time_next_update_utc"] = ves_next
+            else:
+                out["errors"].append("USD/VES: tiempo agotado (servidor lento o sin red)")
+        except Exception as e:
+            out["errors"].append(f"USD/VES: {e}")
+        try:
+            if f_eu.done():
+                upe, upe_e = f_eu.result()
+                if upe_e:
+                    out["errors"].append(upe_e)
+                elif upe is not None:
+                    out["usd_por_eur"] = upe
+                    out["sources"].append("api.frankfurter.app (1 EUR = X USD)")
+            else:
+                out["errors"].append("EUR/USD: tiempo agotado (servidor lento o sin red)")
+        except Exception as e:
+            out["errors"].append(f"EUR/USD: {e}")
+        try:
+            if f_p2.done():
+                p2p_med, p2p_err = f_p2.result()
+            else:
+                p2p_med, p2p_err = None, "Binance P2P: tiempo agotado (servidor lento o sin red)"
+        except Exception as e:
+            p2p_med, p2p_err = None, f"Binance P2P: {e}"
     if p2p_err:
         out["errors"].append(p2p_err)
     v = out.get("ves_bs_por_usd")
