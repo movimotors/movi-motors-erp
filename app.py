@@ -1990,7 +1990,10 @@ def _html_inventario_listado(
                 elif key == "categoria_display":
                     td_cls = "cat"
             _cls_attr = f' class="{td_cls}"' if td_cls else ""
-            tds.append(f"<td{_cls_attr}>{cell}</td>")
+            _title_attr = ""
+            if key in {"codigo", "sku_oem"}:
+                _title_attr = f' title="{html.escape("" if val is None else str(val))}"'
+            tds.append(f"<td{_cls_attr}{_title_attr}>{cell}</td>")
         body_rows.append("<tr>" + "".join(tds) + "</tr>")
 
     n = len(work)
@@ -2055,8 +2058,8 @@ def _html_inventario_listado(
   th.num {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
   td.num {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
   td.desc {{ white-space: normal; font-size: 0.8rem; line-height: 1.4; }}
-  th.code, td.code {{ white-space: nowrap; word-break: keep-all; overflow-wrap: normal; }}
-  th.oem, td.oem {{ white-space: nowrap; word-break: keep-all; overflow-wrap: normal; }}
+  th.code, td.code {{ white-space: nowrap; word-break: keep-all; overflow-wrap: normal; overflow: hidden; text-overflow: ellipsis; }}
+  th.oem, td.oem {{ white-space: nowrap; word-break: keep-all; overflow-wrap: normal; overflow: hidden; text-overflow: ellipsis; }}
   th.cat, td.cat {{ white-space: nowrap; word-break: keep-all; overflow-wrap: normal; }}
   tr.catgrp td {{ background: #fff3e0; font-weight: 700; color: #e65100; border-color: #ffcc80;
     font-family: Segoe UI, Roboto, Arial, sans-serif; font-style: normal; }}
