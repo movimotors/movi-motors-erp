@@ -1689,7 +1689,7 @@ INV_REP_DETAIL_OPT_KEYS: frozenset[str] = frozenset(
 _INV_REP_COL_W: dict[str, float] = {
     "codigo": 0.95,
     "sku_oem": 0.85,
-    "descripcion": 14.0,
+    "descripcion": 10.0,
     "marca_producto": 0.9,
     "condicion": 0.55,
     "_veh_rep": 1.05,
@@ -1714,7 +1714,8 @@ def _inv_rep_col_width_fracs(keys: list[str]) -> list[float]:
     fr = [w / s for w in wts]
     if "descripcion" in keys:
         i = keys.index("descripcion")
-        min_f = 0.30
+        # 30% menos ancho para Descripcion (vs min_f=0.30 anterior).
+        min_f = 0.21
         if fr[i] < min_f:
             rest = 1.0 - min_f
             sum_other = sum(fr[j] for j in range(len(fr)) if j != i)
@@ -1907,7 +1908,11 @@ def _html_inventario_listado(
         _cls = ' class="col-desc"' if _fk == "descripcion" else ""
         _col_parts.append(f'<col{_cls} style="width:{100 * _f:.2f}%" />')
     _colgroup = "".join(_col_parts)
-    ths = "".join(f"<th>{html.escape(lab)}</th>" for _k, lab in cols_print)
+    ths_parts: list[str] = []
+    for _k, _lab in cols_print:
+        _cls = ' class="code"' if _k == "codigo" else ""
+        ths_parts.append(f"<th{_cls}>{html.escape(_lab)}</th>")
+    ths = "".join(ths_parts)
     body_rows: list[str] = []
     current_cat: str | None = None
     for _, row in work.iterrows():
@@ -1952,6 +1957,8 @@ def _html_inventario_listado(
                     cell = html.escape(str(val))
                 if key == "descripcion":
                     td_cls = "desc"
+                elif key == "codigo":
+                    td_cls = "code"
             _cls_attr = f' class="{td_cls}"' if td_cls else ""
             tds.append(f"<td{_cls_attr}>{cell}</td>")
         body_rows.append("<tr>" + "".join(tds) + "</tr>")
@@ -2008,12 +2015,14 @@ def _html_inventario_listado(
   .meta {{ color: #444; font-size: 0.82rem; margin-bottom: 0.65rem; text-align: center; }}
   .sub {{ font-size: 0.78rem; color: #333; margin: 0.3rem 0; text-align: center; }}
   table.inv-grid {{ border-collapse: collapse; width: 100%; min-width: 100%; font-size: 0.72rem; table-layout: fixed; }}
-  col.col-desc {{ min-width: 12rem; }}
+  col.col-desc {{ min-width: 8.4rem; }}
   th, td {{ border: 1px solid #bbb; padding: 0.35rem 0.45rem; text-align: left; vertical-align: top;
     word-wrap: break-word; overflow-wrap: break-word; hyphens: auto; }}
-  th {{ background: #2a1f45; color: #fff; font-weight: 600; }}
+  th {{ background: #2a1f45; color: #fff; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    word-wrap: normal; overflow-wrap: normal; }}
   th.num, td.num {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
   td.desc {{ white-space: normal; font-size: 0.8rem; line-height: 1.4; }}
+  td.code {{ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
   tr.catgrp td {{ background: #fff3e0; font-weight: 700; color: #e65100; border-color: #ffcc80;
     font-family: Segoe UI, Roboto, Arial, sans-serif; font-style: normal; }}
   tr:nth-child(even) td {{ background: #fafafa; }}
@@ -2165,8 +2174,9 @@ def _xlsx_inventario_bytes(df_flat: pd.DataFrame) -> bytes:
             m = max(int(lens.max()) if len(lens) > 0 else 0, len(str(col)))
             base = max(10, m + 2)
             if "escripci" in str(col).lower() or str(col).lower() == "descripción":
-                base = max(base, 44)
-            ws.column_dimensions[get_column_letter(i)].width = float(min(56, base))
+                # Descripcion mas compacta (vs min ancho 44 anterior).
+                base = max(base, 32)
+            ws.column_dimensions[get_column_letter(i)].width = float(min(50, base))
     return buf.getvalue()
 
 
@@ -2193,41 +2203,53 @@ def _pdf_inventario_col_widths_for_keys(keys: list[str], total_w: float) -> list
     fr = _inv_rep_col_width_fracs(keys)
     raw_ws = [total_w * float(f) for f in fr]
 
-    # ReportLab usa paddings internos por celda. Si alguna columna termina bajo ese mínimo,
-    # puede disparar `negative availWidth` dentro de Paragraph.
-    # Elegimos un mínimo en "points" suficientemente conservador.
-    min_w = max(16.0, total_w * 0.03)
-    if min_w * n >= total_w:
-        # Degradamos el mínimo para poder respetar el ancho total.
-        min_w = (total_w / n) * 0.9
+    # ReportLab usa paddings internos por celda. Si una columna queda demasiado angosta,
+    # Paragraph puede fallar con `negative availWidth`. Mantenemos mínimos por columna,
+    # dando prioridad a `codigo` para que se lea horizontal.
+    base_min = max(16.0, total_w * 0.03)
+    min_w_by_key: list[float] = []
+    for k in keys:
+        if k == "codigo":
+            min_w_by_key.append(max(22.0, base_min * 1.35))
+        elif k == "sku_oem":
+            min_w_by_key.append(max(18.0, base_min * 1.15))
+        else:
+            min_w_by_key.append(base_min)
+
+    mins_sum = sum(min_w_by_key)
+    if mins_sum <= 0:
+        return [total_w / n] * n
+
+    if mins_sum >= total_w:
+        # Espacio insuficiente: escalamos los mínimos proporcionalmente.
+        scale = total_w / mins_sum
+        ws = [m * scale for m in min_w_by_key]
+        drift = total_w - sum(ws)
+        ws[-1] += drift
+        return [max(0.0, float(w)) for w in ws]
 
     # 1) Base: aplicar mínimo a cada columna.
-    ws = [max(w, min_w) for w in raw_ws]
+    ws = [max(w, min_w_by_key[i]) for i, w in enumerate(raw_ws)]
     base_sum = sum(ws)
     remaining = total_w - base_sum
 
-    # 2) Resto: se reparte solo entre columnas que estaban por encima del mínimo en el reparto "raw".
+    # 2) Resto: se reparte solo entre columnas que estaban por encima de su mínimo en el reparto "raw".
     if remaining > 1e-6:
-        extras = [max(0.0, w - min_w) for w in raw_ws]
+        extras = [max(0.0, raw_ws[i] - min_w_by_key[i]) for i in range(n)]
         extras_sum = sum(extras)
         if extras_sum > 0:
             for i in range(n):
                 ws[i] += remaining * (extras[i] / extras_sum)
         else:
-            # Si todo quedó igual al mínimo, lo damos a "descripcion" (si existe) o a la última.
             idx = keys.index("descripcion") if "descripcion" in keys else n - 1
             ws[idx] += remaining
 
-    # Ajuste final por redondeo: preserva mínimos evitando que el último caiga bajo min_w.
+    # Ajuste final por redondeo.
     drift = total_w - sum(ws)
     if abs(drift) > 1e-6:
         idx = keys.index("descripcion") if "descripcion" in keys else n - 1
         ws[idx] += drift
-        if ws[idx] < min_w - 1e-6:
-            # Si por redondeo cayó bajo mínimo, volvemos a un reparto uniforme (seguro).
-            return [total_w / n] * n
 
-    # Garantía final numérica.
     return [max(0.0, float(w)) for w in ws]
 
 
