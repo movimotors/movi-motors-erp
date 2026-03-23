@@ -5628,6 +5628,33 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
 
         est_total = round(sum(float(l["cantidad"]) * float(l["precio_unitario_usd"]) for l in new_lines), 2)
 
+        try:
+            _tb_bcv_v = _tasa_bs_para_documento(t, usar_bcv=True)
+            _tb_p2p_v = _tasa_bs_para_documento(t, usar_bcv=False)
+            _tb_doc_v = _tasa_bs_para_documento(t, usar_bcv=(doc_tasa == DOC_TASA_BS_OPTS[0]))
+        except ValueError:
+            _tb_bcv_v = _tb_p2p_v = _tb_doc_v = None
+
+        if _tb_bcv_v is not None and _tb_p2p_v is not None:
+            _bs_bcv = est_total * _tb_bcv_v
+            _bs_p2p = est_total * _tb_p2p_v
+            st.info(
+                f"**Total venta US$ {est_total:,.2f}** → equivalente en bolívares: "
+                f"**BCV** {_bs_bcv:,.2f} Bs (@ {_tb_bcv_v:,.2f} Bs/USD) · "
+                f"**P2P Binance (mercado)** {_bs_p2p:,.2f} Bs (@ {_tb_p2p_v:,.2f} Bs/USD)."
+            )
+            if _tb_doc_v is not None:
+                _bs_doc = est_total * _tb_doc_v
+                st.markdown(
+                    f"**Aplicado a esta venta** (opción **{doc_tasa}**): el cliente debe pagar **{_bs_doc:,.2f} Bs** "
+                    f"si liquidás todo en bolívares — **US$ {est_total:,.2f} × {_tb_doc_v:,.2f} Bs/USD**."
+                )
+        elif _tb_doc_v is not None:
+            st.caption(
+                f"Equivalente Bs del total (tasa **{doc_tasa}**): **{est_total * _tb_doc_v:,.2f} Bs** "
+                f"(@ {_tb_doc_v:,.2f} Bs/USD)."
+            )
+
         cobros_pl: list[dict[str, Any]] = []
         if forma == "contado":
             st.markdown("**Cobro al contado — por moneda y cuenta**")
@@ -5654,14 +5681,26 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                     key=f"vcb_mon_{i}",
                     help="Monto en la moneda elegida. Zelle = USD vía Zelle.",
                 )
-                default_m = float(est_total) if (n_cob == 1 and i == 0 and mon in ("USD", "ZELLE")) else 0.0
-                _fmt_am = "%.2f" if mon in ("USD", "ZELLE") else "%.4f"
+                if n_cob == 1 and i == 0 and mon in ("USD", "ZELLE"):
+                    default_m = float(est_total)
+                elif n_cob == 1 and i == 0 and mon == "VES" and _tb_doc_v is not None and float(_tb_doc_v) > 0:
+                    default_m = round(float(est_total) * float(_tb_doc_v), 2)
+                else:
+                    default_m = 0.0
+                _fmt_am = "%.2f" if mon in ("USD", "ZELLE", "VES") else "%.4f"
+                _monto_help = (
+                    f"En **VES**, ingresá bolívares cobrados. Referencia total: **{est_total * float(_tb_doc_v):,.2f} Bs** "
+                    f"con tasa **{doc_tasa}** ({float(_tb_doc_v):,.2f} Bs/USD × US$ {est_total:,.2f})."
+                    if mon == "VES" and _tb_doc_v is not None
+                    else "Monto en la moneda elegida."
+                )
                 mval = r3.number_input(
                     f"Monto ({mon})",
                     min_value=0.0,
                     value=default_m,
                     format=_fmt_am,
                     key=f"vcb_mv_{i}",
+                    help=_monto_help,
                 )
                 nota_cob = st.text_input(
                     "Nota de tesorería (opcional)",
