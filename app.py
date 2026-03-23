@@ -1936,7 +1936,8 @@ def _html_inventario_listado(
         if _k in INV_REP_NUMERIC_KEYS:
             _th_classes.append("num")
         _cls = f' class="{" ".join(_th_classes)}"' if _th_classes else ""
-        ths_parts.append(f"<th{_cls}>{html.escape(_lab)}</th>")
+        _lab_short = INV_REP_PDF_ABBR.get(_k, _lab)
+        ths_parts.append(f"<th{_cls} title=\"{html.escape(_lab)}\">{html.escape(_lab_short)}</th>")
     ths = "".join(ths_parts)
     body_rows: list[str] = []
     current_cat: str | None = None
@@ -2049,9 +2050,9 @@ def _html_inventario_listado(
   col.col-cat {{ min-width: 9.4rem; }}
   th, td {{ border: 1px solid #bbb; padding: 0.35rem 0.45rem; text-align: left; vertical-align: top;
     word-wrap: break-word; overflow-wrap: break-word; hyphens: auto; }}
-  th {{ background: #2a1f45; color: #fff; font-weight: 600; font-size: 0.68rem; line-height: 1.15;
-    white-space: normal; overflow-wrap: anywhere; word-break: break-word; }}
-  th.num {{ text-align: right; font-variant-numeric: tabular-nums; white-space: normal; overflow-wrap: anywhere; }}
+  th {{ background: #2a1f45; color: #fff; font-weight: 600; font-size: 0.68rem; line-height: 1.1;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; word-wrap: normal; overflow-wrap: normal; }}
+  th.num {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
   td.num {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
   td.desc {{ white-space: normal; font-size: 0.8rem; line-height: 1.4; }}
   th.code, td.code {{ white-space: nowrap; word-break: keep-all; overflow-wrap: normal; }}
