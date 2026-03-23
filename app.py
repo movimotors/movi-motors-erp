@@ -1687,14 +1687,14 @@ INV_REP_DETAIL_OPT_KEYS: frozenset[str] = frozenset(
 
 # Pesos relativos para repartir ancho (HTML colgroup + PDF). Más alto = más ancho.
 _INV_REP_COL_W: dict[str, float] = {
-    "codigo": 0.95,
+    "codigo": 1.35,
     "sku_oem": 0.85,
     "descripcion": 10.0,
     "marca_producto": 0.9,
     "condicion": 0.55,
     "_veh_rep": 1.05,
     "_anos_rep": 0.75,
-    "categoria_display": 1.05,
+    "categoria_display": 1.35,
     "stock_actual": 0.62,
     "stock_minimo": 0.55,
     "costo_usd": 0.92,
@@ -1905,12 +1905,24 @@ def _html_inventario_listado(
     _fracs = _inv_rep_col_width_fracs(_k_list)
     _col_parts: list[str] = []
     for _fk, _f in zip(_k_list, _fracs):
-        _cls = ' class="col-desc"' if _fk == "descripcion" else ""
+        _cls_parts: list[str] = []
+        if _fk == "descripcion":
+            _cls_parts.append("col-desc")
+        if _fk == "codigo":
+            _cls_parts.append("col-code")
+        if _fk == "categoria_display":
+            _cls_parts.append("col-cat")
+        _cls = f' class="{" ".join(_cls_parts)}"' if _cls_parts else ""
         _col_parts.append(f'<col{_cls} style="width:{100 * _f:.2f}%" />')
     _colgroup = "".join(_col_parts)
     ths_parts: list[str] = []
     for _k, _lab in cols_print:
-        _cls = ' class="code"' if _k == "codigo" else ""
+        _th_classes: list[str] = []
+        if _k == "codigo":
+            _th_classes.append("code")
+        if _k == "categoria_display":
+            _th_classes.append("cat")
+        _cls = f' class="{" ".join(_th_classes)}"' if _th_classes else ""
         ths_parts.append(f"<th{_cls}>{html.escape(_lab)}</th>")
     ths = "".join(ths_parts)
     body_rows: list[str] = []
@@ -1959,6 +1971,8 @@ def _html_inventario_listado(
                     td_cls = "desc"
                 elif key == "codigo":
                     td_cls = "code"
+                elif key == "categoria_display":
+                    td_cls = "cat"
             _cls_attr = f' class="{td_cls}"' if td_cls else ""
             tds.append(f"<td{_cls_attr}>{cell}</td>")
         body_rows.append("<tr>" + "".join(tds) + "</tr>")
@@ -2016,13 +2030,16 @@ def _html_inventario_listado(
   .sub {{ font-size: 0.78rem; color: #333; margin: 0.3rem 0; text-align: center; }}
   table.inv-grid {{ border-collapse: collapse; width: 100%; min-width: 100%; font-size: 0.72rem; table-layout: fixed; }}
   col.col-desc {{ min-width: 8.4rem; }}
+  col.col-code {{ min-width: 8.8rem; }}
+  col.col-cat {{ min-width: 9.4rem; }}
   th, td {{ border: 1px solid #bbb; padding: 0.35rem 0.45rem; text-align: left; vertical-align: top;
     word-wrap: break-word; overflow-wrap: break-word; hyphens: auto; }}
-  th {{ background: #2a1f45; color: #fff; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  th {{ background: #2a1f45; color: #fff; font-weight: 600; white-space: nowrap;
     word-wrap: normal; overflow-wrap: normal; }}
   th.num, td.num {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
   td.desc {{ white-space: normal; font-size: 0.8rem; line-height: 1.4; }}
-  td.code {{ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  th.code, td.code {{ white-space: nowrap; word-break: keep-all; overflow-wrap: normal; }}
+  th.cat, td.cat {{ white-space: nowrap; word-break: keep-all; overflow-wrap: normal; }}
   tr.catgrp td {{ background: #fff3e0; font-weight: 700; color: #e65100; border-color: #ffcc80;
     font-family: Segoe UI, Roboto, Arial, sans-serif; font-style: normal; }}
   tr:nth-child(even) td {{ background: #fafafa; }}
@@ -2173,6 +2190,11 @@ def _xlsx_inventario_bytes(df_flat: pd.DataFrame) -> bytes:
             lens = df_flat[col].astype(str).map(len)
             m = max(int(lens.max()) if len(lens) > 0 else 0, len(str(col)))
             base = max(10, m + 2)
+            lc = str(col).lower()
+            if lc in {"código", "codigo"}:
+                base = max(base, 20)
+            if lc == "categoría" or lc == "categoria":
+                base = max(base, 22)
             if "escripci" in str(col).lower() or str(col).lower() == "descripción":
                 # Descripcion mas compacta (vs min ancho 44 anterior).
                 base = max(base, 32)
@@ -2210,7 +2232,9 @@ def _pdf_inventario_col_widths_for_keys(keys: list[str], total_w: float) -> list
     min_w_by_key: list[float] = []
     for k in keys:
         if k == "codigo":
-            min_w_by_key.append(max(22.0, base_min * 1.35))
+            min_w_by_key.append(max(30.0, base_min * 1.8))
+        elif k == "categoria_display":
+            min_w_by_key.append(max(34.0, base_min * 2.0))
         elif k == "sku_oem":
             min_w_by_key.append(max(18.0, base_min * 1.15))
         else:
