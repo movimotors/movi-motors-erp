@@ -1910,7 +1910,7 @@ def _html_inventario_listado(
     if "sku_oem" in work.columns:
         _oem_chars = int(work["sku_oem"].fillna("").astype(str).map(len).max() or 0)
     # Reserva ancho por caracteres para mostrar Codigo/OEM completos en horizontal.
-    _code_oem_ch = min(48, max(12, max(_code_chars, _oem_chars) + 2))
+    _code_oem_ch = min(52, max(14, max(_code_chars, _oem_chars) + 4))
     _col_parts: list[str] = []
     for _fk, _f in zip(_k_list, _fracs):
         _cls_parts: list[str] = []
@@ -2266,9 +2266,9 @@ def _pdf_inventario_col_widths_for_keys(keys: list[str], total_w: float) -> list
     min_w_by_key: list[float] = []
     for k in keys:
         if k == "codigo":
-            min_w_by_key.append(max(38.0, base_min * 2.2))
+            min_w_by_key.append(max(42.0, base_min * 2.35))
         elif k == "sku_oem":
-            min_w_by_key.append(max(38.0, base_min * 2.2))
+            min_w_by_key.append(max(42.0, base_min * 2.35))
         elif k == "categoria_display":
             min_w_by_key.append(max(20.0, base_min * 1.2))
         else:
