@@ -2185,9 +2185,50 @@ def _reporte_tabla_a_csv(df: pd.DataFrame) -> bytes:
 
 
 def _pdf_inventario_col_widths_for_keys(keys: list[str], total_w: float) -> list[float]:
-    """Ancho PDF según columnas visibles; **descripcion** toma más espacio si hay pocas columnas angostas."""
+    """Ancho PDF por columnas; evita celdas tan angostas que ReportLab falle (availWidth negativo con Paragraph)."""
+    if not keys or total_w <= 0:
+        return []
+
+    n = len(keys)
     fr = _inv_rep_col_width_fracs(keys)
-    return [total_w * f for f in fr]
+    raw_ws = [total_w * float(f) for f in fr]
+
+    # ReportLab usa paddings internos por celda. Si alguna columna termina bajo ese mínimo,
+    # puede disparar `negative availWidth` dentro de Paragraph.
+    # Elegimos un mínimo en "points" suficientemente conservador.
+    min_w = max(16.0, total_w * 0.03)
+    if min_w * n >= total_w:
+        # Degradamos el mínimo para poder respetar el ancho total.
+        min_w = (total_w / n) * 0.9
+
+    # 1) Base: aplicar mínimo a cada columna.
+    ws = [max(w, min_w) for w in raw_ws]
+    base_sum = sum(ws)
+    remaining = total_w - base_sum
+
+    # 2) Resto: se reparte solo entre columnas que estaban por encima del mínimo en el reparto "raw".
+    if remaining > 1e-6:
+        extras = [max(0.0, w - min_w) for w in raw_ws]
+        extras_sum = sum(extras)
+        if extras_sum > 0:
+            for i in range(n):
+                ws[i] += remaining * (extras[i] / extras_sum)
+        else:
+            # Si todo quedó igual al mínimo, lo damos a "descripcion" (si existe) o a la última.
+            idx = keys.index("descripcion") if "descripcion" in keys else n - 1
+            ws[idx] += remaining
+
+    # Ajuste final por redondeo: preserva mínimos evitando que el último caiga bajo min_w.
+    drift = total_w - sum(ws)
+    if abs(drift) > 1e-6:
+        idx = keys.index("descripcion") if "descripcion" in keys else n - 1
+        ws[idx] += drift
+        if ws[idx] < min_w - 1e-6:
+            # Si por redondeo cayó bajo mínimo, volvemos a un reparto uniforme (seguro).
+            return [total_w / n] * n
+
+    # Garantía final numérica.
+    return [max(0.0, float(w)) for w in ws]
 
 
 def _pdf_inventario_bytes(
@@ -2372,6 +2413,10 @@ def _pdf_inventario_bytes(
             ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f7f7")]),
+            ("LEFTPADDING", (0, 0), (-1, -1), 2),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
         ]
     )
 
