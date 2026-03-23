@@ -1687,14 +1687,14 @@ INV_REP_DETAIL_OPT_KEYS: frozenset[str] = frozenset(
 
 # Pesos relativos para repartir ancho (HTML colgroup + PDF). Más alto = más ancho.
 _INV_REP_COL_W: dict[str, float] = {
-    "codigo": 1.2,
-    "sku_oem": 1.2,
+    "codigo": 1.7,
+    "sku_oem": 1.7,
     "descripcion": 10.0,
     "marca_producto": 0.9,
     "condicion": 0.55,
     "_veh_rep": 1.05,
     "_anos_rep": 0.75,
-    "categoria_display": 1.35,
+    "categoria_display": 0.85,
     "stock_actual": 0.62,
     "stock_minimo": 0.55,
     "costo_usd": 0.92,
@@ -1909,7 +1909,8 @@ def _html_inventario_listado(
         _code_chars = int(work["codigo"].fillna("").astype(str).map(len).max() or 0)
     if "sku_oem" in work.columns:
         _oem_chars = int(work["sku_oem"].fillna("").astype(str).map(len).max() or 0)
-    _code_oem_ch = min(28, max(10, max(_code_chars, _oem_chars) + 1))
+    # Reserva ancho por caracteres para mostrar Codigo/OEM completos en horizontal.
+    _code_oem_ch = min(48, max(12, max(_code_chars, _oem_chars) + 2))
     _col_parts: list[str] = []
     for _fk, _f in zip(_k_list, _fracs):
         _cls_parts: list[str] = []
@@ -2050,7 +2051,7 @@ def _html_inventario_listado(
   table.inv-grid {{ border-collapse: collapse; width: 100%; min-width: 100%; font-size: 0.72rem; table-layout: fixed; }}
   col.col-desc {{ min-width: 8.4rem; }}
   col.col-code, col.col-oem {{ min-width: {_code_oem_ch}ch; }}
-  col.col-cat {{ min-width: 9.4rem; }}
+  col.col-cat {{ min-width: 6.8rem; }}
   th, td {{ border: 1px solid #bbb; padding: 0.35rem 0.45rem; text-align: left; vertical-align: top;
     word-wrap: break-word; overflow-wrap: break-word; hyphens: auto; }}
   th {{ background: #2a1f45; color: #fff; font-weight: 600; font-size: 0.68rem; line-height: 1.1;
@@ -2058,8 +2059,8 @@ def _html_inventario_listado(
   th.num {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
   td.num {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
   td.desc {{ white-space: normal; font-size: 0.8rem; line-height: 1.4; }}
-  th.code, td.code {{ white-space: nowrap; word-break: keep-all; overflow-wrap: normal; overflow: hidden; text-overflow: ellipsis; }}
-  th.oem, td.oem {{ white-space: nowrap; word-break: keep-all; overflow-wrap: normal; overflow: hidden; text-overflow: ellipsis; }}
+  th.code, td.code {{ white-space: nowrap; word-break: keep-all; overflow-wrap: normal; }}
+  th.oem, td.oem {{ white-space: nowrap; word-break: keep-all; overflow-wrap: normal; }}
   th.cat, td.cat {{ white-space: nowrap; word-break: keep-all; overflow-wrap: normal; }}
   tr.catgrp td {{ background: #fff3e0; font-weight: 700; color: #e65100; border-color: #ffcc80;
     font-family: Segoe UI, Roboto, Arial, sans-serif; font-style: normal; }}
@@ -2265,11 +2266,11 @@ def _pdf_inventario_col_widths_for_keys(keys: list[str], total_w: float) -> list
     min_w_by_key: list[float] = []
     for k in keys:
         if k == "codigo":
-            min_w_by_key.append(max(30.0, base_min * 1.8))
+            min_w_by_key.append(max(38.0, base_min * 2.2))
         elif k == "sku_oem":
-            min_w_by_key.append(max(30.0, base_min * 1.8))
+            min_w_by_key.append(max(38.0, base_min * 2.2))
         elif k == "categoria_display":
-            min_w_by_key.append(max(34.0, base_min * 2.0))
+            min_w_by_key.append(max(20.0, base_min * 1.2))
         else:
             min_w_by_key.append(base_min)
 
