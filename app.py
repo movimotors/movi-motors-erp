@@ -1834,7 +1834,7 @@ def _inv_format_usdt_ref_cell(val_usd: Any, tasa_usdt: float | None) -> str:
     """USDT ref. = USD × `tasa_usdt` (USDT por 1 USD en sistema), igual que en el resto de la app."""
     if tasa_usdt is None or tasa_usdt <= 0 or not _inv_is_finite_num(val_usd):
         return ""
-    return f"{float(val_usd) * float(tasa_usdt):,.6f}"
+    return _rep_fmt_precio_entero(float(val_usd) * float(tasa_usdt))
 
 
 def _inv_rep_cols_for_export(work: pd.DataFrame, column_keys: frozenset[str] | None) -> list[tuple[str, str]]:
@@ -1961,7 +1961,7 @@ def _html_inventario_listado(
                 except (TypeError, ValueError):
                     cell = html.escape("" if val is None else str(val))
             elif key in ("costo_usd", "precio_v_usd"):
-                cell = f"{float(val):,.2f}" if _inv_is_finite_num(val) else ""
+                cell = _rep_fmt_precio_entero(val)
                 td_cls = "num"
             elif key == "precio_v_bs_ref":
                 cell = _inv_format_bs_ref_cell(val, row.get("precio_v_usd"), _t_bs_rep)
@@ -2117,6 +2117,19 @@ def _inv_is_finite_num(val: Any) -> bool:
         return False
 
 
+def _rep_fmt_precio_entero(val: Any) -> str:
+    """Montos / precios en reportes: entero con separador de miles, sin decimales."""
+    if not _inv_is_finite_num(val):
+        return ""
+    return f"{int(round(float(val))):,d}"
+
+
+def _rep_series_montos_enteros(s: pd.Series) -> pd.Series:
+    """Serie numérica → enteros redondeados (nullable) para tablas Excel/CSV de reportes."""
+    num = pd.to_numeric(s, errors="coerce")
+    return num.round(0).astype("Int64")
+
+
 def _inv_rep_tasas_footer_html(cols_print: list[tuple[str, str]], t: dict[str, Any] | None) -> str:
     bits: list[str] = []
     keys_in = {k for k, _ in cols_print}
@@ -2132,9 +2145,9 @@ def _inv_rep_tasas_footer_html(cols_print: list[tuple[str, str]], t: dict[str, A
 def _inv_format_bs_ref_cell(val_bs: Any, val_usd: Any, tasa_bs: float | None) -> str:
     """Bs ref.: usa columna BD si es número; si no, USD × tasa del reporte (evita nan en PDF/HTML)."""
     if _inv_is_finite_num(val_bs):
-        return f"{float(val_bs):,.2f}"
+        return _rep_fmt_precio_entero(val_bs)
     if tasa_bs is not None and tasa_bs > 0 and _inv_is_finite_num(val_usd):
-        return f"{float(val_usd) * float(tasa_bs):,.2f}"
+        return _rep_fmt_precio_entero(float(val_usd) * float(tasa_bs))
     return ""
 
 
@@ -2151,8 +2164,8 @@ def _df_inventario_export_flat(
         "Categoría": work["categoria"].map(_inv_cat_display),
         "Stock": work["stock_actual"].map(_inv_stock_int),
         "Stock mín.": work["stock_minimo"].map(_inv_stock_int),
-        "Costo USD": pd.to_numeric(work["costo_usd"], errors="coerce"),
-        "Precio venta USD": pd.to_numeric(work["precio_v_usd"], errors="coerce"),
+        "Costo USD": _rep_series_montos_enteros(work["costo_usd"]),
+        "Precio venta USD": _rep_series_montos_enteros(work["precio_v_usd"]),
     }
     if "sku_oem" in work.columns:
         base["OEM"] = work["sku_oem"].map(_export_cell_txt)
@@ -2175,19 +2188,19 @@ def _df_inventario_export_flat(
         _pbs = pd.to_numeric(work["precio_v_bs_ref"], errors="coerce")
         if _t_bs_x is not None and _t_bs_x > 0:
             _pbs = _pbs.fillna(_pv * float(_t_bs_x))
-        out["Precio venta Bs (ref.)"] = _pbs
+        out["Precio venta Bs (ref.)"] = _rep_series_montos_enteros(_pbs)
     if "costo_bs_ref" in work.columns:
         _cv = pd.to_numeric(work["costo_usd"], errors="coerce")
         _cbs = pd.to_numeric(work["costo_bs_ref"], errors="coerce")
         if _t_bs_x is not None and _t_bs_x > 0:
             _cbs = _cbs.fillna(_cv * float(_t_bs_x))
-        out["Costo Bs (ref.)"] = _cbs
+        out["Costo Bs (ref.)"] = _rep_series_montos_enteros(_cbs)
     _t_ut_x = _nf(t.get("tasa_usdt")) if t else None
     _pvu_num = pd.to_numeric(work["precio_v_usd"], errors="coerce")
     _cvu_num = pd.to_numeric(work["costo_usd"], errors="coerce")
     if _t_ut_x is not None and _t_ut_x > 0:
-        out["Precio venta USDT (ref.)"] = _pvu_num * float(_t_ut_x)
-        out["Costo USDT (ref.)"] = _cvu_num * float(_t_ut_x)
+        out["Precio venta USDT (ref.)"] = _rep_series_montos_enteros(_pvu_num * float(_t_ut_x))
+        out["Costo USDT (ref.)"] = _rep_series_montos_enteros(_cvu_num * float(_t_ut_x))
     else:
         out["Precio venta USDT (ref.)"] = pd.Series([pd.NA] * len(work), index=work.index, dtype="Float64")
         out["Costo USDT (ref.)"] = pd.Series([pd.NA] * len(work), index=work.index, dtype="Float64")
@@ -2449,9 +2462,6 @@ def _pdf_inventario_bytes(
         except (TypeError, ValueError):
             return ""
 
-    def fmt2(x: Any) -> str:
-        return f"{float(x):,.2f}" if _inv_is_finite_num(x) else ""
-
     def cell_txt_for_key(r: pd.Series, key: str) -> str:
         if key == "categoria_display":
             return _inv_cat_display(r.get("categoria")) or ""
@@ -2464,7 +2474,7 @@ def _pdf_inventario_bytes(
         if key in ("stock_actual", "stock_minimo"):
             return fmt_int_st(r.get(key))
         if key in ("costo_usd", "precio_v_usd"):
-            return fmt2(r.get(key))
+            return _rep_fmt_precio_entero(r.get(key))
         if key == "precio_v_bs_ref":
             return _inv_format_bs_ref_cell(r.get("precio_v_bs_ref"), r.get("precio_v_usd"), t_bs_pdf)
         if key == "costo_bs_ref":
@@ -2921,9 +2931,10 @@ def restore_inventario_desde_json(sb: Client, payload: dict[str, Any]) -> tuple[
 
 
 def fmt_tri(usd: float, t_bs: float, t_usdt: float) -> str:
+    """Equivalentes para pies de reporte: montos en enteros (sin decimales)."""
     usd = float(usd)
     return (
-        f"**USD** {usd:,.2f} · **Bs** {usd * t_bs:,.2f} · **USDT** {usd * t_usdt:,.6f}"
+        f"**USD** {int(round(usd)):,d} · **Bs** {int(round(usd * t_bs)):,d} · **USDT** {int(round(usd * t_usdt)):,d}"
     )
 
 
@@ -6557,7 +6568,9 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
         st.stop()
     t_bs = float(t["tasa_bs"])
     t_usdt = float(t["tasa_usdt"])
-    st.caption(fmt_tri(1.0, t_bs, t_usdt).replace("**USD** 1.00", "Referencia: 1 USD equivale a"))
+    st.caption(
+        f"Referencia: 1 USD equivale a **Bs** {int(round(t_bs)):,d} · **USDT** {int(round(t_usdt)):,d}"
+    )
 
     tab_inv, tab_caja, tab_ven, tab_comp, tab_cartera = st.tabs(
         [
@@ -6627,14 +6640,16 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
         for m in movs:
             mon = (m.get("moneda") or "USD") or "USD"
             mm = m.get("monto_moneda")
+            _musd = int(round(float(m.get("monto_usd") or 0)))
+            _mm_orig = int(round(float(mm))) if mm is not None else ""
             filas_mc.append(
                 {
                     "Fecha y hora": str(m.get("created_at", ""))[:19],
                     "Cuenta": cmap.get(str(m.get("caja_id")), "—"),
                     "Entrada o salida": "Entrada (cobro / ingreso)" if m.get("tipo") == "Ingreso" else "Salida (pago / egreso)",
-                    "Monto en USD (sistema)": float(m.get("monto_usd") or 0),
+                    "Monto en USD (sistema)": _musd,
                     "Moneda original": str(mon).upper(),
-                    "Monto en moneda original": float(mm) if mm is not None else "",
+                    "Monto en moneda original": _mm_orig,
                     "Concepto": (m.get("concepto") or "")[:120],
                     "Referencia": (m.get("referencia") or "")[:80],
                     "Nota tesorería": str(m.get("nota_operacion") or "")[:200],
@@ -6650,9 +6665,9 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
             tot_out = df_mc[df_mc["Entrada o salida"].str.startswith("Salida")]["Monto en USD (sistema)"].sum()
             m1, m2 = st.columns(2)
             with m1:
-                st.metric("Total entradas (USD en el sistema)", f"{tot_in:,.2f}")
+                st.metric("Total entradas (USD en el sistema)", f"{int(round(tot_in)):,d}")
             with m2:
-                st.metric("Total salidas (USD en el sistema)", f"{tot_out:,.2f}")
+                st.metric("Total salidas (USD en el sistema)", f"{int(round(tot_out)):,d}")
             st.caption(
                 "Los **USD** son el equivalente que guardó el sistema al momento del movimiento (bolívares y USDT convertidos con la tasa de entonces)."
             )
@@ -6704,7 +6719,9 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
         st.markdown("##### Resumen por venta")
         if ventas.data:
             dfv = pd.DataFrame(ventas.data)
-            dfv["Equiv. aprox. en Bs (según tasa de hoy)"] = dfv["total_usd"].astype(float) * t_bs
+            dfv["Equiv. aprox. en Bs (según tasa de hoy)"] = (
+                dfv["total_usd"].astype(float) * t_bs
+            ).round(0).astype("Int64")
             dfv["Fecha"] = pd.to_datetime(dfv["fecha"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
             dfv["Quién la registró"] = dfv["usuario_id"].map(lambda x: umap_v.get(str(x), "—"))
             dfv_disp = dfv.rename(
@@ -6715,6 +6732,7 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
                     "forma_pago": "Forma de pago",
                 }
             )[["Nº interno", "Fecha", "Cliente", "Forma de pago", "Total USD", "Equiv. aprox. en Bs (según tasa de hoy)", "Quién la registró"]]
+            dfv_disp["Total USD"] = _rep_series_montos_enteros(dfv_disp["Total USD"])
             st.dataframe(dfv_disp, use_container_width=True, hide_index=True)
             dfv["fecha_d"] = pd.to_datetime(dfv["fecha"], errors="coerce").dt.strftime("%Y-%m-%d")
             agg = dfv.groupby("fecha_d", as_index=False)["total_usd"].sum()
@@ -6725,6 +6743,7 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
                 labels={"fecha_d": "Día", "total_usd": "Dólares (USD)"},
                 title="Vendido en dólares por día (total del día)",
             )
+            fig.update_layout(yaxis=dict(tickformat=",d"))
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("No hay ventas registradas entre esas fechas.")
@@ -6760,6 +6779,7 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
                 rows_m.append({"producto": desc, "utilidad_bruta_usd": margin})
             dfm = pd.DataFrame(rows_m).groupby("producto", as_index=False)["utilidad_bruta_usd"].sum()
             dfm = dfm.rename(columns={"producto": "Producto", "utilidad_bruta_usd": "Ganancia bruta USD (aprox.)"})
+            dfm["Ganancia bruta USD (aprox.)"] = _rep_series_montos_enteros(dfm["Ganancia bruta USD (aprox.)"])
             st.dataframe(dfm, use_container_width=True, hide_index=True)
             st.caption(fmt_tri(float(dfm["Ganancia bruta USD (aprox.)"].sum()), t_bs, t_usdt))
         else:
@@ -6789,8 +6809,8 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
                         "Código": _export_cell_txt(pr.get("codigo")) or "—",
                         "Descripción": _export_cell_txt(pr.get("descripcion")) or pid,
                         "Cantidad": float(row.get("cantidad") or 0),
-                        "Precio unitario USD": float(row.get("precio_unitario_usd") or 0),
-                        "Subtotal USD": float(row.get("subtotal_usd") or 0),
+                        "Precio unitario USD": int(round(float(row.get("precio_unitario_usd") or 0))),
+                        "Subtotal USD": int(round(float(row.get("subtotal_usd") or 0))),
                     }
                 )
         df_det = pd.DataFrame(filas_det)
@@ -6845,7 +6865,9 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
         st.markdown("##### Compras en el rango")
         if compras_r.data:
             dfcmp = pd.DataFrame(compras_r.data)
-            dfcmp["Equiv. aprox. en Bs (tasa de hoy)"] = dfcmp["total_usd"].astype(float) * t_bs
+            dfcmp["Equiv. aprox. en Bs (tasa de hoy)"] = (
+                dfcmp["total_usd"].astype(float) * t_bs
+            ).round(0).astype("Int64")
             dfcmp["Fecha"] = pd.to_datetime(dfcmp["fecha"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
             dfcmp["Quién la registró"] = dfcmp["usuario_id"].map(lambda x: umap_c.get(str(x), "—"))
             dfc_disp = dfcmp.rename(
@@ -6856,6 +6878,7 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
                     "forma_pago": "Forma de pago",
                 }
             )[["Nº interno", "Fecha", "Proveedor", "Forma de pago", "Total USD", "Equiv. aprox. en Bs (tasa de hoy)", "Quién la registró"]]
+            dfc_disp["Total USD"] = _rep_series_montos_enteros(dfc_disp["Total USD"])
             st.dataframe(dfc_disp, use_container_width=True, hide_index=True)
             dfcmp["fecha_d"] = pd.to_datetime(dfcmp["fecha"], errors="coerce").dt.strftime("%Y-%m-%d")
             aggc = dfcmp.groupby("fecha_d", as_index=False)["total_usd"].sum()
@@ -6866,6 +6889,7 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
                 labels={"fecha_d": "Día", "total_usd": "Dólares (USD)"},
                 title="Compras en dólares por día",
             )
+            figc.update_layout(yaxis=dict(tickformat=",d"))
             st.plotly_chart(figc, use_container_width=True)
         else:
             st.info("No hay compras entre esas fechas.")
@@ -6902,8 +6926,8 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
                         "Código": _export_cell_txt(pr.get("codigo")) or "—",
                         "Descripción": _export_cell_txt(pr.get("descripcion")) or pid,
                         "Cantidad": float(row.get("cantidad") or 0),
-                        "Costo unit. USD": float(row.get("costo_unitario_usd") or 0),
-                        "Subtotal USD": float(row.get("subtotal_usd") or 0),
+                        "Costo unit. USD": int(round(float(row.get("costo_unitario_usd") or 0))),
+                        "Subtotal USD": int(round(float(row.get("subtotal_usd") or 0))),
                     }
                 )
         df_cd = pd.DataFrame(filas_cd)
@@ -6942,7 +6966,7 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
             dfp = pd.DataFrame(cxp.data)
             st.dataframe(dfp, use_container_width=True, hide_index=True)
             pend_p = dfp[dfp["estado"].isin(["Pendiente", "Parcial"])]["monto_pendiente_usd"].astype(float).sum()
-            st.metric("Total aún por pagar (USD)", f"{pend_p:,.2f}")
+            st.metric("Total aún por pagar (USD)", f"{int(round(pend_p)):,d}")
             st.caption(fmt_tri(pend_p, t_bs, t_usdt))
         else:
             st.info("No hay cuentas por pagar cargadas.")
@@ -6975,13 +6999,13 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
                         "Fecha límite de cobro": str(r.get("fecha_vencimiento") or "")[:10],
                         "¿Qué tan al día está?": _rep_texto_plazo_vencimiento(r.get("fecha_vencimiento")),
                         "Grupo (para totales)": _rep_bucket_antiguedad(r.get("fecha_vencimiento")),
-                        "Adeudado USD": float(r.get("monto_pendiente_usd") or 0),
+                        "Adeudado USD": int(round(float(r.get("monto_pendiente_usd") or 0))),
                     }
                 )
             df_cxc = pd.DataFrame(rows_cxc)
             df_dl_cob = df_cxc
             pend_c = df_cxc[df_cxc["Estado del crédito"].isin(["Pendiente", "Parcial"])]["Adeudado USD"].sum()
-            st.metric("Total que te deben (pendiente, USD)", f"{pend_c:,.2f}")
+            st.metric("Total que te deben (pendiente, USD)", f"{int(round(pend_c)):,d}")
             st.caption(fmt_tri(pend_c, t_bs, t_usdt))
 
             res_c = (
@@ -6990,6 +7014,7 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
                 .sum()
                 .sort_values("Adeudado USD", ascending=False)
             )
+            res_c["Adeudado USD"] = _rep_series_montos_enteros(res_c["Adeudado USD"])
             st.markdown("**Resumen: te deben — agrupado por plazo**")
             st.dataframe(res_c, use_container_width=True, hide_index=True)
             st.dataframe(df_cxc, use_container_width=True, hide_index=True)
@@ -7012,13 +7037,13 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
                         "Fecha límite de pago": str(r.get("fecha_vencimiento") or "")[:10],
                         "¿Qué tan al día está?": _rep_texto_plazo_vencimiento(r.get("fecha_vencimiento")),
                         "Grupo (para totales)": _rep_bucket_antiguedad(r.get("fecha_vencimiento")),
-                        "Debes USD": float(r.get("monto_pendiente_usd") or 0),
+                        "Debes USD": int(round(float(r.get("monto_pendiente_usd") or 0))),
                     }
                 )
             df_cxp = pd.DataFrame(rows_cxp)
             df_dl_pag = df_cxp
             pend_x = df_cxp[df_cxp["Estado"].isin(["Pendiente", "Parcial"])]["Debes USD"].sum()
-            st.metric("Total que debes pagar (pendiente, USD)", f"{pend_x:,.2f}")
+            st.metric("Total que debes pagar (pendiente, USD)", f"{int(round(pend_x)):,d}")
             st.caption(fmt_tri(pend_x, t_bs, t_usdt))
             res_x = (
                 df_cxp[df_cxp["Estado"].isin(["Pendiente", "Parcial"])]
@@ -7026,6 +7051,7 @@ def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
                 .sum()
                 .sort_values("Debes USD", ascending=False)
             )
+            res_x["Debes USD"] = _rep_series_montos_enteros(res_x["Debes USD"])
             st.markdown("**Resumen: debes — agrupado por plazo**")
             st.dataframe(res_x, use_container_width=True, hide_index=True)
             st.dataframe(df_cxp, use_container_width=True, hide_index=True)

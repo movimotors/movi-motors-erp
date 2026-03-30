@@ -1,6 +1,3 @@
-# Kenny Finanzas: repositorio propio https://github.com/komp-pixel/FPken
-kenny finanzas/
-
 .streamlit/secrets.toml
 __pycache__/
 *.pyc

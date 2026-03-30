@@ -1,0 +1,46 @@
+---
+description: Kenny Finanzas — cambios completos, orden y estructura (FPken / carpeta kenny finanzas)
+globs: kenny finanzas/**/*
+alwaysApply: false
+---
+
+# Kenny Finanzas: cambios completos (secuencia y estructura)
+
+El código que se **publica** vive en el repo **FPken** (`github.com/komp-pixel/FPken`, carpeta local típica `c:\Proyectos IA\FPken`). La carpeta `kenny finanzas/` en el monorepo Movi debe mantenerse **alineada** con ese repo si se versiona; no dejar solo parches locales sin subir.
+
+## Evolución gradual (lo que sí queremos)
+
+- Los cambios se hacen **encima** del historial de Git: cada commit **suma** o **corrige** sin borrar lo que ya estaba bien.
+- **No** reescribir un archivo entero “desde cero” si eso puede eliminar features previas (eliminar cuentas, reparar propietario, admin por usuario, etc.). Preferir **diffs pequeños** y revisar el resultado.
+- Antes de fusionar ramas o resolver conflictos: integrar **ambas** versiones cuando aportan cosas distintas; **no** quedarse solo con “una mitad” del conflicto.
+- Tras un cambio, lo esperable es que **todo lo que ya funcionaba** siga funcionando, salvo que el usuario pidiera explícitamente reemplazar un comportamiento.
+
+## Orden obligatorio al implementar una feature o fix
+
+1. **Base de datos (Supabase)**  
+   - Si hace falta columna, índice, FK o política: nuevo `supabase/patch_XXX_nombre.sql` (numeración seguida) o actualización de `schema.sql` para proyectos nuevos.  
+   - Ejecutar o documentar el script en el mismo cambio; no asumir columnas en la app sin el parche.
+
+2. **App Python**  
+   - `app.py` y módulos `kf_*.py` siguiendo la estructura existente (multiusuario: `owner_user_id` / `account_owner_id` coherentes).  
+   - Incluir UI, validación y mensajes de error claros; no dejar funciones llamadas sin definir.
+
+3. **Prohibido** subir archivos con **marcadores de merge** (`<<<<<<<`, `=======`, `>>>>>>>`). Resolver conflictos antes del commit.
+
+4. **Antes de dar por cerrado el cambio**  
+   - `python -m py_compile` sobre los `.py` tocados.  
+   - Revisar que no queden referencias rotas (variables, imports, claves de `session_state`).
+
+5. **Git (FPken)**  
+   - `git status`, `git add`, `git commit` con mensaje claro en español, `git push origin main`.  
+   - No commitear `.streamlit/secrets.toml` ni claves.
+
+6. **Despliegue**  
+   - Tras push: **Redeploy** o **Reboot** en Streamlit Community Cloud si aplica.
+
+7. **Documentación** (solo si el flujo cambia)  
+   - Actualizar `README.md` o `DEPLOY_STREAMLIT_CLOUD.md` en el mismo conjunto de cambios.
+
+## Resumen
+
+Un cambio se considera **completo** cuando: BD (si aplica) + código + verificación + push + (nube) redeploy están resueltos en la misma línea de trabajo, **sin regresiones** respecto al último estado bueno en `main`, y sin medias resoluciones de merge ni features a medias.
