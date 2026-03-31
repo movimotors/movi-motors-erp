@@ -10,5 +10,11 @@ auth_state.json
 Thumbs.db
 auto_backups/
 
+# Kenny Finanzas vive en repo FPken; esta copia suele traer .git anidado — no versionar aquí
+kenny finanzas/
+
+# Script puntual para parchear FPken en otra ruta local
+_patch_owner_insert.py
+
 # Paquetes para Drive (dentro de respaldos/); la carpeta respaldos/ si existe en Git solo con .gitkeep + LEEME
 respaldos/Movi_backup_para_drive_*/
