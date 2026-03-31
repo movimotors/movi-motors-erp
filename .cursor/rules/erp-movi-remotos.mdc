@@ -1,0 +1,20 @@
+# Movi Motors ERP: repo correcto para nube
+
+Para este proyecto, cuando el usuario diga "commit/push" o "subir a la nube":
+
+- El **objetivo principal** es que Streamlit Cloud se actualice.
+- Streamlit Cloud está conectado al repo **privado** `movimotors/erp2movi`.
+
+Por tanto:
+
+1) Hacer `git status` y revisar cambios.
+2) Hacer `git add` de lo pertinente.
+3) Hacer `git commit` con mensaje claro.
+4) Hacer `git push` al remoto `erp2movi` hacia `main`.
+5) Solo si el usuario lo pide explícitamente, también empujar al repo público `movi-motors-erp`.
+
+Notas:
+
+- Si `git push` falla por red/DNS (`Could not resolve host: github.com`), documentar el error y reintentar cuando vuelva la conectividad.
+- No commitear secretos (`.streamlit/secrets.toml`, `.env`, etc.).
+
