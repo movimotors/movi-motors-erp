@@ -4921,11 +4921,20 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                     value=_export_cell_txt(_rw.get("ubicacion")),
                                     key=f"inv_ficha_ubi_{_pid}",
                                 )
-                                _fimg = fu2.text_input(
-                                    "URL imagen",
-                                    value=_export_cell_txt(_rw.get("imagen_url")),
-                                    key=f"inv_ficha_img_{_pid}",
-                                )
+                                with fu2:
+                                    st.markdown("**Imagen del producto**")
+                                    _ficha_img_file = st.file_uploader(
+                                        "Subir foto (JPG/PNG/WebP)",
+                                        type=["jpg", "jpeg", "png", "webp"],
+                                        accept_multiple_files=False,
+                                        key=f"inv_ficha_img_file_{_pid}",
+                                    )
+                                    _fimg = st.text_input(
+                                        "o pegar URL",
+                                        value=_export_cell_txt(_rw.get("imagen_url")),
+                                        key=f"inv_ficha_img_{_pid}",
+                                        help="Si subís una foto arriba, al guardar se usa esa y queda como principal en catálogo.",
+                                    )
                                 st.markdown("**Stock y precios (USD)**")
                                 fs1, fs2 = st.columns(2)
                                 _ns = fs1.number_input(
@@ -5007,6 +5016,40 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                         _upd_f["ubicacion"] = str(_fubi).strip() or None
                                     if "imagen_url" in df_view.columns:
                                         _upd_f["imagen_url"] = str(_fimg).strip() or None
+                                    if _ficha_img_file is not None and "imagen_url" in df_view.columns:
+                                        try:
+                                            bucket = _catalogo_bucket_name()
+                                            data = _ficha_img_file.getvalue()
+                                            if data:
+                                                sb.table("producto_fotos").update({"is_primary": False}).eq(
+                                                    "producto_id", str(_pid)
+                                                ).execute()
+                                                obj = _catalogo_upload_producto_foto(
+                                                    sb,
+                                                    bucket=bucket,
+                                                    producto_id=str(_pid),
+                                                    filename=str(
+                                                        getattr(_ficha_img_file, "name", "") or "foto"
+                                                    ),
+                                                    content_type=str(
+                                                        getattr(_ficha_img_file, "type", "")
+                                                        or "application/octet-stream"
+                                                    ),
+                                                    data=data,
+                                                )
+                                                sb.table("producto_fotos").insert(
+                                                    {
+                                                        "producto_id": str(_pid),
+                                                        "storage_path": obj,
+                                                        "is_primary": True,
+                                                        "created_by": erp_uid,
+                                                    }
+                                                ).execute()
+                                                _upd_f["imagen_url"] = _storage_public_object_url(bucket, obj)
+                                        except Exception as ex_img:
+                                            st.warning(
+                                                f"No se pudo subir la foto; se guardó el resto con la URL del campo texto si la hubo. Detalle: {ex_img}"
+                                            )
                                     try:
                                         sb.table("productos").update(_upd_f).eq("id", _pid).execute()
                                         st.success("Producto actualizado.")
