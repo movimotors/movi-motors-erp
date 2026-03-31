@@ -31,3 +31,5 @@ comment on table public.producto_fotos is
 comment on column public.producto_fotos.storage_path is
   'Ruta del objeto dentro del bucket (ej. productos/<producto_id>/<archivo>.jpg).';
 
+-- Misma convención que en schema_erp_multimoneda.sql (Streamlit con service_role).
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.producto_fotos TO service_role;

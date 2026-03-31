@@ -740,7 +740,38 @@ def _movi_reset_producto_alta_fields() -> None:
         "inv_alta_ubic",
         "inv_alta_img",
         "inv_alta_img_file",
+        "inv_alta_stock",
+        "inv_alta_smin",
+        "inv_alta_costo",
+        "inv_alta_pv",
     )
+
+
+def _inv_resolve_producto_id_after_insert(
+    sb: Client, *, ins_rows: list[dict[str, Any]] | None, codigo: str | None
+) -> str:
+    """PostgREST a veces no devuelve fila en `.select('id')`; recuperamos por código."""
+    rid = str((ins_rows or [{}])[0].get("id") or "").strip()
+    if rid:
+        return rid
+    c = (codigo or "").strip()
+    if not c:
+        return ""
+    try:
+        chk = sb.table("productos").select("id").eq("codigo", c).limit(1).execute()
+        return str((chk.data or [{}])[0].get("id") or "").strip()
+    except Exception:
+        return ""
+
+
+def _erp_user_uuid_or_none(erp_uid: str) -> str | None:
+    s = str(erp_uid or "").strip()
+    if re.fullmatch(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        s,
+    ):
+        return s
+    return None
 
 
 def _movi_reset_inv_ficha_product_keys(product_id: str) -> None:
@@ -4860,10 +4891,34 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                             _cond_ini = _rw.get("condicion")
                             if _cond_ini not in ("Nuevo", "Usado"):
                                 _cond_ini = "Nuevo"
+                            st.caption(
+                                f"**Producto** · ID interno `{_pid}`. "
+                                "Ubicación y foto van **fuera** del botón *Guardar cambios* para que el archivo no se pierda al enviar."
+                            )
+                            fu1, fu2 = st.columns(2)
+                            _fubi = fu1.text_input(
+                                "Ubicación en almacén",
+                                value=_export_cell_txt(_rw.get("ubicacion")),
+                                key=f"inv_ficha_ubi_{_pid}",
+                            )
+                            with fu2:
+                                st.markdown("**Imagen del producto**")
+                                _ficha_img_file = st.file_uploader(
+                                    "Subir foto (JPG/PNG/WebP)",
+                                    type=["jpg", "jpeg", "png", "webp"],
+                                    accept_multiple_files=False,
+                                    key=f"inv_ficha_img_file_{_pid}",
+                                )
+                                _fimg = st.text_input(
+                                    "o pegar URL",
+                                    value=_export_cell_txt(_rw.get("imagen_url")),
+                                    key=f"inv_ficha_img_{_pid}",
+                                    help="Si subís una foto arriba, al guardar se usa esa y queda como principal en catálogo.",
+                                )
                             with st.form(
                                 f"inv_ficha_prod_form_{_pid}_{int(st.session_state.get(f'inv_ficha_form_nonce_{_pid}', 0))}"
                             ):
-                                st.caption(f"ID interno: `{_pid}` · Los cambios reemplazan el registro en la base.")
+                                st.caption("Completá los datos y pulsá **Guardar cambios del producto** al final.")
                                 fa, fb = st.columns(2)
                                 _fcod = fa.text_input(
                                     "Código interno",
@@ -4915,26 +4970,6 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                     value=_anos_ini,
                                     key=f"inv_ficha_anos_{_pid}",
                                 )
-                                fu1, fu2 = st.columns(2)
-                                _fubi = fu1.text_input(
-                                    "Ubicación en almacén",
-                                    value=_export_cell_txt(_rw.get("ubicacion")),
-                                    key=f"inv_ficha_ubi_{_pid}",
-                                )
-                                with fu2:
-                                    st.markdown("**Imagen del producto**")
-                                    _ficha_img_file = st.file_uploader(
-                                        "Subir foto (JPG/PNG/WebP)",
-                                        type=["jpg", "jpeg", "png", "webp"],
-                                        accept_multiple_files=False,
-                                        key=f"inv_ficha_img_file_{_pid}",
-                                    )
-                                    _fimg = st.text_input(
-                                        "o pegar URL",
-                                        value=_export_cell_txt(_rw.get("imagen_url")),
-                                        key=f"inv_ficha_img_{_pid}",
-                                        help="Si subís una foto arriba, al guardar se usa esa y queda como principal en catálogo.",
-                                    )
                                 st.markdown("**Stock y precios (USD)**")
                                 fs1, fs2 = st.columns(2)
                                 _ns = fs1.number_input(
@@ -5037,14 +5072,15 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                                     ),
                                                     data=data,
                                                 )
-                                                sb.table("producto_fotos").insert(
-                                                    {
-                                                        "producto_id": str(_pid),
-                                                        "storage_path": obj,
-                                                        "is_primary": True,
-                                                        "created_by": erp_uid,
-                                                    }
-                                                ).execute()
+                                                _row_pf_ficha: dict[str, Any] = {
+                                                    "producto_id": str(_pid),
+                                                    "storage_path": obj,
+                                                    "is_primary": True,
+                                                }
+                                                _cb_fc = _erp_user_uuid_or_none(erp_uid)
+                                                if _cb_fc:
+                                                    _row_pf_ficha["created_by"] = _cb_fc
+                                                sb.table("producto_fotos").insert(_row_pf_ficha).execute()
                                                 _upd_f["imagen_url"] = _storage_public_object_url(bucket, obj)
                                         except Exception as ex_img:
                                             st.warning(
@@ -5080,6 +5116,25 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                 st.error(
                                     f"No se pudo guardar. Si el nombre ya existe, elegí otro (las categorías son únicas). Detalle: {ex}"
                                 )
+            st.caption(
+                "**Ubicación y foto** van fuera del formulario de guardado: así Streamlit no pierde el archivo "
+                "al pulsar *Guardar producto* (comportamiento conocido del selector de archivos dentro de `st.form`)."
+            )
+            _ua1, _ua2 = st.columns(2)
+            ubic = _ua1.text_input("Ubicación en almacén", key="inv_alta_ubic")
+            with _ua2:
+                st.markdown("**Foto del producto (opcional)**")
+                img_file = st.file_uploader(
+                    "Subir foto (JPG/PNG/WebP)",
+                    type=["jpg", "jpeg", "png", "webp"],
+                    accept_multiple_files=False,
+                    key="inv_alta_img_file",
+                )
+                img_url = st.text_input(
+                    "o pegar URL (opcional)",
+                    key="inv_alta_img",
+                    help="Si subís foto arriba, al guardar se usa esa y se llena `imagen_url` automáticamente.",
+                )
             with st.form(f"f_prod_{int(st.session_state.get('inv_prod_form_nonce', 0))}"):
                 desc = st.text_input("Descripción", max_chars=500, key="inv_alta_prod_desc")
                 cx, mx = st.columns(2)
@@ -5142,25 +5197,30 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                     help="Se unen con las que marcaste arriba en el catálogo.",
                 )
                 anos_auto = c2.text_input("Años / rango (opcional)", key="inv_alta_anos", placeholder="2010-2015")
-                u1, u2 = st.columns(2)
-                ubic = u1.text_input("Ubicación en almacén", key="inv_alta_ubic")
-                with u2:
-                    st.markdown("**Foto del producto (opcional)**")
-                    img_file = st.file_uploader(
-                        "Subir foto (JPG/PNG/WebP)",
-                        type=["jpg", "jpeg", "png", "webp"],
-                        accept_multiple_files=False,
-                        key="inv_alta_img_file",
-                    )
-                    img_url = st.text_input(
-                        "o pegar URL (opcional)",
-                        key="inv_alta_img",
-                        help="Si subís foto arriba, se usa esa y se llena `imagen_url` automáticamente.",
-                    )
-                stock = st.number_input("Stock actual (unidades)", min_value=0, value=0, step=1, format="%d")
-                smin = st.number_input("Stock mínimo (alerta)", min_value=0, value=0, step=1, format="%d")
-                costo = st.number_input("Costo USD", min_value=0.0, value=0.0, format="%.2f")
-                pv = st.number_input("Precio venta USD (precio_v_usd)", min_value=0.0, value=0.0, format="%.2f")
+                stock = st.number_input(
+                    "Stock actual (unidades)",
+                    min_value=0,
+                    value=0,
+                    step=1,
+                    format="%d",
+                    key="inv_alta_stock",
+                )
+                smin = st.number_input(
+                    "Stock mínimo (alerta)",
+                    min_value=0,
+                    value=0,
+                    step=1,
+                    format="%d",
+                    key="inv_alta_smin",
+                )
+                costo = st.number_input("Costo USD", min_value=0.0, value=0.0, format="%.2f", key="inv_alta_costo")
+                pv = st.number_input(
+                    "Precio venta USD (precio_v_usd)",
+                    min_value=0.0,
+                    value=0.0,
+                    format="%.2f",
+                    key="inv_alta_pv",
+                )
                 if float(costo) > 0:
                     st.caption(
                         f"Margen bruto sobre costo: **{((float(pv) - float(costo)) / float(costo) * 100):.1f}%** "
@@ -5169,6 +5229,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                 cid = cat_opts.get(cname) if cname else None
                 if st.form_submit_button("Guardar producto"):
                     try:
+                        _cb_foto = _erp_user_uuid_or_none(erp_uid)
                         _pick_mv = list(st.session_state.get("inv_alta_marcas_pick") or [])
                         _merged_mv = _inv_merge_marcas_catalogo_texto(_pick_mv, marcas_auto)
                         _compat_ins = _inv_build_compat_dict(_merged_mv, anos_auto)
@@ -5204,7 +5265,9 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                             .select("id")
                                             .execute()
                                         )
-                                        new_id = str((ins.data or [{}])[0].get("id") or "").strip()
+                                        new_id = _inv_resolve_producto_id_after_insert(
+                                            sb, ins_rows=ins.data, codigo=codigo_final
+                                        )
                                         if img_file is not None and new_id:
                                             try:
                                                 bucket = _catalogo_bucket_name()
@@ -5218,20 +5281,22 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                                         content_type=str(getattr(img_file, "type", "") or "application/octet-stream"),
                                                         data=data,
                                                     )
-                                                    sb.table("producto_fotos").insert(
-                                                        {
-                                                            "producto_id": new_id,
-                                                            "storage_path": obj,
-                                                            "is_primary": True,
-                                                            "created_by": erp_uid,
-                                                        }
-                                                    ).execute()
+                                                    row_pf: dict[str, Any] = {
+                                                        "producto_id": new_id,
+                                                        "storage_path": obj,
+                                                        "is_primary": True,
+                                                    }
+                                                    if _cb_foto:
+                                                        row_pf["created_by"] = _cb_foto
+                                                    sb.table("producto_fotos").insert(row_pf).execute()
                                                     sb.table("productos").update(
                                                         {"imagen_url": _storage_public_object_url(bucket, obj)}
                                                     ).eq("id", new_id).execute()
-                                            except Exception:
-                                                # Si falla la foto no bloquea el alta del producto.
-                                                pass
+                                            except Exception as _ex_foto:
+                                                st.warning(
+                                                    f"Producto guardado, pero la foto no se registró: {_ex_foto}. "
+                                                    "Revisá Storage (bucket), **patch_021** y `GRANT` sobre `producto_fotos`."
+                                                )
                                         _insert_ok = True
                                         break
                                     except Exception as ex_i:
@@ -5280,7 +5345,9 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                     .select("id")
                                     .execute()
                                 )
-                                new_id = str((insm.data or [{}])[0].get("id") or "").strip()
+                                new_id = _inv_resolve_producto_id_after_insert(
+                                    sb, ins_rows=insm.data, codigo=_cm
+                                )
                                 if img_file is not None and new_id:
                                     try:
                                         bucket = _catalogo_bucket_name()
@@ -5294,19 +5361,22 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                                 content_type=str(getattr(img_file, "type", "") or "application/octet-stream"),
                                                 data=data,
                                             )
-                                            sb.table("producto_fotos").insert(
-                                                {
-                                                    "producto_id": new_id,
-                                                    "storage_path": obj,
-                                                    "is_primary": True,
-                                                    "created_by": erp_uid,
-                                                }
-                                            ).execute()
+                                            row_pfm: dict[str, Any] = {
+                                                "producto_id": new_id,
+                                                "storage_path": obj,
+                                                "is_primary": True,
+                                            }
+                                            if _cb_foto:
+                                                row_pfm["created_by"] = _cb_foto
+                                            sb.table("producto_fotos").insert(row_pfm).execute()
                                             sb.table("productos").update(
                                                 {"imagen_url": _storage_public_object_url(bucket, obj)}
                                             ).eq("id", new_id).execute()
-                                    except Exception:
-                                        pass
+                                    except Exception as _ex_foto_m:
+                                        st.warning(
+                                            f"Producto guardado, pero la foto no se registró: {_ex_foto_m}. "
+                                            "Revisá Storage (bucket), **patch_021** y `GRANT` sobre `producto_fotos`."
+                                        )
                                 st.success("Producto guardado en la base.")
                                 _movi_reset_producto_alta_fields()
                                 _movi_bump_form_nonce("inv_prod_form_nonce")
@@ -6962,14 +7032,15 @@ def module_catalogo(sb: Client, erp_uid: str) -> None:
                         content_type=str(getattr(f, "type", "") or "application/octet-stream"),
                         data=data,
                     )
-                    sb.table("producto_fotos").insert(
-                        {
-                            "producto_id": pid,
-                            "storage_path": obj_path,
-                            "is_primary": False,
-                            "created_by": erp_uid,
-                        }
-                    ).execute()
+                    _row_pf_cat: dict[str, Any] = {
+                        "producto_id": pid,
+                        "storage_path": obj_path,
+                        "is_primary": False,
+                    }
+                    _cb_cat = _erp_user_uuid_or_none(erp_uid)
+                    if _cb_cat:
+                        _row_pf_cat["created_by"] = _cb_cat
+                    sb.table("producto_fotos").insert(_row_pf_cat).execute()
                     inserted_paths.append(obj_path)
                     any_uploaded = True
                 if not any_uploaded:
