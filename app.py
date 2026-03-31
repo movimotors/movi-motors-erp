@@ -33,6 +33,7 @@ from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import bcrypt
@@ -738,6 +739,7 @@ def _movi_reset_producto_alta_fields() -> None:
         "inv_alta_anos",
         "inv_alta_ubic",
         "inv_alta_img",
+        "inv_alta_img_file",
     )
 
 
@@ -1005,11 +1007,12 @@ def role_can(rol: str, module: str) -> bool:
             "compras",
             "cajas",
             "reportes",
+            "catalogo",
         }
     if rol == "vendedor":
         return module in {"ventas"}
     if rol == "almacen":
-        return module in {"inventario"}
+        return module in {"inventario", "catalogo"}
     return False
 
 
@@ -2676,6 +2679,208 @@ def _try_storage_auto_backup(sb: Client, bucket: str, day_str: str, data: bytes)
         return True
     except Exception:
         return False
+
+
+def _catalogo_bucket_name() -> str:
+    """Bucket de Supabase Storage para fotos de productos."""
+    try:
+        cfg = st.secrets.get("catalogo")
+        if isinstance(cfg, dict):
+            b = str(cfg.get("bucket") or "").strip()
+            if b:
+                return b
+    except Exception:
+        pass
+    return "movi-productos"
+
+
+def _supabase_url_base() -> str:
+    u = st.secrets["connections"]["supabase"]["SUPABASE_URL"]
+    return str(u).rstrip("/")
+
+
+def _storage_public_object_url(bucket: str, path: str) -> str:
+    base = _supabase_url_base()
+    b = quote(str(bucket).strip(), safe="")
+    p = quote(str(path).lstrip("/"), safe="/")
+    return f"{base}/storage/v1/object/public/{b}/{p}"
+
+
+def _catalogo_upload_producto_foto(
+    sb: Client,
+    *,
+    bucket: str,
+    producto_id: str,
+    filename: str,
+    content_type: str,
+    data: bytes,
+) -> str:
+    pid = str(producto_id).strip()
+    if not pid:
+        raise ValueError("producto_id vacío")
+    name = (filename or "foto").strip().replace("\\", "_").replace("/", "_")
+    if not name:
+        name = "foto"
+    ext = ""
+    if "." in name and len(name.rsplit(".", 1)[-1]) <= 8:
+        ext = "." + name.rsplit(".", 1)[-1].lower()
+    suf = secrets.token_hex(8)
+    obj_path = f"productos/{pid}/{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{suf}{ext}"
+    sb.storage.from_(bucket).upload(
+        obj_path,
+        data,
+        file_options={"content-type": str(content_type or "application/octet-stream"), "upsert": "true"},
+    )
+    return obj_path
+
+
+def _catalogo_fetch_fotos(sb: Client, producto_id: str) -> list[dict[str, Any]]:
+    pid = str(producto_id).strip()
+    if not pid:
+        return []
+    r = (
+        sb.table("producto_fotos")
+        .select("id,producto_id,storage_path,is_primary,created_at,created_by")
+        .eq("producto_id", pid)
+        .order("is_primary", desc=True)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return list(r.data or [])
+
+
+def _catalogo_set_primary(sb: Client, *, producto_id: str, foto_id: str) -> None:
+    pid = str(producto_id).strip()
+    fid = str(foto_id).strip()
+    if not pid or not fid:
+        return
+    sb.table("producto_fotos").update({"is_primary": False}).eq("producto_id", pid).execute()
+    sb.table("producto_fotos").update({"is_primary": True}).eq("id", fid).execute()
+
+
+def _catalogo_delete_foto(sb: Client, *, bucket: str, foto_row: dict[str, Any]) -> None:
+    fid = str(foto_row.get("id") or "").strip()
+    path = str(foto_row.get("storage_path") or "").strip()
+    if path:
+        try:
+            sb.storage.from_(bucket).remove([path])
+        except Exception:
+            pass
+    if fid:
+        sb.table("producto_fotos").delete().eq("id", fid).execute()
+
+
+def _catalogo_primary_path_for_producto(sb: Client, producto_id: str) -> str | None:
+    fotos = _catalogo_fetch_fotos(sb, producto_id)
+    if not fotos:
+        return None
+    prim = next((x for x in fotos if bool(x.get("is_primary"))), None) or fotos[0]
+    sp = str(prim.get("storage_path") or "").strip()
+    return sp or None
+
+
+def _html_catalogo_imprimible(
+    items: list[dict[str, Any]],
+    *,
+    titulo: str,
+    subtitulo: str,
+) -> str:
+    tz = ZoneInfo("America/Caracas")
+    fecha = datetime.now(tz).strftime("%d/%m/%Y %H:%M")
+    _logo_uri = _brand_logo_data_uri()
+    _logo_block = (
+        f'<div class="logo-wrap"><img class="logo" src="{_logo_uri}" alt="Movi Motors"/></div>'
+        if _logo_uri
+        else '<div class="logo-wrap logo-missing">Movi Motor\'s Importadora</div>'
+    )
+
+    cards: list[str] = []
+    for it in items:
+        desc = html.escape(str(it.get("descripcion") or ""))
+        cod = html.escape(str(it.get("codigo") or ""))
+        oem = html.escape(str(it.get("sku_oem") or ""))
+        precio = it.get("precio_v_usd")
+        precio_txt = _rep_fmt_precio_entero(precio)
+        img = str(it.get("imagen_url") or "").strip()
+        img_tag = f'<img class="ph" src="{html.escape(img)}" alt="{desc}"/>' if img else '<div class="ph ph-missing">Sin foto</div>'
+        oem_line = f'<div class="oem">OEM: {oem}</div>' if oem else ""
+        cards.append(
+            f"""
+            <div class="card">
+              <div class="photo">{img_tag}</div>
+              <div class="meta">
+                <div class="desc">{desc}</div>
+                <div class="code">{cod}</div>
+                {oem_line}
+                <div class="price">US$ {html.escape(precio_txt) if precio_txt else "—"}</div>
+              </div>
+            </div>
+            """
+        )
+
+    sub_html = f"<div class=\"sub\">{html.escape(subtitulo)}</div>" if subtitulo.strip() else ""
+    return f"""<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8"/>
+<title>{html.escape(titulo)}</title>
+<style>
+  @page {{ size: A4 portrait; margin: 12mm 12mm 14mm 12mm; }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    font-family: Segoe UI, Roboto, Arial, sans-serif;
+    margin: 0;
+    padding: 0.75rem 0.5rem;
+    color: #111;
+  }}
+  .logo-wrap {{ text-align:center; margin: 0 0 0.5rem 0; }}
+  .logo {{ max-height: 18mm; max-width: 52mm; width:auto; height:auto; object-fit:contain; }}
+  .logo-missing {{ font-weight:800; font-size:1rem; color:#5c2d91; letter-spacing:0.02em; }}
+  h1 {{ font-size: 1.15rem; margin: 0 0 0.2rem 0; text-align:center; color:#2a1f45; }}
+  .meta-top {{ text-align:center; color:#444; font-size:0.82rem; margin-bottom:0.45rem; }}
+  .sub {{ text-align:center; color:#333; font-size:0.78rem; margin: 0.2rem 0 0.6rem 0; }}
+  .grid {{
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.55rem;
+    align-items: stretch;
+  }}
+  .card {{
+    border: 1px solid #c9c9c9;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #fff;
+    min-height: 185px;
+  }}
+  .photo {{ width: 100%; height: 112px; background: #f6f6f6; display:flex; align-items:center; justify-content:center; }}
+  .ph {{ width: 100%; height: 112px; object-fit: cover; display:block; }}
+  .ph-missing {{ width: 100%; height: 112px; display:flex; align-items:center; justify-content:center; color:#666; font-size:0.85rem; }}
+  .meta {{ padding: 0.55rem 0.6rem; }}
+  .desc {{ font-weight: 700; font-size: 0.86rem; line-height: 1.2; min-height: 2.1em; }}
+  .code {{ color:#2a1f45; font-weight: 700; margin-top:0.2rem; font-size:0.8rem; }}
+  .oem {{ color:#444; margin-top:0.15rem; font-size:0.74rem; }}
+  .price {{ margin-top:0.35rem; font-weight: 800; font-size: 0.95rem; color:#111; }}
+  .print-actions {{ margin-top: 0.75rem; text-align:center; }}
+  @media print {{
+    body {{ padding: 0; }}
+    .print-actions {{ display:none !important; }}
+  }}
+</style>
+</head>
+<body>
+  {_logo_block}
+  <h1>{html.escape(titulo)}</h1>
+  <div class="meta-top">Generado: {html.escape(fecha)} (America/Caracas) · <strong>{len(items)}</strong> producto(s)</div>
+  {sub_html}
+  <div class="grid">
+    {''.join(cards)}
+  </div>
+  <div class="print-actions">
+    <script>function imprimir(){{ window.print(); }}</script>
+    <button type="button" onclick="imprimir()" style="padding:0.5rem 1.2rem;font-size:1rem;cursor:pointer;background:#2a1f45;color:#fff;border:none;border-radius:6px;">Imprimir</button>
+  </div>
+</body>
+</html>"""
 
 
 def maybe_run_daily_auto_backup(sb: Client, rol: str) -> None:
@@ -4896,7 +5101,19 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                 anos_auto = c2.text_input("Años / rango (opcional)", key="inv_alta_anos", placeholder="2010-2015")
                 u1, u2 = st.columns(2)
                 ubic = u1.text_input("Ubicación en almacén", key="inv_alta_ubic")
-                img_url = u2.text_input("URL imagen (Storage o web)", key="inv_alta_img")
+                with u2:
+                    st.markdown("**Foto del producto (opcional)**")
+                    img_file = st.file_uploader(
+                        "Subir foto (JPG/PNG/WebP)",
+                        type=["jpg", "jpeg", "png", "webp"],
+                        accept_multiple_files=False,
+                        key="inv_alta_img_file",
+                    )
+                    img_url = st.text_input(
+                        "o pegar URL (opcional)",
+                        key="inv_alta_img",
+                        help="Si subís foto arriba, se usa esa y se llena `imagen_url` automáticamente.",
+                    )
                 stock = st.number_input("Stock actual (unidades)", min_value=0, value=0, step=1, format="%d")
                 smin = st.number_input("Stock mínimo (alerta)", min_value=0, value=0, step=1, format="%d")
                 costo = st.number_input("Costo USD", min_value=0.0, value=0.0, format="%.2f")
@@ -4921,7 +5138,9 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                 _last_ex: Exception | None = None
                                 for _ in range(10):
                                     try:
-                                        sb.table("productos").insert(
+                                        ins = (
+                                            sb.table("productos")
+                                            .insert(
                                             {
                                                 "codigo": codigo_final,
                                                 "sku_oem": sku_oem.strip() or None,
@@ -4938,7 +5157,38 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                                 "categoria_id": cid,
                                                 "activo": True,
                                             }
-                                        ).execute()
+                                            )
+                                            .select("id")
+                                            .execute()
+                                        )
+                                        new_id = str((ins.data or [{}])[0].get("id") or "").strip()
+                                        if img_file is not None and new_id:
+                                            try:
+                                                bucket = _catalogo_bucket_name()
+                                                data = img_file.getvalue()
+                                                if data:
+                                                    obj = _catalogo_upload_producto_foto(
+                                                        sb,
+                                                        bucket=bucket,
+                                                        producto_id=new_id,
+                                                        filename=str(getattr(img_file, "name", "") or "foto"),
+                                                        content_type=str(getattr(img_file, "type", "") or "application/octet-stream"),
+                                                        data=data,
+                                                    )
+                                                    sb.table("producto_fotos").insert(
+                                                        {
+                                                            "producto_id": new_id,
+                                                            "storage_path": obj,
+                                                            "is_primary": True,
+                                                            "created_by": erp_uid,
+                                                        }
+                                                    ).execute()
+                                                    sb.table("productos").update(
+                                                        {"imagen_url": _storage_public_object_url(bucket, obj)}
+                                                    ).eq("id", new_id).execute()
+                                            except Exception:
+                                                # Si falla la foto no bloquea el alta del producto.
+                                                pass
                                         _insert_ok = True
                                         break
                                     except Exception as ex_i:
@@ -4964,7 +5214,9 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                             if not _cm:
                                 st.error("Ingresá un **código manual** o activá el generador automático.")
                             else:
-                                sb.table("productos").insert(
+                                insm = (
+                                    sb.table("productos")
+                                    .insert(
                                     {
                                         "codigo": _cm or None,
                                         "sku_oem": sku_oem.strip() or None,
@@ -4981,7 +5233,37 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                         "categoria_id": cid,
                                         "activo": True,
                                     }
-                                ).execute()
+                                    )
+                                    .select("id")
+                                    .execute()
+                                )
+                                new_id = str((insm.data or [{}])[0].get("id") or "").strip()
+                                if img_file is not None and new_id:
+                                    try:
+                                        bucket = _catalogo_bucket_name()
+                                        data = img_file.getvalue()
+                                        if data:
+                                            obj = _catalogo_upload_producto_foto(
+                                                sb,
+                                                bucket=bucket,
+                                                producto_id=new_id,
+                                                filename=str(getattr(img_file, "name", "") or "foto"),
+                                                content_type=str(getattr(img_file, "type", "") or "application/octet-stream"),
+                                                data=data,
+                                            )
+                                            sb.table("producto_fotos").insert(
+                                                {
+                                                    "producto_id": new_id,
+                                                    "storage_path": obj,
+                                                    "is_primary": True,
+                                                    "created_by": erp_uid,
+                                                }
+                                            ).execute()
+                                            sb.table("productos").update(
+                                                {"imagen_url": _storage_public_object_url(bucket, obj)}
+                                            ).eq("id", new_id).execute()
+                                    except Exception:
+                                        pass
                                 st.success("Producto guardado en la base.")
                                 _movi_reset_producto_alta_fields()
                                 _movi_bump_form_nonce("inv_prod_form_nonce")
@@ -6556,6 +6838,248 @@ def _rep_movimientos_caja_filtrados(
     return rows
 
 
+def module_catalogo(sb: Client, erp_uid: str) -> None:
+    st.subheader("Catálogo (fotos de productos)")
+    st.caption("Subí varias fotos por producto y marcá una como principal.")
+
+    bucket = _catalogo_bucket_name()
+    st.caption(f"Storage bucket: **{bucket}** (configurable en `secrets.toml` → `[catalogo] bucket = ...`)")
+
+    try:
+        prows = (
+            sb.table("productos")
+            .select("id,codigo,descripcion,imagen_url,activo")
+            .order("descripcion")
+            .limit(3000)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as ex:
+        st.error(f"No se pudieron leer productos: {ex}")
+        return
+    if not prows:
+        st.warning("No hay productos en inventario.")
+        return
+
+    labels: list[str] = []
+    id_by_label: dict[str, str] = {}
+    for p in prows:
+        pid = str(p.get("id") or "").strip()
+        if not pid:
+            continue
+        cod = (p.get("codigo") or "") or ""
+        desc = (p.get("descripcion") or "") or ""
+        lab = f"{desc[:70]} · {cod}".strip(" ·")
+        labels.append(lab)
+        id_by_label[lab] = pid
+    labels = sorted(set(labels), key=str.casefold)
+    sel = st.selectbox("Producto", options=labels, key="cat_prod_sel")
+    pid = id_by_label.get(sel, "")
+    if not pid:
+        st.error("Producto inválido.")
+        return
+
+    head = next((x for x in prows if str(x.get("id") or "") == pid), {})
+    cur_img = str(head.get("imagen_url") or "").strip()
+
+    c0, c1 = st.columns([1, 1])
+    with c0:
+        st.markdown("#### Imagen principal actual")
+        if cur_img:
+            st.image(cur_img, use_container_width=True)
+        else:
+            st.caption("Sin imagen en `productos.imagen_url`.")
+    with c1:
+        st.markdown("#### Subir fotos")
+        up = st.file_uploader(
+            "Elegí imagen(es)",
+            type=["jpg", "jpeg", "png", "webp"],
+            accept_multiple_files=True,
+            key=f"cat_upl_{pid}",
+        )
+        make_primary_first = st.checkbox(
+            "Marcar la primera foto subida como principal",
+            value=True,
+            key=f"cat_make_primary_{pid}",
+        )
+        if up and st.button("Subir", key=f"cat_do_upload_{pid}", use_container_width=True):
+            try:
+                any_uploaded = False
+                inserted_paths: list[str] = []
+                for f in up:
+                    data = f.getvalue()
+                    if not data:
+                        continue
+                    obj_path = _catalogo_upload_producto_foto(
+                        sb,
+                        bucket=bucket,
+                        producto_id=pid,
+                        filename=str(getattr(f, "name", "") or "foto"),
+                        content_type=str(getattr(f, "type", "") or "application/octet-stream"),
+                        data=data,
+                    )
+                    sb.table("producto_fotos").insert(
+                        {
+                            "producto_id": pid,
+                            "storage_path": obj_path,
+                            "is_primary": False,
+                            "created_by": erp_uid,
+                        }
+                    ).execute()
+                    inserted_paths.append(obj_path)
+                    any_uploaded = True
+                if not any_uploaded:
+                    st.warning("No se subió nada (archivos vacíos).")
+                    return
+
+                if make_primary_first and inserted_paths:
+                    fotos_now = _catalogo_fetch_fotos(sb, pid)
+                    match = next((r for r in fotos_now if str(r.get("storage_path") or "") == inserted_paths[0]), None)
+                    if match:
+                        _catalogo_set_primary(sb, producto_id=pid, foto_id=str(match["id"]))
+                        pub = _storage_public_object_url(bucket, inserted_paths[0])
+                        sb.table("productos").update({"imagen_url": pub}).eq("id", pid).execute()
+
+                st.success("Fotos subidas.")
+                st.rerun()
+            except Exception as ex:
+                st.error(
+                    f"No se pudo subir. Verificá que exista el bucket **{bucket}** en Supabase Storage (ideal público) "
+                    f"y que tu key tenga permisos. Detalle: {ex}"
+                )
+
+    st.divider()
+    st.markdown("#### Galería")
+    try:
+        fotos = _catalogo_fetch_fotos(sb, pid)
+    except Exception as ex:
+        st.error(
+            f"No se pueden leer fotos desde `producto_fotos`. Ejecutá `supabase/patch_021_catalogo_fotos_productos.sql`. "
+            f"Detalle: {ex}"
+        )
+        return
+    if not fotos:
+        st.info("Este producto aún no tiene fotos.")
+        fotos = []
+
+    ncol = 3
+    for i in range(0, len(fotos), ncol):
+        grp = fotos[i : i + ncol]
+        cs = st.columns(ncol)
+        for c, r in zip(cs, grp):
+            fid = str(r.get("id") or "")
+            path = str(r.get("storage_path") or "")
+            is_p = bool(r.get("is_primary"))
+            url = _storage_public_object_url(bucket, path) if path else ""
+            with c:
+                if is_p:
+                    st.markdown("**Principal**")
+                else:
+                    st.caption(" ")
+                if url:
+                    st.image(url, use_container_width=True)
+                else:
+                    st.warning("Sin URL.")
+                b1, b2 = st.columns(2)
+                with b1:
+                    if st.button(
+                        "Principal",
+                        key=f"cat_primary_{fid}",
+                        disabled=is_p,
+                        use_container_width=True,
+                    ):
+                        try:
+                            _catalogo_set_primary(sb, producto_id=pid, foto_id=fid)
+                            if path:
+                                sb.table("productos").update({"imagen_url": _storage_public_object_url(bucket, path)}).eq(
+                                    "id", pid
+                                ).execute()
+                            st.rerun()
+                        except Exception as ex:
+                            st.error(str(ex))
+                with b2:
+                    if st.button("Eliminar", key=f"cat_del_{fid}", use_container_width=True):
+                        try:
+                            _catalogo_delete_foto(sb, bucket=bucket, foto_row=r)
+                            after = _catalogo_fetch_fotos(sb, pid)
+                            prim = next((x for x in after if bool(x.get("is_primary"))), None)
+                            if not prim and after:
+                                _catalogo_set_primary(sb, producto_id=pid, foto_id=str(after[0]["id"]))
+                                sp = str(after[0].get("storage_path") or "")
+                                if sp:
+                                    sb.table("productos").update(
+                                        {"imagen_url": _storage_public_object_url(bucket, sp)}
+                                    ).eq("id", pid).execute()
+                            elif not after:
+                                sb.table("productos").update({"imagen_url": None}).eq("id", pid).execute()
+                            st.rerun()
+                        except Exception as ex:
+                            st.error(str(ex))
+
+    st.divider()
+    st.markdown("#### Catálogo imprimible (online / descargar HTML)")
+    st.caption("Genera una página lista para imprimir (A4). También podés abrir el HTML en el navegador y compartirlo.")
+    only_active = st.checkbox("Solo productos activos", value=True, key="cat_print_only_active")
+    precio_min = st.number_input("Precio USD mínimo (0 = sin filtro)", min_value=0.0, value=0.0, step=1.0, key="cat_print_pmin")
+    precio_max = st.number_input("Precio USD máximo (0 = sin filtro)", min_value=0.0, value=0.0, step=1.0, key="cat_print_pmax")
+    limit = st.number_input("Máximo de productos a incluir", min_value=50, max_value=3000, value=300, step=50, key="cat_print_limit")
+
+    try:
+        q = sb.table("productos").select("id,codigo,sku_oem,descripcion,precio_v_usd,imagen_url,activo").order("descripcion")
+        if only_active:
+            q = q.eq("activo", True)
+        r = q.limit(int(limit)).execute()
+        items = list(r.data or [])
+    except Exception as ex:
+        st.error(f"No se pudieron leer productos para el catálogo: {ex}")
+        items = []
+
+    # Enriquecer imagen_url con la principal del catálogo si existe.
+    try:
+        for it in items:
+            pid2 = str(it.get("id") or "").strip()
+            if not pid2:
+                continue
+            sp = _catalogo_primary_path_for_producto(sb, pid2)
+            if sp:
+                it["imagen_url"] = _storage_public_object_url(bucket, sp)
+    except Exception:
+        pass
+
+    def _in_rango_precio(x: dict[str, Any]) -> bool:
+        p = _nf(x.get("precio_v_usd"))
+        if p is None:
+            return False
+        if precio_min and float(p) < float(precio_min):
+            return False
+        if precio_max and float(precio_max) > 0 and float(p) > float(precio_max):
+            return False
+        return True
+
+    items = [x for x in items if _in_rango_precio(x)]
+    sub = []
+    if only_active:
+        sub.append("solo activos")
+    if precio_min:
+        sub.append(f"precio ≥ {precio_min:g}")
+    if precio_max:
+        sub.append(f"precio ≤ {precio_max:g}")
+    subt = " · ".join(sub)
+
+    html_cat = _html_catalogo_imprimible(items, titulo="Catálogo — Movi Motors", subtitulo=subt)
+    ts = _backup_file_timestamp()
+    st.download_button(
+        label=f"Descargar HTML imprimible — catalogo_{ts}.html",
+        data=html_cat.encode("utf-8"),
+        file_name=f"catalogo_{ts}.html",
+        mime="text/html",
+        key="cat_dl_html",
+        use_container_width=True,
+    )
+    components.html(html_cat, height=560, scrolling=True)
+
+
 def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
     st.subheader("Reportes")
     st.caption(
@@ -7554,6 +8078,8 @@ def main() -> None:
             opts.append("Dashboard")
         if role_can(rol, "inventario"):
             opts.append("Inventario")
+        if role_can(rol, "catalogo"):
+            opts.append("Catálogo")
         if role_can(rol, "ventas"):
             opts.append("Ventas / CXC")
         if role_can(rol, "compras"):
@@ -7576,6 +8102,8 @@ def main() -> None:
         module_dashboard(sb, t)
     elif mod == "Inventario" and role_can(rol, "inventario"):
         module_inventario(sb, erp_uid, t)
+    elif mod == "Catálogo" and role_can(rol, "catalogo"):
+        module_catalogo(sb, erp_uid)
     elif mod == "Ventas / CXC" and role_can(rol, "ventas"):
         module_ventas(sb, erp_uid, t)
     elif mod == "Compras / CXP" and role_can(rol, "compras"):
