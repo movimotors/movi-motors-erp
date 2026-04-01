@@ -2341,6 +2341,166 @@ def _reporte_tabla_a_csv(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
 
 
+def _md_celda_ia(x: Any, *, max_len: int = 320) -> str:
+    """Texto seguro para tablas Markdown (evita `|` y saltos de línea que rompen la tabla)."""
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        s = ""
+    else:
+        s = str(x).replace("\r\n", " ").replace("\n", " ").replace("|", "·").strip()
+    if len(s) > max_len:
+        s = s[: max_len - 1] + "…"
+    return s or "—"
+
+
+def inventario_activos_markdown_ia(sb: Client, t: dict[str, Any] | None) -> str:
+    """
+    Documento Markdown: solo productos **activos**, con stock y precios de venta.
+    Pensado para subirlo a un asistente / IA que consulte disponibilidad.
+    """
+    try:
+        cats_list = (sb.table("categorias").select("id,nombre").order("nombre").execute().data or [])
+    except Exception:
+        cats_list = []
+    id_to_n, _, _ = _categoria_maps_from_rows(cats_list)
+    df = _inv_enrich_compat_columns(_normalize_productos_inventario_df(_fetch_productos_inventario_df(sb)))
+    if df.empty:
+        now_vz = datetime.now(ZoneInfo("America/Caracas"))
+        return "\n".join(
+            [
+                "# Inventario Movi Motors — consulta de disponibilidad y precios",
+                "",
+                f"- **Generado (Caracas):** {now_vz.strftime('%Y-%m-%d %H:%M')} ({now_vz.tzname()})",
+                "",
+                "## Productos activos",
+                "",
+                "*No hay productos en la base.*",
+                "",
+            ]
+        )
+    if "categoria_id" in df.columns:
+        df["categoria"] = df["categoria_id"].apply(
+            lambda x: id_to_n.get(str(x).strip(), "")
+            if x is not None and not (isinstance(x, float) and pd.isna(x)) and str(x).strip()
+            else ""
+        )
+    else:
+        df["categoria"] = ""
+
+    if "activo" not in df.columns:
+        activos = df.iloc[0:0]
+    else:
+        activos = df.loc[df["activo"] == True].copy()  # noqa: E712
+
+    now_vz = datetime.now(ZoneInfo("America/Caracas"))
+    t_ref = t if isinstance(t, dict) else None
+    if not t_ref:
+        t_ref = latest_tasas(sb)
+    tasa_bs = None
+    fecha_tasa = None
+    if isinstance(t_ref, dict):
+        try:
+            if t_ref.get("tasa_bs") is not None:
+                tasa_bs = float(t_ref["tasa_bs"])
+        except (TypeError, ValueError):
+            tasa_bs = None
+        fecha_tasa = t_ref.get("fecha")
+
+    lines: list[str] = [
+        "# Inventario Movi Motors — consulta de disponibilidad y precios",
+        "",
+        f"- **Generado (Caracas):** {now_vz.strftime('%Y-%m-%d %H:%M')} ({now_vz.tzname()})",
+        "- **Alcance:** solo productos marcados como **activos** en el ERP.",
+        "",
+        "## Cómo usar este archivo",
+        "",
+        "Cada fila es un producto. **Stock** = unidades disponibles según el sistema (ventas bajan, compras suben). "
+        "**Precio venta USD** y **Precio venta Bs (ref.)** son los valores cargados en el maestro; "
+        "el equivalente en Bs es referencia según la tasa operativa del ERP, no necesariamente el BCV oficial.",
+        "",
+    ]
+    if tasa_bs is not None and fecha_tasa:
+        lines.append(
+            f"- **Tasa Bs/USD de referencia en base (fecha {fecha_tasa}):** {tasa_bs:,.2f} Bs por 1 USD (contexto; los Bs del producto ya vienen guardados en `precio_v_bs_ref`)."
+        )
+        lines.append("")
+    elif tasa_bs is not None:
+        lines.append(f"- **Tasa Bs/USD de referencia en base:** {tasa_bs:,.2f} Bs por 1 USD.")
+        lines.append("")
+
+    n = len(activos)
+    if n == 0:
+        lines.extend(["## Productos activos", "", "*No hay productos activos en la base.*", ""])
+        return "\n".join(lines)
+
+    con_stock = sum(1 for _, r in activos.iterrows() if _inv_stock_int(r.get("stock_actual")) > 0)
+    sin_stock = n - con_stock
+    lines.extend(
+        [
+            "## Resumen",
+            "",
+            f"- **Productos activos:** {n}",
+            f"- **Con stock > 0:** {con_stock}",
+            f"- **Sin unidades (stock 0):** {sin_stock}",
+            "",
+            "## Detalle (tabla)",
+            "",
+            "| Código | OEM | Descripción | Categoría | Marca rep. | Cond. | Stock | Mín. | ¿Bajo mín.? | Precio venta USD | Precio venta Bs ref. | Ubicación | Vehículos compat. | Años | Kit | Disponibilidad |",
+            "| --- | --- | --- | --- | --- | --- | ---: | ---: | --- | ---: | ---: | --- | --- | --- | --- | --- |",
+        ]
+    )
+
+    activos = activos.assign(
+        _cs=activos["categoria"].fillna("").map(lambda x: str(x).casefold()),
+        _ds=activos["descripcion"].fillna("").map(lambda x: str(x).casefold()),
+    )
+    activos = activos.sort_values(["_cs", "_ds"]).drop(columns=["_cs", "_ds"])
+
+    for _, r in activos.iterrows():
+        st_i = _inv_stock_int(r.get("stock_actual"))
+        smin = _inv_stock_int(r.get("stock_minimo"))
+        bajo = "sí" if st_i <= smin and smin > 0 else "no"
+        if st_i <= 0:
+            disp = "Sin unidades"
+        elif st_i <= smin and smin > 0:
+            disp = f"En stock ({st_i}) — atención: en o bajo mínimo ({smin})"
+        else:
+            disp = f"En stock ({st_i} uds.)"
+        try:
+            pv_usd = float(r.get("precio_v_usd") or 0)
+        except (TypeError, ValueError):
+            pv_usd = 0.0
+        pv_bs = r.get("precio_v_bs_ref")
+        try:
+            pv_bs_f = float(pv_bs) if pv_bs is not None and str(pv_bs) != "" else None
+        except (TypeError, ValueError):
+            pv_bs_f = None
+        es_kit = r.get("es_compuesto")
+        kit_txt = "sí" if es_kit else "no"
+
+        row_cells = [
+            _md_celda_ia(r.get("codigo"), max_len=48),
+            _md_celda_ia(r.get("sku_oem"), max_len=64),
+            _md_celda_ia(r.get("descripcion"), max_len=280),
+            _md_celda_ia(r.get("categoria"), max_len=64),
+            _md_celda_ia(r.get("marca_producto"), max_len=48),
+            _md_celda_ia(r.get("condicion"), max_len=12),
+            str(st_i),
+            str(smin),
+            bajo,
+            f"{pv_usd:,.2f}",
+            f"{pv_bs_f:,.2f}" if pv_bs_f is not None else "—",
+            _md_celda_ia(r.get("ubicacion"), max_len=120),
+            _md_celda_ia(r.get("vehiculos_compat"), max_len=200),
+            _md_celda_ia(r.get("años_compat"), max_len=80),
+            kit_txt,
+            _md_celda_ia(disp, max_len=120),
+        ]
+        lines.append("| " + " | ".join(row_cells) + " |")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _pdf_inventario_col_widths_for_keys(keys: list[str], total_w: float) -> list[float]:
     """Ancho PDF por columnas; evita celdas tan angostas que ReportLab falle (availWidth negativo con Paragraph)."""
     if not keys or total_w <= 0:
@@ -5878,6 +6038,25 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                 except Exception:
                     pass
 
+    _ts_inv_md = _backup_file_timestamp()
+    with st.expander("Inventario activo en Markdown (.md) — para asistente / IA", expanded=False):
+        st.caption(
+            "Mismo contenido que en **Reportes → Inventario**: tabla en Markdown con **solo productos activos**, "
+            "stock, precios de venta y texto de **disponibilidad** por ítem."
+        )
+        try:
+            _md_inv = inventario_activos_markdown_ia(sb, t)
+            st.download_button(
+                label=f"Descargar — inventario_ia_{_ts_inv_md}.md",
+                data=_md_inv.encode("utf-8"),
+                file_name=f"inventario_ia_{_ts_inv_md}.md",
+                mime="text/markdown",
+                key="inv_dl_md_ia",
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.error(str(e))
+
     st.caption(
         "CSV: obligatorias **codigo** (en import no hay autogenerado; ponelos vos), **descripcion**, **stock_actual**, "
         "**stock_minimo**, **costo_usd**, **precio_v_usd**. Opcional: **categoria**, **sku_oem**, **marca_producto**, "
@@ -6782,6 +6961,24 @@ def module_cajas(sb: Client, erp_uid: str) -> None:
 
 
 def panel_reportes_inventario_export(sb: Client, t: dict[str, Any] | None) -> None:
+    _ts_md = _backup_file_timestamp()
+    with st.expander("Markdown (.md) para asistente / IA — inventario activo", expanded=False):
+        st.caption(
+            "Archivo **.md** con productos **activos**: stock, precios de venta (USD y Bs ref.), categoría y compatibilidad. "
+            "Sirve para subirlo a una IA que consulte disponibilidad y precios."
+        )
+        try:
+            _md_ia = inventario_activos_markdown_ia(sb, t)
+            st.download_button(
+                label=f"Descargar — inventario_ia_{_ts_md}.md",
+                data=_md_ia.encode("utf-8"),
+                file_name=f"inventario_ia_{_ts_md}.md",
+                mime="text/markdown",
+                key="rep_inv_dl_md_ia",
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.error(str(e))
     if not t:
         st.warning("Registrá tasas en el **Dashboard** para que el reporte muestre referencias en Bs.")
         return
