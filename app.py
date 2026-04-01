@@ -795,15 +795,12 @@ def _inv_alta_producto_id_missing_help() -> str:
 
 def _movi_productos_insert_execute(sb: Client, row: dict[str, Any]) -> Any:
     """
-    Compatibilidad postgrest-py / supabase:
-    - Reciente: `insert(row)` devuelve un builder **sin** `.select()`; basta `.execute()`
-      (el propio insert ya pide `return=representation` por defecto).
-    - Antigua: `insert(row).select('id').execute()`.
+    Insert en `productos`. No encadenar `.select()` tras `.insert()`: en postgrest-py
+    reciente el builder es SyncQueryRequestBuilder y **no tiene** `.select()` (AttributeError).
+    El insert ya usa `return=representation` por defecto; si el cuerpo viniera vacío,
+    `_inv_resolve_producto_id_after_insert` busca por `codigo`.
     """
-    b = sb.table("productos").insert(row)
-    if hasattr(b, "select"):
-        return b.select("id").execute()
-    return b.execute()
+    return sb.table("productos").insert(row).execute()
 
 
 def _erp_user_uuid_or_none(erp_uid: str) -> str | None:
@@ -5420,9 +5417,16 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                 _movi_bump_form_nonce("inv_prod_form_nonce")
                                 st.rerun()
                     except Exception as ex:
+                        _em = str(ex)
                         st.error(
-                            f"No se pudo guardar el producto: {ex}. "
+                            f"No se pudo guardar el producto: {_em}. "
                             "Si falta alguna columna, ejecutá **patch_011_productos_repuestos.sql** en Supabase."
+                            + (
+                                " · Si el error dice **SyncQueryRequestBuilder** y **select**, hacé **git pull**, "
+                                "reiniciá Streamlit y confirmá que corrés este `app.py` del repo (no una copia vieja)."
+                                if "select" in _em.lower() and "syncquery" in _em.lower()
+                                else ""
+                            )
                         )
 
         with _t_kit:
