@@ -750,7 +750,7 @@ def _movi_reset_producto_alta_fields() -> None:
 def _inv_resolve_producto_id_after_insert(
     sb: Client, *, ins_rows: list[dict[str, Any]] | None, codigo: str | None
 ) -> str:
-    """PostgREST a veces no devuelve fila en `.select('id')`; recuperamos por código."""
+    """Si la respuesta del insert no trae `id`, recuperamos por código (único)."""
     rid = str((ins_rows or [{}])[0].get("id") or "").strip()
     if rid:
         return rid
@@ -5242,9 +5242,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                 _last_ex: Exception | None = None
                                 for _ in range(10):
                                     try:
-                                        ins = (
-                                            sb.table("productos")
-                                            .insert(
+                                        ins = sb.table("productos").insert(
                                             {
                                                 "codigo": codigo_final,
                                                 "sku_oem": sku_oem.strip() or None,
@@ -5261,10 +5259,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                                 "categoria_id": cid,
                                                 "activo": True,
                                             }
-                                            )
-                                            .select("id")
-                                            .execute()
-                                        )
+                                        ).execute()
                                         new_id = _inv_resolve_producto_id_after_insert(
                                             sb, ins_rows=ins.data, codigo=codigo_final
                                         )
@@ -5322,9 +5317,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                             if not _cm:
                                 st.error("Ingresá un **código manual** o activá el generador automático.")
                             else:
-                                insm = (
-                                    sb.table("productos")
-                                    .insert(
+                                insm = sb.table("productos").insert(
                                     {
                                         "codigo": _cm or None,
                                         "sku_oem": sku_oem.strip() or None,
@@ -5341,10 +5334,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                         "categoria_id": cid,
                                         "activo": True,
                                     }
-                                    )
-                                    .select("id")
-                                    .execute()
-                                )
+                                ).execute()
                                 new_id = _inv_resolve_producto_id_after_insert(
                                     sb, ins_rows=insm.data, codigo=_cm
                                 )
