@@ -7075,9 +7075,13 @@ def _rep_movimientos_caja_filtrados(
 
 def panel_reportes_catalogo_fotos(sb: Client, erp_uid: str) -> None:
     st.markdown("#### Catálogo: fotos y etiquetas imprimibles")
+    st.info(
+        "**¿Para qué sirve esto?** Las fotos **no cambian el precio ni el stock**: solo ayudan a **reconocer el repuesto**. "
+        "Sirven para mandar la foto al cliente por **WhatsApp**, enseñarla en el **mostrador**, o **imprimir** una hoja con foto y código. "
+        "El sistema guarda **varias fotos** por producto, pero **una sola** es la “de portada”: la que se ve primero en listados y en el catálogo HTML."
+    )
     st.caption(
-        "Elegí un producto para ver o subir fotos. **Foto de portada** = la imagen que el sistema usa como “cara” del producto: "
-        "la grande de la izquierda, el catálogo imprimible (HTML) y donde el inventario muestre una sola foto."
+        "**Siguiente paso:** elegí un producto en el desplegable de abajo para subir imágenes, elegir la de portada o generar el HTML para imprimir."
     )
 
     bucket = _catalogo_bucket_name()
