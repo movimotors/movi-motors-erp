@@ -24,6 +24,11 @@ En Streamlit Cloud, los logs mostraban que la app clona **`erp2movi`**. Por eso,
 bucket = "movi-productos"
 ```
 
+### Después de cambiar código (nube al día)
+
+1. **Push** al repositorio que Streamlit Cloud tiene conectado (suele ser **`erp2movi`**; si solo empujás a **`movi-motors-erp`**, la URL `.streamlit.app` no verá esos commits hasta que empujes al otro remoto o cambies el repo en Cloud).
+2. En [share.streamlit.io](https://share.streamlit.io) → tu app → **Manage app** → **Reboot** o **Redeploy** si no se actualiza sola.
+
 ### Qué falta / próximos pasos
 
 1) Asegurar que **Streamlit Cloud** esté desplegando desde `movimotors/erp2movi` y que tenga los **Secrets** correctos.
