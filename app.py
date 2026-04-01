@@ -2764,20 +2764,32 @@ def _catalogo_bucket_name() -> str:
     return "movi-productos"
 
 
-def _catalogo_fotos_enabled() -> bool:
+def _catalogo_storage_portada_enabled() -> bool:
     """
-    Si es False: no se muestra la pestaña de catálogo/fotos en Reportes, no se suben archivos a Storage
-    desde Inventario (sigue pudiendo usarse solo texto URL en imagen_url). Ahorra uso de Storage y consultas a producto_fotos.
-    En secrets.toml: [catalogo] enabled = false
+    Subir archivos a Storage, galería y foto de portada en la nube.
+    Si es False: NO se oculta el catálogo HTML en Reportes (listados/etiquetas siguen); solo se quitan subida y galería.
+    Inventario: solo campo URL para imagen_url, sin selector de archivo.
+
+    secrets.toml → [catalogo]:
+      storage_fotos = false   (recomendado)
+      enabled = false         (mismo efecto; nombre viejo por compatibilidad)
+    Si definís ambos, manda `storage_fotos`.
     """
     try:
         cfg = st.secrets.get("catalogo")
-        if not isinstance(cfg, dict) or "enabled" not in cfg:
+        if not isinstance(cfg, dict):
             return True
-        v = cfg.get("enabled")
-        if isinstance(v, str):
-            return v.strip().lower() not in ("0", "false", "no", "off", "")
-        return bool(v)
+        if "storage_fotos" in cfg:
+            v = cfg.get("storage_fotos")
+            if isinstance(v, str):
+                return v.strip().lower() not in ("0", "false", "no", "off", "")
+            return bool(v)
+        if "enabled" in cfg:
+            v = cfg.get("enabled")
+            if isinstance(v, str):
+                return v.strip().lower() not in ("0", "false", "no", "off", "")
+            return bool(v)
+        return True
     except Exception:
         return True
 
@@ -5033,7 +5045,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                             )
                             with fu2:
                                 st.markdown("**Imagen del producto**")
-                                if _catalogo_fotos_enabled():
+                                if _catalogo_storage_portada_enabled():
                                     _ficha_img_file = st.file_uploader(
                                         "Subir foto (JPG/PNG/WebP)",
                                         type=["jpg", "jpeg", "png", "webp"],
@@ -5191,7 +5203,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                     if "imagen_url" in df_view.columns:
                                         _upd_f["imagen_url"] = str(_fimg).strip() or None
                                     if (
-                                        _catalogo_fotos_enabled()
+                                        _catalogo_storage_portada_enabled()
                                         and _ficha_img_file is not None
                                         and "imagen_url" in df_view.columns
                                     ):
@@ -5266,18 +5278,18 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                 )
             st.caption(
                 "**Ubicación"
-                + (" y foto** van" if _catalogo_fotos_enabled() else "** va")
+                + (" y foto** van" if _catalogo_storage_portada_enabled() else "** va")
                 + " fuera del formulario de guardado"
                 + (
                     ": así Streamlit no pierde el archivo al pulsar *Guardar producto* (selector de archivos fuera de `st.form`)."
-                    if _catalogo_fotos_enabled()
+                    if _catalogo_storage_portada_enabled()
                     else "."
                 )
             )
             _ua1, _ua2 = st.columns(2)
             ubic = _ua1.text_input("Ubicación en almacén", key="inv_alta_ubic")
             with _ua2:
-                if _catalogo_fotos_enabled():
+                if _catalogo_storage_portada_enabled():
                     st.markdown("**Foto del producto (opcional)**")
                     img_file = st.file_uploader(
                         "Subir foto (JPG/PNG/WebP)",
@@ -5429,7 +5441,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                         )
                                         if not new_id:
                                             raise RuntimeError(_inv_alta_producto_id_missing_help())
-                                        if _catalogo_fotos_enabled() and img_file is not None and new_id:
+                                        if _catalogo_storage_portada_enabled() and img_file is not None and new_id:
                                             try:
                                                 bucket = _catalogo_bucket_name()
                                                 data = img_file.getvalue()
@@ -5508,7 +5520,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                 )
                                 if not new_id:
                                     raise RuntimeError(_inv_alta_producto_id_missing_help())
-                                if _catalogo_fotos_enabled() and img_file is not None and new_id:
+                                if _catalogo_storage_portada_enabled() and img_file is not None and new_id:
                                     try:
                                         bucket = _catalogo_bucket_name()
                                         data = img_file.getvalue()
@@ -7120,21 +7132,22 @@ def _rep_movimientos_caja_filtrados(
 
 
 def panel_reportes_catalogo_fotos(sb: Client, erp_uid: str) -> None:
-    st.markdown("#### Catálogo: fotos y etiquetas imprimibles")
+    st.markdown("#### Catálogo y etiquetas imprimibles")
+    storage_on = _catalogo_storage_portada_enabled()
     st.info(
-        "**¿Para qué sirve esto?** Las fotos **no cambian el precio ni el stock**: solo ayudan a **reconocer el repuesto**. "
-        "Sirven para mandar la foto al cliente por **WhatsApp**, enseñarla en el **mostrador**, o **imprimir** una hoja con foto y código. "
-        "El sistema guarda **varias fotos** por producto, pero **una sola** es la “de portada”: la que se ve primero en listados y en el catálogo HTML. "
-        "**Si no las usás**, en `secrets.toml` podés poner `[catalogo] enabled = false` y el ERP deja de mostrar esta sección y de subir archivos a Storage."
+        "**Catálogo (lo principal):** más abajo armás una **página HTML** con código, descripción y precio para **imprimir** o mandar listados y etiquetas. "
+        "**Fotos de portada** (subir archivos a la nube, galería) son **opcionales** y no cambian stock ni precios. "
+        "Si no las querés, en `secrets` → `[catalogo]` poné **`storage_fotos = false`** (o `enabled = false`): se ocultan subida y galería, pero **el HTML del catálogo sigue**. "
+        "Una imagen en el HTML puede salir igual si cargás una **URL** a mano en **Inventario**."
     )
-    st.caption(
-        "**Siguiente paso:** elegí un producto en el desplegable de abajo para subir imágenes, elegir la de portada o generar el HTML para imprimir."
-    )
-
-    bucket = _catalogo_bucket_name()
-    st.caption(
-        f"Almacenamiento en Supabase Storage, bucket **{bucket}** (se puede cambiar en `secrets.toml` → `[catalogo] bucket = ...`)."
-    )
+    if storage_on:
+        st.caption(
+            "Elegí un producto para subir fotos, galería o generar el HTML. La **portada** es la imagen que el sistema prioriza en ese HTML."
+        )
+    else:
+        st.caption(
+            "**Subida y galería apagadas** en configuración. Usá el producto de abajo para el modo *uno* y el bloque HTML; imágenes solo si hay URL en la ficha del producto."
+        )
 
     try:
         prows = (
@@ -7166,10 +7179,10 @@ def panel_reportes_catalogo_fotos(sb: Client, erp_uid: str) -> None:
         id_by_label[lab] = pid
     labels = sorted(set(labels), key=str.casefold)
     sel = st.selectbox(
-        "Producto a editar",
+        "Producto",
         options=labels,
         key="cat_prod_sel",
-        help="Lista de productos del inventario. Escribí en el cuadro para filtrar por nombre o código.",
+        help="Sirve para el modo *uno* del HTML y, si hay subida de fotos, para ese producto. Escribí para filtrar.",
     )
     pid = id_by_label.get(sel, "")
     if not pid:
@@ -7179,149 +7192,163 @@ def panel_reportes_catalogo_fotos(sb: Client, erp_uid: str) -> None:
     head = next((x for x in prows if str(x.get("id") or "") == pid), {})
     cur_img = str(head.get("imagen_url") or "").strip()
 
-    c0, c1 = st.columns([1, 1])
-    with c0:
-        st.markdown("#### Foto de portada (vista previa)")
-        st.caption("Es la imagen que se muestra hoy para este producto en listados y catálogo.")
+    if storage_on:
+        bucket = _catalogo_bucket_name()
+        st.caption(
+            f"Almacenamiento de fotos: bucket **{bucket}** (`secrets` → `[catalogo] bucket = ...`)."
+        )
+        c0, c1 = st.columns([1, 1])
+        with c0:
+            st.markdown("#### Foto de portada (vista previa)")
+            st.caption("Imagen que muestra el sistema hoy para este producto (listados y catálogo HTML).")
+            if cur_img:
+                st.image(cur_img, use_container_width=True)
+            else:
+                st.caption("Sin URL todavía. Subí una acá o en **Inventario**, o elegí una en la galería.")
+        with c1:
+            st.markdown("#### Subir fotos")
+            up = st.file_uploader(
+                "Elegí una o varias imágenes",
+                type=["jpg", "jpeg", "png", "webp"],
+                accept_multiple_files=True,
+                key=f"cat_upl_{pid}",
+                help="JPG, PNG o WebP. Podés subir varias a la vez; en la galería elegís cuál será la foto de portada.",
+            )
+            make_primary_first = st.checkbox(
+                "La primera foto que suba pasa a ser la de portada automáticamente",
+                value=True,
+                key=f"cat_make_primary_{pid}",
+                help="Si lo desmarcás, las nuevas fotos solo se guardan en la galería; después tocá **Poner como portada** en la que quieras.",
+            )
+            if up and st.button("Subir", key=f"cat_do_upload_{pid}", use_container_width=True):
+                try:
+                    any_uploaded = False
+                    inserted_paths: list[str] = []
+                    for f in up:
+                        data = f.getvalue()
+                        if not data:
+                            continue
+                        obj_path = _catalogo_upload_producto_foto(
+                            sb,
+                            bucket=bucket,
+                            producto_id=pid,
+                            filename=str(getattr(f, "name", "") or "foto"),
+                            content_type=str(getattr(f, "type", "") or "application/octet-stream"),
+                            data=data,
+                        )
+                        _row_pf_cat: dict[str, Any] = {
+                            "producto_id": pid,
+                            "storage_path": obj_path,
+                            "is_primary": False,
+                        }
+                        _cb_cat = _erp_user_uuid_or_none(erp_uid)
+                        if _cb_cat:
+                            _row_pf_cat["created_by"] = _cb_cat
+                        sb.table("producto_fotos").insert(_row_pf_cat).execute()
+                        inserted_paths.append(obj_path)
+                        any_uploaded = True
+                    if not any_uploaded:
+                        st.warning("No se subió nada (archivos vacíos).")
+                        return
+
+                    if make_primary_first and inserted_paths:
+                        fotos_now = _catalogo_fetch_fotos(sb, pid)
+                        match = next((r for r in fotos_now if str(r.get("storage_path") or "") == inserted_paths[0]), None)
+                        if match:
+                            _catalogo_set_primary(sb, producto_id=pid, foto_id=str(match["id"]))
+                            pub = _storage_public_object_url(bucket, inserted_paths[0])
+                            sb.table("productos").update({"imagen_url": pub}).eq("id", pid).execute()
+
+                    st.success("Fotos subidas.")
+                    st.rerun()
+                except Exception as ex:
+                    st.error(
+                        f"No se pudo subir. Verificá que exista el bucket **{bucket}** en Supabase Storage (ideal público) "
+                        f"y que tu key tenga permisos. Detalle: {ex}"
+                    )
+
+        st.divider()
+        st.markdown("#### Galería")
+        st.caption(
+            "Todas las fotos del producto en Storage. **Solo una** es la de portada (la que se prioriza en el HTML). "
+            "El resto son adicionales."
+        )
+        try:
+            fotos = _catalogo_fetch_fotos(sb, pid)
+        except Exception as ex:
+            st.error(
+                f"No se pueden leer fotos desde `producto_fotos`. Ejecutá `supabase/patch_021_catalogo_fotos_productos.sql`. "
+                f"Detalle: {ex}"
+            )
+            return
+        if not fotos:
+            st.info("Este producto aún no tiene fotos en la galería.")
+            fotos = []
+
+        ncol = 3
+        for i in range(0, len(fotos), ncol):
+            grp = fotos[i : i + ncol]
+            cs = st.columns(ncol)
+            for c, r in zip(cs, grp):
+                fid = str(r.get("id") or "")
+                path = str(r.get("storage_path") or "")
+                is_p = _catalogo_row_is_primary(r)
+                url = _storage_public_object_url(bucket, path) if path else ""
+                with c:
+                    if is_p:
+                        st.markdown("**Foto de portada**")
+                        st.caption("Esta es la que se muestra en listados y catálogo.")
+                    else:
+                        st.caption(" ")
+                    if url:
+                        st.image(url, use_container_width=True)
+                    else:
+                        st.warning("Sin URL.")
+                    b1, b2 = st.columns(2)
+                    with b1:
+                        if st.button(
+                            "Poner como portada",
+                            key=f"cat_primary_{fid}",
+                            disabled=is_p,
+                            use_container_width=True,
+                            help="Esta imagen pasará a ser la que se ve en inventario y en el HTML imprimible.",
+                        ):
+                            try:
+                                _catalogo_set_primary(sb, producto_id=pid, foto_id=fid)
+                                if path:
+                                    sb.table("productos").update({"imagen_url": _storage_public_object_url(bucket, path)}).eq(
+                                        "id", pid
+                                    ).execute()
+                                st.rerun()
+                            except Exception as ex:
+                                st.error(str(ex))
+                    with b2:
+                        if st.button("Eliminar", key=f"cat_del_{fid}", use_container_width=True):
+                            try:
+                                _catalogo_delete_foto(sb, bucket=bucket, foto_row=r)
+                                after = _catalogo_fetch_fotos(sb, pid)
+                                prim = next((x for x in after if bool(x.get("is_primary"))), None)
+                                if not prim and after:
+                                    _catalogo_set_primary(sb, producto_id=pid, foto_id=str(after[0]["id"]))
+                                    sp = str(after[0].get("storage_path") or "")
+                                    if sp:
+                                        sb.table("productos").update(
+                                            {"imagen_url": _storage_public_object_url(bucket, sp)}
+                                        ).eq("id", pid).execute()
+                                elif not after:
+                                    sb.table("productos").update({"imagen_url": None}).eq("id", pid).execute()
+                                st.rerun()
+                            except Exception as ex:
+                                st.error(str(ex))
+    else:
+        st.markdown("#### Imagen (solo si hay URL en el producto)")
+        st.caption(
+            "No hay subida a Storage desde acá. Si en **Inventario** cargaste una **URL** en el producto, se previsualiza abajo y puede salir en el HTML."
+        )
         if cur_img:
             st.image(cur_img, use_container_width=True)
         else:
-            st.caption("Todavía no hay foto de portada (`productos.imagen_url`). Subí una o elegí una en la galería abajo.")
-    with c1:
-        st.markdown("#### Subir fotos")
-        up = st.file_uploader(
-            "Elegí una o varias imágenes",
-            type=["jpg", "jpeg", "png", "webp"],
-            accept_multiple_files=True,
-            key=f"cat_upl_{pid}",
-            help="JPG, PNG o WebP. Podés subir varias a la vez; en la galería elegís cuál será la foto de portada.",
-        )
-        make_primary_first = st.checkbox(
-            "La primera foto que suba pasa a ser la de portada automáticamente",
-            value=True,
-            key=f"cat_make_primary_{pid}",
-            help="Si lo desmarcás, las nuevas fotos solo se guardan en la galería; después tocá **Poner como portada** en la que quieras.",
-        )
-        if up and st.button("Subir", key=f"cat_do_upload_{pid}", use_container_width=True):
-            try:
-                any_uploaded = False
-                inserted_paths: list[str] = []
-                for f in up:
-                    data = f.getvalue()
-                    if not data:
-                        continue
-                    obj_path = _catalogo_upload_producto_foto(
-                        sb,
-                        bucket=bucket,
-                        producto_id=pid,
-                        filename=str(getattr(f, "name", "") or "foto"),
-                        content_type=str(getattr(f, "type", "") or "application/octet-stream"),
-                        data=data,
-                    )
-                    _row_pf_cat: dict[str, Any] = {
-                        "producto_id": pid,
-                        "storage_path": obj_path,
-                        "is_primary": False,
-                    }
-                    _cb_cat = _erp_user_uuid_or_none(erp_uid)
-                    if _cb_cat:
-                        _row_pf_cat["created_by"] = _cb_cat
-                    sb.table("producto_fotos").insert(_row_pf_cat).execute()
-                    inserted_paths.append(obj_path)
-                    any_uploaded = True
-                if not any_uploaded:
-                    st.warning("No se subió nada (archivos vacíos).")
-                    return
-
-                if make_primary_first and inserted_paths:
-                    fotos_now = _catalogo_fetch_fotos(sb, pid)
-                    match = next((r for r in fotos_now if str(r.get("storage_path") or "") == inserted_paths[0]), None)
-                    if match:
-                        _catalogo_set_primary(sb, producto_id=pid, foto_id=str(match["id"]))
-                        pub = _storage_public_object_url(bucket, inserted_paths[0])
-                        sb.table("productos").update({"imagen_url": pub}).eq("id", pid).execute()
-
-                st.success("Fotos subidas.")
-                st.rerun()
-            except Exception as ex:
-                st.error(
-                    f"No se pudo subir. Verificá que exista el bucket **{bucket}** en Supabase Storage (ideal público) "
-                    f"y que tu key tenga permisos. Detalle: {ex}"
-                )
-
-    st.divider()
-    st.markdown("#### Galería")
-    st.caption(
-        "Todas las fotos del producto. **Solo una** puede ser la de portada (la que se ve arriba a la izquierda y en el catálogo HTML). "
-        "El resto son adicionales."
-    )
-    try:
-        fotos = _catalogo_fetch_fotos(sb, pid)
-    except Exception as ex:
-        st.error(
-            f"No se pueden leer fotos desde `producto_fotos`. Ejecutá `supabase/patch_021_catalogo_fotos_productos.sql`. "
-            f"Detalle: {ex}"
-        )
-        return
-    if not fotos:
-        st.info("Este producto aún no tiene fotos.")
-        fotos = []
-
-    ncol = 3
-    for i in range(0, len(fotos), ncol):
-        grp = fotos[i : i + ncol]
-        cs = st.columns(ncol)
-        for c, r in zip(cs, grp):
-            fid = str(r.get("id") or "")
-            path = str(r.get("storage_path") or "")
-            is_p = _catalogo_row_is_primary(r)
-            url = _storage_public_object_url(bucket, path) if path else ""
-            with c:
-                if is_p:
-                    st.markdown("**Foto de portada**")
-                    st.caption("Esta es la que se muestra en listados y catálogo.")
-                else:
-                    st.caption(" ")
-                if url:
-                    st.image(url, use_container_width=True)
-                else:
-                    st.warning("Sin URL.")
-                b1, b2 = st.columns(2)
-                with b1:
-                    if st.button(
-                        "Poner como portada",
-                        key=f"cat_primary_{fid}",
-                        disabled=is_p,
-                        use_container_width=True,
-                        help="Esta imagen pasará a ser la que se ve en inventario y en el HTML imprimible.",
-                    ):
-                        try:
-                            _catalogo_set_primary(sb, producto_id=pid, foto_id=fid)
-                            if path:
-                                sb.table("productos").update({"imagen_url": _storage_public_object_url(bucket, path)}).eq(
-                                    "id", pid
-                                ).execute()
-                            st.rerun()
-                        except Exception as ex:
-                            st.error(str(ex))
-                with b2:
-                    if st.button("Eliminar", key=f"cat_del_{fid}", use_container_width=True):
-                        try:
-                            _catalogo_delete_foto(sb, bucket=bucket, foto_row=r)
-                            after = _catalogo_fetch_fotos(sb, pid)
-                            prim = next((x for x in after if bool(x.get("is_primary"))), None)
-                            if not prim and after:
-                                _catalogo_set_primary(sb, producto_id=pid, foto_id=str(after[0]["id"]))
-                                sp = str(after[0].get("storage_path") or "")
-                                if sp:
-                                    sb.table("productos").update(
-                                        {"imagen_url": _storage_public_object_url(bucket, sp)}
-                                    ).eq("id", pid).execute()
-                            elif not after:
-                                sb.table("productos").update({"imagen_url": None}).eq("id", pid).execute()
-                            st.rerun()
-                        except Exception as ex:
-                            st.error(str(ex))
+            st.caption("Este producto no tiene URL de imagen en la base.")
 
     st.divider()
     st.markdown("#### Catálogo / etiquetas imprimibles (HTML)")
@@ -7394,16 +7421,18 @@ def panel_reportes_catalogo_fotos(sb: Client, erp_uid: str) -> None:
         st.error(f"No se pudieron leer productos para el catálogo: {ex}")
         items_pool = []
 
-    try:
-        for it in items_pool:
-            pid2 = str(it.get("id") or "").strip()
-            if not pid2:
-                continue
-            sp = _catalogo_primary_path_for_producto(sb, pid2)
-            if sp:
-                it["imagen_url"] = _storage_public_object_url(bucket, sp)
-    except Exception:
-        pass
+    if storage_on:
+        try:
+            bucket_html = _catalogo_bucket_name()
+            for it in items_pool:
+                pid2 = str(it.get("id") or "").strip()
+                if not pid2:
+                    continue
+                sp = _catalogo_primary_path_for_producto(sb, pid2)
+                if sp:
+                    it["imagen_url"] = _storage_public_object_url(bucket_html, sp)
+        except Exception:
+            pass
 
     def _in_rango_precio(x: dict[str, Any]) -> bool:
         p = _nf(x.get("precio_v_usd"))
@@ -7494,7 +7523,6 @@ def module_reportes(sb: Client, erp_uid: str, t: dict[str, Any] | None, rol: str
         return
 
     st.subheader("Reportes")
-    cat_fotos_on = _catalogo_fotos_enabled()
     have_t = bool(t) if can_fin else True
     t_bs = float(t["tasa_bs"]) if t else 0.0
     t_usdt = float(t["tasa_usdt"]) if t else 0.0
@@ -7506,54 +7534,31 @@ def module_reportes(sb: Client, erp_uid: str, t: dict[str, Any] | None, rol: str
             "las columnas en bolívares son **referencia** según la tasa del día guardada abajo."
         )
         if not have_t:
-            _w_tasas = (
-                "Aún no hay **tasas del día** cargadas en el Dashboard: los reportes en bolívares no se muestran hasta que las registres."
+            st.warning(
+                "Aún no hay **tasas del día** cargadas en el Dashboard: los reportes en bolívares no se muestran hasta que las registres. "
+                "La pestaña **Catálogo y etiquetas** funciona igual."
             )
-            if cat_fotos_on:
-                _w_tasas += " La pestaña **Catálogo y etiquetas** funciona igual."
-            st.warning(_w_tasas)
         else:
             st.caption(
                 f"Referencia: 1 USD equivale a **Bs** {int(round(t_bs)):,d} · **USDT** {int(round(t_usdt)):,d}"
             )
     else:
-        if cat_fotos_on:
-            st.caption(
-                "Catálogo de productos: **fotos** (una de portada + galería) y **página HTML** para imprimir etiquetas o listados."
-            )
-        else:
-            st.warning(
-                "Las **fotos de producto y el catálogo HTML** están **desactivados** en la configuración "
-                "(`secrets` → `[catalogo]` → `enabled = false`). No se usa Storage ni la tabla de fotos desde esta pantalla."
-            )
-            st.caption(
-                "Si querés volver a usarlas, poné `enabled = true` o quitá la clave `enabled`. "
-                "Los demás reportes no dependen de las fotos."
-            )
-            return
+        st.caption(
+            "**Catálogo y etiquetas:** página HTML para imprimir listados y fichas. "
+            "La subida de fotos a la nube es opcional y se puede apagar en `secrets` → `[catalogo]` → `storage_fotos`."
+        )
 
     if can_fin:
-        if cat_fotos_on:
-            tab_inv, tab_caja, tab_ven, tab_comp, tab_cartera, tab_cat = st.tabs(
-                [
-                    "Inventario",
-                    "Entradas y salidas de caja",
-                    "Ventas",
-                    "Compras",
-                    "Quién debe / a quién debemos",
-                    "Catálogo y etiquetas",
-                ]
-            )
-        else:
-            tab_inv, tab_caja, tab_ven, tab_comp, tab_cartera = st.tabs(
-                [
-                    "Inventario",
-                    "Entradas y salidas de caja",
-                    "Ventas",
-                    "Compras",
-                    "Quién debe / a quién debemos",
-                ]
-            )
+        tab_inv, tab_caja, tab_ven, tab_comp, tab_cartera, tab_cat = st.tabs(
+            [
+                "Inventario",
+                "Entradas y salidas de caja",
+                "Ventas",
+                "Compras",
+                "Quién debe / a quién debemos",
+                "Catálogo y etiquetas",
+            ]
+        )
     else:
         tab_cat = st.tabs(["Catálogo y etiquetas"])[0]
 
@@ -8095,9 +8100,8 @@ def module_reportes(sb: Client, erp_uid: str, t: dict[str, Any] | None, rol: str
                     disabled=df_car_csv.empty,
                 )
 
-    if cat_fotos_on:
-        with tab_cat:
-            panel_reportes_catalogo_fotos(sb, erp_uid)
+    with tab_cat:
+        panel_reportes_catalogo_fotos(sb, erp_uid)
 
 def module_usuarios(sb: Client) -> None:
     st.subheader("Usuarios del sistema")
