@@ -31,6 +31,33 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...."
 
 Guarda. **Redeploy** la app si ya estaba creada.
 
+## Bucket de fotos en Supabase Storage (evitar error *Bucket not found*)
+
+La app sube imágenes de productos a **Storage**. Si no existe el bucket, verás `404 Bucket not found` al editar o crear producto con foto.
+
+### Crear el bucket (en el navegador)
+
+1. Entrá a [supabase.com](https://supabase.com) → **tu proyecto** (el mismo cuya URL usás en `SUPABASE_URL`).
+2. Menú izquierdo → **Storage** (icono de carpeta / nube).
+3. Clic en **New bucket** (o **Create bucket**).
+4. **Name:** escribí exactamente: `movi-productos`  
+   - Minúsculas, con guión, sin espacios.
+5. **Public bucket:** activá esta opción (**sí / ON**) para que las fotos se vean en catálogo e impresiones sin token. Si lo dejás privado, tendrás que configurar políticas de lectura aparte.
+6. **Create** (o **Save**).
+
+Listo. Volvé al ERP, recargá la página y probá subir la foto otra vez.
+
+### Si el bucket tiene otro nombre
+
+En **Streamlit Cloud** → tu app → **Settings** → **Secrets**, agregá debajo del bloque de Supabase:
+
+```toml
+[catalogo]
+bucket = "nombre-exacto-de-tu-bucket"
+```
+
+Guardá secrets y **Redeploy** la app.
+
 ## Comprobar que arranca
 
 - Si falla el import, revisa que `requirements.txt` esté en la raíz (ya está en el repo).
