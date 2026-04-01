@@ -7045,12 +7045,16 @@ def _rep_movimientos_caja_filtrados(
     return rows
 
 
-def module_catalogo(sb: Client, erp_uid: str) -> None:
-    st.subheader("Catálogo (fotos de productos)")
-    st.caption("Subí varias fotos por producto y marcá una como principal.")
+def panel_reportes_catalogo_fotos(sb: Client, erp_uid: str) -> None:
+    st.markdown("#### Catálogo: fotos y etiquetas imprimibles")
+    st.caption(
+        "Elegí un producto abajo para ver o subir fotos. La **principal** es la que se muestra en listados y en el HTML del catálogo."
+    )
 
     bucket = _catalogo_bucket_name()
-    st.caption(f"Storage bucket: **{bucket}** (configurable en `secrets.toml` → `[catalogo] bucket = ...`)")
+    st.caption(
+        f"Almacenamiento en Supabase Storage, bucket **{bucket}** (se puede cambiar en `secrets.toml` → `[catalogo] bucket = ...`)."
+    )
 
     try:
         prows = (
@@ -7081,7 +7085,12 @@ def module_catalogo(sb: Client, erp_uid: str) -> None:
         labels.append(lab)
         id_by_label[lab] = pid
     labels = sorted(set(labels), key=str.casefold)
-    sel = st.selectbox("Producto", options=labels, key="cat_prod_sel")
+    sel = st.selectbox(
+        "Producto a editar",
+        options=labels,
+        key="cat_prod_sel",
+        help="Lista de productos del inventario. Escribí en el cuadro para filtrar por nombre o código.",
+    )
     pid = id_by_label.get(sel, "")
     if not pid:
         st.error("Producto inválido.")
@@ -7100,15 +7109,17 @@ def module_catalogo(sb: Client, erp_uid: str) -> None:
     with c1:
         st.markdown("#### Subir fotos")
         up = st.file_uploader(
-            "Elegí imagen(es)",
+            "Elegí una o varias imágenes",
             type=["jpg", "jpeg", "png", "webp"],
             accept_multiple_files=True,
             key=f"cat_upl_{pid}",
+            help="JPG, PNG o WebP. Podés subir varias a la vez; luego elegís cuál es la principal en la galería.",
         )
         make_primary_first = st.checkbox(
-            "Marcar la primera foto subida como principal",
+            "Poner la primera foto subida como principal automáticamente",
             value=True,
             key=f"cat_make_primary_{pid}",
+            help="Si lo desmarcás, las nuevas fotos quedan en la galería y marcás la principal con el botón correspondiente.",
         )
         if up and st.button("Subir", key=f"cat_do_upload_{pid}", use_container_width=True):
             try:
@@ -7231,31 +7242,52 @@ def module_catalogo(sb: Client, erp_uid: str) -> None:
         "Elegí **una ficha**, **varios ítems** o un **listado** con tope. Imprimí con **Ctrl+P** o descargá el HTML."
     )
     modo_imp = st.radio(
-        "Qué incluir en la hoja",
+        "Qué incluir en la página imprimible (HTML)",
         options=["uno", "varios", "listado"],
         format_func=lambda v: {
-            "uno": "Solo el producto del selector de arriba",
-            "varios": "Varios productos (elegís en la lista)",
-            "listado": "Listado general (tope máximo + filtros)",
+            "uno": "Solo el producto elegido arriba",
+            "varios": "Varios productos (elegís en una lista)",
+            "listado": "Listado con tope y filtros de precio",
         }[v],
         horizontal=True,
         key="cat_print_mode",
+        help="Genera una vista para imprimir (Ctrl+P) o descargar como archivo HTML.",
     )
 
-    only_active = st.checkbox("Solo productos activos", value=True, key="cat_print_only_active")
-    precio_min = st.number_input("Precio USD mínimo (0 = sin filtro)", min_value=0.0, value=0.0, step=1.0, key="cat_print_pmin")
-    precio_max = st.number_input("Precio USD máximo (0 = sin filtro)", min_value=0.0, value=0.0, step=1.0, key="cat_print_pmax")
+    only_active = st.checkbox(
+        "Solo productos activos",
+        value=True,
+        key="cat_print_only_active",
+        help="Si está marcado, no entran productos dados de baja en el inventario.",
+    )
+    precio_min = st.number_input(
+        "Precio de venta USD mínimo (0 = sin mínimo)",
+        min_value=0.0,
+        value=0.0,
+        step=1.0,
+        key="cat_print_pmin",
+        help="Filtra por precio de venta en dólares. 0 deja pasar cualquier precio por abajo.",
+    )
+    precio_max = st.number_input(
+        "Precio de venta USD máximo (0 = sin máximo)",
+        min_value=0.0,
+        value=0.0,
+        step=1.0,
+        key="cat_print_pmax",
+        help="0 significa sin tope superior.",
+    )
 
     listado_limit = 300
     if modo_imp == "listado":
         listado_limit = int(
             st.number_input(
-                "Máximo de productos en el listado",
+                "Máximo de filas en el listado",
                 min_value=50,
                 max_value=3000,
                 value=300,
                 step=50,
                 key="cat_print_limit",
+                help="Límite de seguridad para no generar páginas enormes de golpe.",
             )
         )
 
@@ -7325,10 +7357,11 @@ def module_catalogo(sb: Client, erp_uid: str) -> None:
             pick_labels[lab] = i
         plabs = sorted(pick_labels.keys(), key=str.casefold)
         chosen = st.multiselect(
-            "Productos a imprimir (podés escribir para filtrar)",
+            "Productos en la hoja imprimible",
             options=plabs,
             default=[],
             key="cat_print_multisel",
+            help="Solo aparecen productos que pasan los filtros de activo y precio. Escribí para acortar la lista.",
         )
         if not chosen:
             st.info("Elegí uno o más productos en la lista para generar la vista imprimible.")
@@ -7366,554 +7399,593 @@ def module_catalogo(sb: Client, erp_uid: str) -> None:
         st.warning("No hay productos que cumplan activo + rango de precio.")
 
 
-def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
+def module_reportes(sb: Client, erp_uid: str, t: dict[str, Any] | None, rol: str) -> None:
+    can_fin = role_can(rol, "reportes")
+    can_cat = role_can(rol, "catalogo")
+    if not can_fin and not can_cat:
+        st.error("Tu rol no tiene acceso a reportes ni al catálogo.")
+        return
+
     st.subheader("Reportes")
-    st.caption(
-        "Resúmenes para revisar cómo va el negocio. Podés **bajar tablas en Excel o CSV** y abrirlas en la computadora, "
-        "imprimirlas o mandarlas por WhatsApp. Los montos en **dólares (USD)** son los que usa el sistema para los totales; "
-        "las columnas en bolívares son **referencia** según la tasa del día guardada abajo."
-    )
-    if not t:
-        st.warning("Primero cargá las **tasas del día** en el panel principal para ver referencias en bolívares.")
-        st.stop()
-    t_bs = float(t["tasa_bs"])
-    t_usdt = float(t["tasa_usdt"])
-    st.caption(
-        f"Referencia: 1 USD equivale a **Bs** {int(round(t_bs)):,d} · **USDT** {int(round(t_usdt)):,d}"
-    )
+    have_t = bool(t) if can_fin else True
+    t_bs = float(t["tasa_bs"]) if t else 0.0
+    t_usdt = float(t["tasa_usdt"]) if t else 0.0
 
-    tab_inv, tab_caja, tab_ven, tab_comp, tab_cartera = st.tabs(
-        [
-            "Inventario",
-            "Entradas y salidas de caja",
-            "Ventas",
-            "Compras",
-            "Quién debe / a quién debemos",
-        ]
-    )
-
-    with tab_inv:
-        st.markdown("#### Listado de repuestos y productos")
+    if can_fin:
         st.caption(
-            "Filtrá lo que necesites y descargá **Excel**, **PDF** o una página **HTML** para imprimir. "
-            "Si no tenés Excel instalado en el servidor, igual podés usar **HTML** y imprimir desde el navegador."
+            "Resúmenes para revisar cómo va el negocio. Podés **bajar tablas en Excel o CSV** y abrirlas en la computadora, "
+            "imprimirlas o mandarlas por WhatsApp. Los montos en **dólares (USD)** son los que usa el sistema para los totales; "
+            "las columnas en bolívares son **referencia** según la tasa del día guardada abajo."
         )
-        panel_reportes_inventario_export(sb, t)
-
-    with tab_caja:
-        st.markdown("#### Dinero que entró y salió de cada cuenta")
-        st.caption(
-            "Cada fila es un movimiento registrado en el sistema (ventas al contado, compras pagadas, ajustes manuales, etc.). "
-            "Servicio para revisar un período o compartir con quien lleva la contabilidad."
-        )
-        c1, c2, c3 = st.columns(3)
-        d_caja_a = c1.date_input("Desde", value=date.today() - timedelta(days=30), key="rep_caja_desde")
-        d_caja_b = c2.date_input("Hasta", value=date.today(), key="rep_caja_hasta")
-        tipo_sel = c3.selectbox(
-            "Qué mostrar",
-            options=["Todo", "Solo entradas de dinero", "Solo salidas de dinero"],
-            key="rep_caja_tipo",
-            help="Entrada = cobraste o ingresó dinero a la cuenta. Salida = pagaste o retiraste.",
-        )
-        tipo_f = None
-        if tipo_sel == "Solo entradas de dinero":
-            tipo_f = "Ingreso"
-        elif tipo_sel == "Solo salidas de dinero":
-            tipo_f = "Egreso"
-
-        cajas_r = _cajas_fetch_rows(sb, solo_activas=False)
-        caja_ids_all, caja_fmt_all = _caja_select_options(cajas_r) if cajas_r else ([], lambda x: str(x))
-        cuenta_opciones = ["(Todas las cuentas)"] + caja_ids_all
-
-        def _fmt_cuenta_opt(x: str) -> str:
-            if x == "(Todas las cuentas)":
-                return "Todas las cuentas"
-            return caja_fmt_all(x)
-
-        caja_pick = st.selectbox(
-            "Cuenta o caja",
-            options=cuenta_opciones,
-            format_func=_fmt_cuenta_opt,
-            key="rep_caja_cuenta",
-            help="Elegí una cuenta suelta (por ejemplo un banco en bolívares) o dejá **Todas** para ver todo junto.",
-        )
-        caja_f = None if caja_pick == "(Todas las cuentas)" else str(caja_pick)
-
-        movs = _rep_movimientos_caja_filtrados(sb, desde=d_caja_a, hasta=d_caja_b, caja_id=caja_f, tipo_mov=tipo_f)
-        umap = {
-            str(u["id"]): (u.get("nombre") or u.get("username") or "")
-            for u in (sb.table("erp_users").select("id,nombre,username").execute().data or [])
-        }
-        cmap = {str(c["id"]): _caja_etiqueta_lista(c) for c in cajas_r}
-
-        filas_mc: list[dict[str, Any]] = []
-        for m in movs:
-            mon = (m.get("moneda") or "USD") or "USD"
-            mm = m.get("monto_moneda")
-            _musd = int(round(float(m.get("monto_usd") or 0)))
-            _mm_orig = int(round(float(mm))) if mm is not None else ""
-            filas_mc.append(
-                {
-                    "Fecha y hora": str(m.get("created_at", ""))[:19],
-                    "Cuenta": cmap.get(str(m.get("caja_id")), "—"),
-                    "Entrada o salida": "Entrada (cobro / ingreso)" if m.get("tipo") == "Ingreso" else "Salida (pago / egreso)",
-                    "Monto en USD (sistema)": _musd,
-                    "Moneda original": str(mon).upper(),
-                    "Monto en moneda original": _mm_orig,
-                    "Concepto": (m.get("concepto") or "")[:120],
-                    "Referencia": (m.get("referencia") or "")[:80],
-                    "Nota tesorería": str(m.get("nota_operacion") or "")[:200],
-                    "Registrado por": umap.get(str(m.get("usuario_id")), "—"),
-                }
+        if not have_t:
+            st.warning(
+                "Aún no hay **tasas del día** cargadas en el Dashboard: los reportes en bolívares no se muestran hasta que las registres. "
+                "La pestaña **Catálogo y etiquetas** funciona igual."
             )
-        df_mc = pd.DataFrame(filas_mc)
-        if df_mc.empty:
-            st.info("No hay movimientos en esas fechas y filtros. Probá ampliar el rango o elegir **Todas las cuentas**.")
         else:
-            st.dataframe(df_mc, use_container_width=True, hide_index=True)
-            tot_in = df_mc[df_mc["Entrada o salida"].str.startswith("Entrada")]["Monto en USD (sistema)"].sum()
-            tot_out = df_mc[df_mc["Entrada o salida"].str.startswith("Salida")]["Monto en USD (sistema)"].sum()
-            m1, m2 = st.columns(2)
-            with m1:
-                st.metric("Total entradas (USD en el sistema)", f"{int(round(tot_in)):,d}")
-            with m2:
-                st.metric("Total salidas (USD en el sistema)", f"{int(round(tot_out)):,d}")
             st.caption(
-                "Los **USD** son el equivalente que guardó el sistema al momento del movimiento (bolívares y USDT convertidos con la tasa de entonces)."
+                f"Referencia: 1 USD equivale a **Bs** {int(round(t_bs)):,d} · **USDT** {int(round(t_usdt)):,d}"
             )
+    else:
+        st.caption(
+            "Catálogo de productos: **fotos**, imagen principal y **página HTML** para imprimir etiquetas o listados."
+        )
 
-        ts_c = _backup_file_timestamp()
-        colx, colc = st.columns(2)
-        with colx:
-            try:
+    if can_fin:
+        tab_inv, tab_caja, tab_ven, tab_comp, tab_cartera, tab_cat = st.tabs(
+            [
+                "Inventario",
+                "Entradas y salidas de caja",
+                "Ventas",
+                "Compras",
+                "Quién debe / a quién debemos",
+                "Catálogo y etiquetas",
+            ]
+        )
+    else:
+        tab_cat = st.tabs(["Catálogo y etiquetas"])[0]
+
+    if can_fin:
+        with tab_inv:
+            st.markdown("#### Listado de repuestos y productos")
+            st.caption(
+                "Filtrá lo que necesites y descargá **Excel**, **PDF** o una página **HTML** para imprimir. "
+                "Si no tenés Excel instalado en el servidor, igual podés usar **HTML** y imprimir desde el navegador."
+            )
+            panel_reportes_inventario_export(sb, t)
+    
+        with tab_caja:
+            st.markdown("#### Dinero que entró y salió de cada cuenta")
+            st.caption(
+                "Cada fila es un movimiento registrado en el sistema (ventas al contado, compras pagadas, ajustes manuales, etc.). "
+                "Servicio para revisar un período o compartir con quien lleva la contabilidad."
+            )
+            c1, c2, c3 = st.columns(3)
+            d_caja_a = c1.date_input("Desde", value=date.today() - timedelta(days=30), key="rep_caja_desde")
+            d_caja_b = c2.date_input("Hasta", value=date.today(), key="rep_caja_hasta")
+            tipo_sel = c3.selectbox(
+                "Qué mostrar",
+                options=["Todo", "Solo entradas de dinero", "Solo salidas de dinero"],
+                key="rep_caja_tipo",
+                help="Entrada = cobraste o ingresó dinero a la cuenta. Salida = pagaste o retiraste.",
+            )
+            tipo_f = None
+            if tipo_sel == "Solo entradas de dinero":
+                tipo_f = "Ingreso"
+            elif tipo_sel == "Solo salidas de dinero":
+                tipo_f = "Egreso"
+    
+            cajas_r = _cajas_fetch_rows(sb, solo_activas=False)
+            caja_ids_all, caja_fmt_all = _caja_select_options(cajas_r) if cajas_r else ([], lambda x: str(x))
+            cuenta_opciones = ["(Todas las cuentas)"] + caja_ids_all
+    
+            def _fmt_cuenta_opt(x: str) -> str:
+                if x == "(Todas las cuentas)":
+                    return "Todas las cuentas"
+                return caja_fmt_all(x)
+    
+            caja_pick = st.selectbox(
+                "Cuenta o caja",
+                options=cuenta_opciones,
+                format_func=_fmt_cuenta_opt,
+                key="rep_caja_cuenta",
+                help="Elegí una cuenta suelta (por ejemplo un banco en bolívares) o dejá **Todas** para ver todo junto.",
+            )
+            caja_f = None if caja_pick == "(Todas las cuentas)" else str(caja_pick)
+    
+            movs = _rep_movimientos_caja_filtrados(sb, desde=d_caja_a, hasta=d_caja_b, caja_id=caja_f, tipo_mov=tipo_f)
+            umap = {
+                str(u["id"]): (u.get("nombre") or u.get("username") or "")
+                for u in (sb.table("erp_users").select("id,nombre,username").execute().data or [])
+            }
+            cmap = {str(c["id"]): _caja_etiqueta_lista(c) for c in cajas_r}
+    
+            filas_mc: list[dict[str, Any]] = []
+            for m in movs:
+                mon = (m.get("moneda") or "USD") or "USD"
+                mm = m.get("monto_moneda")
+                _musd = int(round(float(m.get("monto_usd") or 0)))
+                _mm_orig = int(round(float(mm))) if mm is not None else ""
+                filas_mc.append(
+                    {
+                        "Fecha y hora": str(m.get("created_at", ""))[:19],
+                        "Cuenta": cmap.get(str(m.get("caja_id")), "—"),
+                        "Entrada o salida": "Entrada (cobro / ingreso)" if m.get("tipo") == "Ingreso" else "Salida (pago / egreso)",
+                        "Monto en USD (sistema)": _musd,
+                        "Moneda original": str(mon).upper(),
+                        "Monto en moneda original": _mm_orig,
+                        "Concepto": (m.get("concepto") or "")[:120],
+                        "Referencia": (m.get("referencia") or "")[:80],
+                        "Nota tesorería": str(m.get("nota_operacion") or "")[:200],
+                        "Registrado por": umap.get(str(m.get("usuario_id")), "—"),
+                    }
+                )
+            df_mc = pd.DataFrame(filas_mc)
+            if df_mc.empty:
+                st.info("No hay movimientos en esas fechas y filtros. Probá ampliar el rango o elegir **Todas las cuentas**.")
+            else:
+                st.dataframe(df_mc, use_container_width=True, hide_index=True)
+                tot_in = df_mc[df_mc["Entrada o salida"].str.startswith("Entrada")]["Monto en USD (sistema)"].sum()
+                tot_out = df_mc[df_mc["Entrada o salida"].str.startswith("Salida")]["Monto en USD (sistema)"].sum()
+                m1, m2 = st.columns(2)
+                with m1:
+                    st.metric("Total entradas (USD en el sistema)", f"{int(round(tot_in)):,d}")
+                with m2:
+                    st.metric("Total salidas (USD en el sistema)", f"{int(round(tot_out)):,d}")
+                st.caption(
+                    "Los **USD** son el equivalente que guardó el sistema al momento del movimiento (bolívares y USDT convertidos con la tasa de entonces)."
+                )
+    
+            ts_c = _backup_file_timestamp()
+            colx, colc = st.columns(2)
+            with colx:
+                try:
+                    st.download_button(
+                        label=f"Descargar Excel — movimientos_caja_{ts_c}.xlsx",
+                        data=_reporte_tabla_a_excel(df_mc if not df_mc.empty else pd.DataFrame(), nombre_hoja="Movimientos"),
+                        file_name=f"movimientos_caja_{ts_c}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="rep_dl_caja_xlsx",
+                        use_container_width=True,
+                    )
+                except ImportError:
+                    st.caption("Para Excel hace falta instalar **openpyxl** (ya viene en los requisitos del programa).")
+            with colc:
                 st.download_button(
-                    label=f"Descargar Excel — movimientos_caja_{ts_c}.xlsx",
-                    data=_reporte_tabla_a_excel(df_mc if not df_mc.empty else pd.DataFrame(), nombre_hoja="Movimientos"),
-                    file_name=f"movimientos_caja_{ts_c}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="rep_dl_caja_xlsx",
+                    label=f"Descargar CSV — movimientos_caja_{ts_c}.csv",
+                    data=_reporte_tabla_a_csv(df_mc if not df_mc.empty else pd.DataFrame()),
+                    file_name=f"movimientos_caja_{ts_c}.csv",
+                    mime="text/csv",
+                    key="rep_dl_caja_csv",
                     use_container_width=True,
                 )
-            except ImportError:
-                st.caption("Para Excel hace falta instalar **openpyxl** (ya viene en los requisitos del programa).")
-        with colc:
-            st.download_button(
-                label=f"Descargar CSV — movimientos_caja_{ts_c}.csv",
-                data=_reporte_tabla_a_csv(df_mc if not df_mc.empty else pd.DataFrame()),
-                file_name=f"movimientos_caja_{ts_c}.csv",
-                mime="text/csv",
-                key="rep_dl_caja_csv",
-                use_container_width=True,
+    
+        with tab_ven:
+            st.markdown("#### Ventas")
+            st.caption("Resumen de facturación, ganancia aproximada por producto y detalle línea por línea para revisar o compartir.")
+            d1, d2 = st.columns(2)
+            a = d1.date_input("Desde", value=date.today() - timedelta(days=30), key="rep_ven_desde")
+            b = d2.date_input("Hasta", value=date.today(), key="rep_ven_hasta")
+    
+            ventas = (
+                sb.table("ventas")
+                .select("id, numero, cliente, fecha, total_usd, forma_pago, usuario_id")
+                .gte("fecha", str(a))
+                .lte("fecha", f"{b}T23:59:59")
+                .order("fecha", desc=True)
+                .execute()
             )
-
-    with tab_ven:
-        st.markdown("#### Ventas")
-        st.caption("Resumen de facturación, ganancia aproximada por producto y detalle línea por línea para revisar o compartir.")
-        d1, d2 = st.columns(2)
-        a = d1.date_input("Desde", value=date.today() - timedelta(days=30), key="rep_ven_desde")
-        b = d2.date_input("Hasta", value=date.today(), key="rep_ven_hasta")
-
-        ventas = (
-            sb.table("ventas")
-            .select("id, numero, cliente, fecha, total_usd, forma_pago, usuario_id")
-            .gte("fecha", str(a))
-            .lte("fecha", f"{b}T23:59:59")
-            .order("fecha", desc=True)
-            .execute()
-        )
-        umap_v = {
-            str(u["id"]): (u.get("nombre") or u.get("username") or "—")
-            for u in (sb.table("erp_users").select("id,nombre,username").execute().data or [])
-        }
-
-        st.markdown("##### Resumen por venta")
-        if ventas.data:
-            dfv = pd.DataFrame(ventas.data)
-            dfv["Equiv. aprox. en Bs (según tasa de hoy)"] = (
-                dfv["total_usd"].astype(float) * t_bs
-            ).round(0).astype("Int64")
-            dfv["Fecha"] = pd.to_datetime(dfv["fecha"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
-            dfv["Quién la registró"] = dfv["usuario_id"].map(lambda x: umap_v.get(str(x), "—"))
-            dfv_disp = dfv.rename(
-                columns={
+            umap_v = {
+                str(u["id"]): (u.get("nombre") or u.get("username") or "—")
+                for u in (sb.table("erp_users").select("id,nombre,username").execute().data or [])
+            }
+    
+            st.markdown("##### Resumen por venta")
+            if ventas.data:
+                dfv = pd.DataFrame(ventas.data)
+                if have_t:
+                    dfv["Equiv. aprox. en Bs (según tasa de hoy)"] = (
+                        dfv["total_usd"].astype(float) * t_bs
+                    ).round(0).astype("Int64")
+                dfv["Fecha"] = pd.to_datetime(dfv["fecha"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+                dfv["Quién la registró"] = dfv["usuario_id"].map(lambda x: umap_v.get(str(x), "—"))
+                _rv = {
                     "numero": "Nº interno",
                     "cliente": "Cliente",
                     "total_usd": "Total USD",
                     "forma_pago": "Forma de pago",
                 }
-            )[["Nº interno", "Fecha", "Cliente", "Forma de pago", "Total USD", "Equiv. aprox. en Bs (según tasa de hoy)", "Quién la registró"]]
-            dfv_disp["Total USD"] = _rep_series_montos_enteros(dfv_disp["Total USD"])
-            st.dataframe(dfv_disp, use_container_width=True, hide_index=True)
-            dfv["fecha_d"] = pd.to_datetime(dfv["fecha"], errors="coerce").dt.strftime("%Y-%m-%d")
-            agg = dfv.groupby("fecha_d", as_index=False)["total_usd"].sum()
-            fig = px.bar(
-                agg,
-                x="fecha_d",
-                y="total_usd",
-                labels={"fecha_d": "Día", "total_usd": "Dólares (USD)"},
-                title="Vendido en dólares por día (total del día)",
-            )
-            fig.update_layout(yaxis=dict(tickformat=",d"))
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No hay ventas registradas entre esas fechas.")
-
-        vids = [str(x["id"]) for x in (ventas.data or [])]
-        det_rows: list[dict[str, Any]] = []
-        if vids:
-            det = (
-                sb.table("ventas_detalles")
-                .select("venta_id, producto_id, cantidad, precio_unitario_usd, subtotal_usd")
-                .in_("venta_id", vids)
-                .execute()
-            )
-            det_rows = det.data or []
-
-        st.markdown("##### Cuánto ganaste aproximado por producto (mismo período)")
-        st.caption("Es una **ganancia bruta** simple: precio de venta menos costo del producto, por las cantidades vendidas. No incluye gastos fijos.")
-        if det_rows:
-            pmap = {
-                str(p["id"]): p
-                for p in (sb.table("productos").select("id,descripcion,codigo,costo_usd").execute().data or [])
-            }
-            vhead = {str(v["id"]): v for v in (ventas.data or [])}
-            rows_m = []
-            for row in det_rows:
-                pid = str(row["producto_id"])
-                pr = pmap.get(pid, {})
-                desc = pr.get("descripcion", pid)
-                costo = float(pr.get("costo_usd") or 0)
-                cant = float(row["cantidad"])
-                pu = float(row["precio_unitario_usd"])
-                margin = (pu - costo) * cant
-                rows_m.append({"producto": desc, "utilidad_bruta_usd": margin})
-            dfm = pd.DataFrame(rows_m).groupby("producto", as_index=False)["utilidad_bruta_usd"].sum()
-            dfm = dfm.rename(columns={"producto": "Producto", "utilidad_bruta_usd": "Ganancia bruta USD (aprox.)"})
-            dfm["Ganancia bruta USD (aprox.)"] = _rep_series_montos_enteros(dfm["Ganancia bruta USD (aprox.)"])
-            st.dataframe(dfm, use_container_width=True, hide_index=True)
-            st.caption(fmt_tri(float(dfm["Ganancia bruta USD (aprox.)"].sum()), t_bs, t_usdt))
-        else:
-            st.info("No hay líneas de venta en ese período.")
-
-        st.markdown("##### Detalle: cada artículo en cada venta (para revisar o compartir)")
-        st.caption("Una fila por cada línea facturada: útil para buscar un repuesto o armar un archivo para otra persona.")
-        filas_det: list[dict[str, Any]] = []
-        if det_rows and ventas.data:
-            pmap2 = {
-                str(p["id"]): p
-                for p in (sb.table("productos").select("id,descripcion,codigo").execute().data or [])
-            }
-            vhead = {str(v["id"]): v for v in ventas.data}
-            for row in det_rows:
-                vid = str(row.get("venta_id"))
-                vh = vhead.get(vid, {})
-                pid = str(row["producto_id"])
-                pr = pmap2.get(pid, {})
-                filas_det.append(
-                    {
-                        "Nº venta": vh.get("numero", ""),
-                        "Fecha venta": str(vh.get("fecha", ""))[:19],
-                        "Cliente": vh.get("cliente", ""),
-                        "Forma de pago": vh.get("forma_pago", ""),
-                        "Quién registró": umap_v.get(str(vh.get("usuario_id")), "—"),
-                        "Código": _export_cell_txt(pr.get("codigo")) or "—",
-                        "Descripción": _export_cell_txt(pr.get("descripcion")) or pid,
-                        "Cantidad": float(row.get("cantidad") or 0),
-                        "Precio unitario USD": int(round(float(row.get("precio_unitario_usd") or 0))),
-                        "Subtotal USD": int(round(float(row.get("subtotal_usd") or 0))),
-                    }
+                dfv2 = dfv.rename(columns=_rv)
+                _cols_v = ["Nº interno", "Fecha", "Cliente", "Forma de pago", "Total USD"]
+                if have_t:
+                    _cols_v.append("Equiv. aprox. en Bs (según tasa de hoy)")
+                _cols_v.append("Quién la registró")
+                dfv_disp = dfv2[_cols_v]
+                dfv_disp["Total USD"] = _rep_series_montos_enteros(dfv_disp["Total USD"])
+                st.dataframe(dfv_disp, use_container_width=True, hide_index=True)
+                dfv["fecha_d"] = pd.to_datetime(dfv["fecha"], errors="coerce").dt.strftime("%Y-%m-%d")
+                agg = dfv.groupby("fecha_d", as_index=False)["total_usd"].sum()
+                fig = px.bar(
+                    agg,
+                    x="fecha_d",
+                    y="total_usd",
+                    labels={"fecha_d": "Día", "total_usd": "Dólares (USD)"},
+                    title="Vendido en dólares por día (total del día)",
                 )
-        df_det = pd.DataFrame(filas_det)
-        if df_det.empty:
-            st.info("No hay detalle para mostrar en esas fechas.")
-        else:
-            st.dataframe(df_det, use_container_width=True, hide_index=True)
-        ts_v = _backup_file_timestamp()
-        vx, vc = st.columns(2)
-        with vx:
-            try:
+                fig.update_layout(yaxis=dict(tickformat=",d"))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No hay ventas registradas entre esas fechas.")
+    
+            vids = [str(x["id"]) for x in (ventas.data or [])]
+            det_rows: list[dict[str, Any]] = []
+            if vids:
+                det = (
+                    sb.table("ventas_detalles")
+                    .select("venta_id, producto_id, cantidad, precio_unitario_usd, subtotal_usd")
+                    .in_("venta_id", vids)
+                    .execute()
+                )
+                det_rows = det.data or []
+    
+            st.markdown("##### Cuánto ganaste aproximado por producto (mismo período)")
+            st.caption("Es una **ganancia bruta** simple: precio de venta menos costo del producto, por las cantidades vendidas. No incluye gastos fijos.")
+            if det_rows:
+                pmap = {
+                    str(p["id"]): p
+                    for p in (sb.table("productos").select("id,descripcion,codigo,costo_usd").execute().data or [])
+                }
+                vhead = {str(v["id"]): v for v in (ventas.data or [])}
+                rows_m = []
+                for row in det_rows:
+                    pid = str(row["producto_id"])
+                    pr = pmap.get(pid, {})
+                    desc = pr.get("descripcion", pid)
+                    costo = float(pr.get("costo_usd") or 0)
+                    cant = float(row["cantidad"])
+                    pu = float(row["precio_unitario_usd"])
+                    margin = (pu - costo) * cant
+                    rows_m.append({"producto": desc, "utilidad_bruta_usd": margin})
+                dfm = pd.DataFrame(rows_m).groupby("producto", as_index=False)["utilidad_bruta_usd"].sum()
+                dfm = dfm.rename(columns={"producto": "Producto", "utilidad_bruta_usd": "Ganancia bruta USD (aprox.)"})
+                dfm["Ganancia bruta USD (aprox.)"] = _rep_series_montos_enteros(dfm["Ganancia bruta USD (aprox.)"])
+                st.dataframe(dfm, use_container_width=True, hide_index=True)
+                if have_t:
+                    st.caption(fmt_tri(float(dfm["Ganancia bruta USD (aprox.)"].sum()), t_bs, t_usdt))
+            else:
+                st.info("No hay líneas de venta en ese período.")
+    
+            st.markdown("##### Detalle: cada artículo en cada venta (para revisar o compartir)")
+            st.caption("Una fila por cada línea facturada: útil para buscar un repuesto o armar un archivo para otra persona.")
+            filas_det: list[dict[str, Any]] = []
+            if det_rows and ventas.data:
+                pmap2 = {
+                    str(p["id"]): p
+                    for p in (sb.table("productos").select("id,descripcion,codigo").execute().data or [])
+                }
+                vhead = {str(v["id"]): v for v in ventas.data}
+                for row in det_rows:
+                    vid = str(row.get("venta_id"))
+                    vh = vhead.get(vid, {})
+                    pid = str(row["producto_id"])
+                    pr = pmap2.get(pid, {})
+                    filas_det.append(
+                        {
+                            "Nº venta": vh.get("numero", ""),
+                            "Fecha venta": str(vh.get("fecha", ""))[:19],
+                            "Cliente": vh.get("cliente", ""),
+                            "Forma de pago": vh.get("forma_pago", ""),
+                            "Quién registró": umap_v.get(str(vh.get("usuario_id")), "—"),
+                            "Código": _export_cell_txt(pr.get("codigo")) or "—",
+                            "Descripción": _export_cell_txt(pr.get("descripcion")) or pid,
+                            "Cantidad": float(row.get("cantidad") or 0),
+                            "Precio unitario USD": int(round(float(row.get("precio_unitario_usd") or 0))),
+                            "Subtotal USD": int(round(float(row.get("subtotal_usd") or 0))),
+                        }
+                    )
+            df_det = pd.DataFrame(filas_det)
+            if df_det.empty:
+                st.info("No hay detalle para mostrar en esas fechas.")
+            else:
+                st.dataframe(df_det, use_container_width=True, hide_index=True)
+            ts_v = _backup_file_timestamp()
+            vx, vc = st.columns(2)
+            with vx:
+                try:
+                    st.download_button(
+                        label=f"Excel — detalle_ventas_{ts_v}.xlsx",
+                        data=_reporte_tabla_a_excel(df_det, nombre_hoja="Ventas detalle"),
+                        file_name=f"detalle_ventas_{ts_v}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="rep_dl_ven_det_xlsx",
+                        use_container_width=True,
+                    )
+                except ImportError:
+                    pass
+            with vc:
                 st.download_button(
-                    label=f"Excel — detalle_ventas_{ts_v}.xlsx",
-                    data=_reporte_tabla_a_excel(df_det, nombre_hoja="Ventas detalle"),
-                    file_name=f"detalle_ventas_{ts_v}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="rep_dl_ven_det_xlsx",
+                    label=f"CSV — detalle_ventas_{ts_v}.csv",
+                    data=_reporte_tabla_a_csv(df_det),
+                    file_name=f"detalle_ventas_{ts_v}.csv",
+                    mime="text/csv",
+                    key="rep_dl_ven_det_csv",
                     use_container_width=True,
                 )
-            except ImportError:
-                pass
-        with vc:
-            st.download_button(
-                label=f"CSV — detalle_ventas_{ts_v}.csv",
-                data=_reporte_tabla_a_csv(df_det),
-                file_name=f"detalle_ventas_{ts_v}.csv",
-                mime="text/csv",
-                key="rep_dl_ven_det_csv",
-                use_container_width=True,
+    
+        with tab_comp:
+            st.markdown("#### Compras a proveedores")
+            st.caption("Lo que compraste en un período y lo que aún debes pagar (cuentas por pagar).")
+            d1c, d2c = st.columns(2)
+            ac = d1c.date_input("Desde", value=date.today() - timedelta(days=30), key="rep_comp_desde")
+            bc = d2c.date_input("Hasta", value=date.today(), key="rep_comp_hasta")
+    
+            compras_r = (
+                sb.table("compras")
+                .select("id, numero, proveedor, fecha, total_usd, forma_pago, usuario_id")
+                .gte("fecha", str(ac))
+                .lte("fecha", f"{bc}T23:59:59")
+                .order("fecha", desc=True)
+                .execute()
             )
-
-    with tab_comp:
-        st.markdown("#### Compras a proveedores")
-        st.caption("Lo que compraste en un período y lo que aún debes pagar (cuentas por pagar).")
-        d1c, d2c = st.columns(2)
-        ac = d1c.date_input("Desde", value=date.today() - timedelta(days=30), key="rep_comp_desde")
-        bc = d2c.date_input("Hasta", value=date.today(), key="rep_comp_hasta")
-
-        compras_r = (
-            sb.table("compras")
-            .select("id, numero, proveedor, fecha, total_usd, forma_pago, usuario_id")
-            .gte("fecha", str(ac))
-            .lte("fecha", f"{bc}T23:59:59")
-            .order("fecha", desc=True)
-            .execute()
-        )
-        umap_c = {
-            str(u["id"]): (u.get("nombre") or u.get("username") or "—")
-            for u in (sb.table("erp_users").select("id,nombre,username").execute().data or [])
-        }
-
-        st.markdown("##### Compras en el rango")
-        if compras_r.data:
-            dfcmp = pd.DataFrame(compras_r.data)
-            dfcmp["Equiv. aprox. en Bs (tasa de hoy)"] = (
-                dfcmp["total_usd"].astype(float) * t_bs
-            ).round(0).astype("Int64")
-            dfcmp["Fecha"] = pd.to_datetime(dfcmp["fecha"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
-            dfcmp["Quién la registró"] = dfcmp["usuario_id"].map(lambda x: umap_c.get(str(x), "—"))
-            dfc_disp = dfcmp.rename(
-                columns={
+            umap_c = {
+                str(u["id"]): (u.get("nombre") or u.get("username") or "—")
+                for u in (sb.table("erp_users").select("id,nombre,username").execute().data or [])
+            }
+    
+            st.markdown("##### Compras en el rango")
+            if compras_r.data:
+                dfcmp = pd.DataFrame(compras_r.data)
+                if have_t:
+                    dfcmp["Equiv. aprox. en Bs (tasa de hoy)"] = (
+                        dfcmp["total_usd"].astype(float) * t_bs
+                    ).round(0).astype("Int64")
+                dfcmp["Fecha"] = pd.to_datetime(dfcmp["fecha"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+                dfcmp["Quién la registró"] = dfcmp["usuario_id"].map(lambda x: umap_c.get(str(x), "—"))
+                _rc = {
                     "numero": "Nº interno",
                     "proveedor": "Proveedor",
                     "total_usd": "Total USD",
                     "forma_pago": "Forma de pago",
                 }
-            )[["Nº interno", "Fecha", "Proveedor", "Forma de pago", "Total USD", "Equiv. aprox. en Bs (tasa de hoy)", "Quién la registró"]]
-            dfc_disp["Total USD"] = _rep_series_montos_enteros(dfc_disp["Total USD"])
-            st.dataframe(dfc_disp, use_container_width=True, hide_index=True)
-            dfcmp["fecha_d"] = pd.to_datetime(dfcmp["fecha"], errors="coerce").dt.strftime("%Y-%m-%d")
-            aggc = dfcmp.groupby("fecha_d", as_index=False)["total_usd"].sum()
-            figc = px.bar(
-                aggc,
-                x="fecha_d",
-                y="total_usd",
-                labels={"fecha_d": "Día", "total_usd": "Dólares (USD)"},
-                title="Compras en dólares por día",
-            )
-            figc.update_layout(yaxis=dict(tickformat=",d"))
-            st.plotly_chart(figc, use_container_width=True)
-        else:
-            st.info("No hay compras entre esas fechas.")
-
-        cids = [str(x["id"]) for x in (compras_r.data or [])]
-        det_c: list[dict[str, Any]] = []
-        if cids:
-            dc = (
-                sb.table("compras_detalles")
-                .select("compra_id, producto_id, cantidad, costo_unitario_usd, subtotal_usd")
-                .in_("compra_id", cids)
-                .execute()
-            )
-            det_c = dc.data or []
-
-        st.markdown("##### Detalle por artículo comprado")
-        filas_cd: list[dict[str, Any]] = []
-        if det_c and compras_r.data:
-            pmap_c = {
-                str(p["id"]): p
-                for p in (sb.table("productos").select("id,descripcion,codigo").execute().data or [])
-            }
-            head_c = {str(v["id"]): v for v in compras_r.data}
-            for row in det_c:
-                cid = str(row.get("compra_id"))
-                ch = head_c.get(cid, {})
-                pid = str(row["producto_id"])
-                pr = pmap_c.get(pid, {})
-                filas_cd.append(
-                    {
-                        "Nº compra": ch.get("numero", ""),
-                        "Fecha": str(ch.get("fecha", ""))[:19],
-                        "Proveedor": ch.get("proveedor", ""),
-                        "Código": _export_cell_txt(pr.get("codigo")) or "—",
-                        "Descripción": _export_cell_txt(pr.get("descripcion")) or pid,
-                        "Cantidad": float(row.get("cantidad") or 0),
-                        "Costo unit. USD": int(round(float(row.get("costo_unitario_usd") or 0))),
-                        "Subtotal USD": int(round(float(row.get("subtotal_usd") or 0))),
-                    }
+                dfc2 = dfcmp.rename(columns=_rc)
+                _cols_c = ["Nº interno", "Fecha", "Proveedor", "Forma de pago", "Total USD"]
+                if have_t:
+                    _cols_c.append("Equiv. aprox. en Bs (tasa de hoy)")
+                _cols_c.append("Quién la registró")
+                dfc_disp = dfc2[_cols_c]
+                dfc_disp["Total USD"] = _rep_series_montos_enteros(dfc_disp["Total USD"])
+                st.dataframe(dfc_disp, use_container_width=True, hide_index=True)
+                dfcmp["fecha_d"] = pd.to_datetime(dfcmp["fecha"], errors="coerce").dt.strftime("%Y-%m-%d")
+                aggc = dfcmp.groupby("fecha_d", as_index=False)["total_usd"].sum()
+                figc = px.bar(
+                    aggc,
+                    x="fecha_d",
+                    y="total_usd",
+                    labels={"fecha_d": "Día", "total_usd": "Dólares (USD)"},
+                    title="Compras en dólares por día",
                 )
-        df_cd = pd.DataFrame(filas_cd)
-        if df_cd.empty:
-            st.info("No hay líneas de compra en ese período.")
-        else:
-            st.dataframe(df_cd, use_container_width=True, hide_index=True)
-        ts_cp = _backup_file_timestamp()
-        cpx, cpc = st.columns(2)
-        with cpx:
-            try:
+                figc.update_layout(yaxis=dict(tickformat=",d"))
+                st.plotly_chart(figc, use_container_width=True)
+            else:
+                st.info("No hay compras entre esas fechas.")
+    
+            cids = [str(x["id"]) for x in (compras_r.data or [])]
+            det_c: list[dict[str, Any]] = []
+            if cids:
+                dc = (
+                    sb.table("compras_detalles")
+                    .select("compra_id, producto_id, cantidad, costo_unitario_usd, subtotal_usd")
+                    .in_("compra_id", cids)
+                    .execute()
+                )
+                det_c = dc.data or []
+    
+            st.markdown("##### Detalle por artículo comprado")
+            filas_cd: list[dict[str, Any]] = []
+            if det_c and compras_r.data:
+                pmap_c = {
+                    str(p["id"]): p
+                    for p in (sb.table("productos").select("id,descripcion,codigo").execute().data or [])
+                }
+                head_c = {str(v["id"]): v for v in compras_r.data}
+                for row in det_c:
+                    cid = str(row.get("compra_id"))
+                    ch = head_c.get(cid, {})
+                    pid = str(row["producto_id"])
+                    pr = pmap_c.get(pid, {})
+                    filas_cd.append(
+                        {
+                            "Nº compra": ch.get("numero", ""),
+                            "Fecha": str(ch.get("fecha", ""))[:19],
+                            "Proveedor": ch.get("proveedor", ""),
+                            "Código": _export_cell_txt(pr.get("codigo")) or "—",
+                            "Descripción": _export_cell_txt(pr.get("descripcion")) or pid,
+                            "Cantidad": float(row.get("cantidad") or 0),
+                            "Costo unit. USD": int(round(float(row.get("costo_unitario_usd") or 0))),
+                            "Subtotal USD": int(round(float(row.get("subtotal_usd") or 0))),
+                        }
+                    )
+            df_cd = pd.DataFrame(filas_cd)
+            if df_cd.empty:
+                st.info("No hay líneas de compra en ese período.")
+            else:
+                st.dataframe(df_cd, use_container_width=True, hide_index=True)
+            ts_cp = _backup_file_timestamp()
+            cpx, cpc = st.columns(2)
+            with cpx:
+                try:
+                    st.download_button(
+                        label=f"Excel — detalle_compras_{ts_cp}.xlsx",
+                        data=_reporte_tabla_a_excel(df_cd, nombre_hoja="Compras detalle"),
+                        file_name=f"detalle_compras_{ts_cp}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="rep_dl_comp_det_xlsx",
+                        use_container_width=True,
+                    )
+                except ImportError:
+                    pass
+            with cpc:
                 st.download_button(
-                    label=f"Excel — detalle_compras_{ts_cp}.xlsx",
-                    data=_reporte_tabla_a_excel(df_cd, nombre_hoja="Compras detalle"),
-                    file_name=f"detalle_compras_{ts_cp}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="rep_dl_comp_det_xlsx",
+                    label=f"CSV — detalle_compras_{ts_cp}.csv",
+                    data=_reporte_tabla_a_csv(df_cd),
+                    file_name=f"detalle_compras_{ts_cp}.csv",
+                    mime="text/csv",
+                    key="rep_dl_comp_det_csv",
                     use_container_width=True,
                 )
-            except ImportError:
-                pass
-        with cpc:
-            st.download_button(
-                label=f"CSV — detalle_compras_{ts_cp}.csv",
-                data=_reporte_tabla_a_csv(df_cd),
-                file_name=f"detalle_compras_{ts_cp}.csv",
-                mime="text/csv",
-                key="rep_dl_comp_det_csv",
-                use_container_width=True,
+    
+            st.divider()
+            st.markdown("##### Facturas o deudas pendientes de pagar al proveedor")
+            cxp = sb.table("cuentas_por_pagar").select("*").execute()
+            if cxp.data:
+                dfp = pd.DataFrame(cxp.data)
+                st.dataframe(dfp, use_container_width=True, hide_index=True)
+                pend_p = dfp[dfp["estado"].isin(["Pendiente", "Parcial"])]["monto_pendiente_usd"].astype(float).sum()
+                st.metric("Total aún por pagar (USD)", f"{int(round(pend_p)):,d}")
+                if have_t:
+                    st.caption(fmt_tri(pend_p, t_bs, t_usdt))
+            else:
+                st.info("No hay cuentas por pagar cargadas.")
+    
+        with tab_cartera:
+            st.markdown("#### Clientes que deben y proveedores a los que debes")
+            st.caption(
+                "**Cuentas por cobrar:** ventas a crédito que aún no cobraste. **Cuentas por pagar:** compras a crédito que aún no pagaste. "
+                "La columna *¿Qué tan al día está?* te ayuda a ver si la fecha límite ya pasó."
             )
+    
+            ventas_all = {str(v["id"]): v for v in (sb.table("ventas").select("id, numero, cliente").execute().data or [])}
+            compras_all = {str(c["id"]): c for c in (sb.table("compras").select("id, numero, proveedor").execute().data or [])}
+    
+            df_dl_cob = pd.DataFrame()
+            df_dl_pag = pd.DataFrame()
+    
+            cxc = sb.table("cuentas_por_cobrar").select("*").execute()
+            if cxc.data:
+                st.markdown("##### Te deben (clientes)")
+                rows_cxc: list[dict[str, Any]] = []
+                for r in cxc.data:
+                    vid = str(r.get("venta_id") or "")
+                    vh = ventas_all.get(vid, {})
+                    rows_cxc.append(
+                        {
+                            "Cliente": vh.get("cliente", "—"),
+                            "Nº venta": vh.get("numero", "—"),
+                            "Estado del crédito": r.get("estado", ""),
+                            "Fecha límite de cobro": str(r.get("fecha_vencimiento") or "")[:10],
+                            "¿Qué tan al día está?": _rep_texto_plazo_vencimiento(r.get("fecha_vencimiento")),
+                            "Grupo (para totales)": _rep_bucket_antiguedad(r.get("fecha_vencimiento")),
+                            "Adeudado USD": int(round(float(r.get("monto_pendiente_usd") or 0))),
+                        }
+                    )
+                df_cxc = pd.DataFrame(rows_cxc)
+                df_dl_cob = df_cxc
+                pend_c = df_cxc[df_cxc["Estado del crédito"].isin(["Pendiente", "Parcial"])]["Adeudado USD"].sum()
+                st.metric("Total que te deben (pendiente, USD)", f"{int(round(pend_c)):,d}")
+                if have_t:
+                    st.caption(fmt_tri(pend_c, t_bs, t_usdt))
 
-        st.divider()
-        st.markdown("##### Facturas o deudas pendientes de pagar al proveedor")
-        cxp = sb.table("cuentas_por_pagar").select("*").execute()
-        if cxp.data:
-            dfp = pd.DataFrame(cxp.data)
-            st.dataframe(dfp, use_container_width=True, hide_index=True)
-            pend_p = dfp[dfp["estado"].isin(["Pendiente", "Parcial"])]["monto_pendiente_usd"].astype(float).sum()
-            st.metric("Total aún por pagar (USD)", f"{int(round(pend_p)):,d}")
-            st.caption(fmt_tri(pend_p, t_bs, t_usdt))
-        else:
-            st.info("No hay cuentas por pagar cargadas.")
-
-    with tab_cartera:
-        st.markdown("#### Clientes que deben y proveedores a los que debes")
-        st.caption(
-            "**Cuentas por cobrar:** ventas a crédito que aún no cobraste. **Cuentas por pagar:** compras a crédito que aún no pagaste. "
-            "La columna *¿Qué tan al día está?* te ayuda a ver si la fecha límite ya pasó."
-        )
-
-        ventas_all = {str(v["id"]): v for v in (sb.table("ventas").select("id, numero, cliente").execute().data or [])}
-        compras_all = {str(c["id"]): c for c in (sb.table("compras").select("id, numero, proveedor").execute().data or [])}
-
-        df_dl_cob = pd.DataFrame()
-        df_dl_pag = pd.DataFrame()
-
-        cxc = sb.table("cuentas_por_cobrar").select("*").execute()
-        if cxc.data:
-            st.markdown("##### Te deben (clientes)")
-            rows_cxc: list[dict[str, Any]] = []
-            for r in cxc.data:
-                vid = str(r.get("venta_id") or "")
-                vh = ventas_all.get(vid, {})
-                rows_cxc.append(
-                    {
-                        "Cliente": vh.get("cliente", "—"),
-                        "Nº venta": vh.get("numero", "—"),
-                        "Estado del crédito": r.get("estado", ""),
-                        "Fecha límite de cobro": str(r.get("fecha_vencimiento") or "")[:10],
-                        "¿Qué tan al día está?": _rep_texto_plazo_vencimiento(r.get("fecha_vencimiento")),
-                        "Grupo (para totales)": _rep_bucket_antiguedad(r.get("fecha_vencimiento")),
-                        "Adeudado USD": int(round(float(r.get("monto_pendiente_usd") or 0))),
-                    }
+                res_c = (
+                    df_cxc[df_cxc["Estado del crédito"].isin(["Pendiente", "Parcial"])]
+                    .groupby("Grupo (para totales)", as_index=False)["Adeudado USD"]
+                    .sum()
+                    .sort_values("Adeudado USD", ascending=False)
                 )
-            df_cxc = pd.DataFrame(rows_cxc)
-            df_dl_cob = df_cxc
-            pend_c = df_cxc[df_cxc["Estado del crédito"].isin(["Pendiente", "Parcial"])]["Adeudado USD"].sum()
-            st.metric("Total que te deben (pendiente, USD)", f"{int(round(pend_c)):,d}")
-            st.caption(fmt_tri(pend_c, t_bs, t_usdt))
-
-            res_c = (
-                df_cxc[df_cxc["Estado del crédito"].isin(["Pendiente", "Parcial"])]
-                .groupby("Grupo (para totales)", as_index=False)["Adeudado USD"]
-                .sum()
-                .sort_values("Adeudado USD", ascending=False)
-            )
-            res_c["Adeudado USD"] = _rep_series_montos_enteros(res_c["Adeudado USD"])
-            st.markdown("**Resumen: te deben — agrupado por plazo**")
-            st.dataframe(res_c, use_container_width=True, hide_index=True)
-            st.dataframe(df_cxc, use_container_width=True, hide_index=True)
-        else:
-            st.info("No hay cuentas por cobrar.")
-
-        st.divider()
-        cxp2 = sb.table("cuentas_por_pagar").select("*").execute()
-        if cxp2.data:
-            st.markdown("##### Debes a proveedores")
-            rows_cxp: list[dict[str, Any]] = []
-            for r in cxp2.data:
-                cid = str(r.get("compra_id") or "")
-                ch = compras_all.get(cid, {})
-                rows_cxp.append(
-                    {
-                        "Proveedor": ch.get("proveedor", "—"),
-                        "Nº compra": ch.get("numero", "—"),
-                        "Estado": r.get("estado", ""),
-                        "Fecha límite de pago": str(r.get("fecha_vencimiento") or "")[:10],
-                        "¿Qué tan al día está?": _rep_texto_plazo_vencimiento(r.get("fecha_vencimiento")),
-                        "Grupo (para totales)": _rep_bucket_antiguedad(r.get("fecha_vencimiento")),
-                        "Debes USD": int(round(float(r.get("monto_pendiente_usd") or 0))),
-                    }
+                res_c["Adeudado USD"] = _rep_series_montos_enteros(res_c["Adeudado USD"])
+                st.markdown("**Resumen: te deben — agrupado por plazo**")
+                st.dataframe(res_c, use_container_width=True, hide_index=True)
+                st.dataframe(df_cxc, use_container_width=True, hide_index=True)
+            else:
+                st.info("No hay cuentas por cobrar.")
+    
+            st.divider()
+            cxp2 = sb.table("cuentas_por_pagar").select("*").execute()
+            if cxp2.data:
+                st.markdown("##### Debes a proveedores")
+                rows_cxp: list[dict[str, Any]] = []
+                for r in cxp2.data:
+                    cid = str(r.get("compra_id") or "")
+                    ch = compras_all.get(cid, {})
+                    rows_cxp.append(
+                        {
+                            "Proveedor": ch.get("proveedor", "—"),
+                            "Nº compra": ch.get("numero", "—"),
+                            "Estado": r.get("estado", ""),
+                            "Fecha límite de pago": str(r.get("fecha_vencimiento") or "")[:10],
+                            "¿Qué tan al día está?": _rep_texto_plazo_vencimiento(r.get("fecha_vencimiento")),
+                            "Grupo (para totales)": _rep_bucket_antiguedad(r.get("fecha_vencimiento")),
+                            "Debes USD": int(round(float(r.get("monto_pendiente_usd") or 0))),
+                        }
+                    )
+                df_cxp = pd.DataFrame(rows_cxp)
+                df_dl_pag = df_cxp
+                pend_x = df_cxp[df_cxp["Estado"].isin(["Pendiente", "Parcial"])]["Debes USD"].sum()
+                st.metric("Total que debes pagar (pendiente, USD)", f"{int(round(pend_x)):,d}")
+                if have_t:
+                    st.caption(fmt_tri(pend_x, t_bs, t_usdt))
+                res_x = (
+                    df_cxp[df_cxp["Estado"].isin(["Pendiente", "Parcial"])]
+                    .groupby("Grupo (para totales)", as_index=False)["Debes USD"]
+                    .sum()
+                    .sort_values("Debes USD", ascending=False)
                 )
-            df_cxp = pd.DataFrame(rows_cxp)
-            df_dl_pag = df_cxp
-            pend_x = df_cxp[df_cxp["Estado"].isin(["Pendiente", "Parcial"])]["Debes USD"].sum()
-            st.metric("Total que debes pagar (pendiente, USD)", f"{int(round(pend_x)):,d}")
-            st.caption(fmt_tri(pend_x, t_bs, t_usdt))
-            res_x = (
-                df_cxp[df_cxp["Estado"].isin(["Pendiente", "Parcial"])]
-                .groupby("Grupo (para totales)", as_index=False)["Debes USD"]
-                .sum()
-                .sort_values("Debes USD", ascending=False)
-            )
-            res_x["Debes USD"] = _rep_series_montos_enteros(res_x["Debes USD"])
-            st.markdown("**Resumen: debes — agrupado por plazo**")
-            st.dataframe(res_x, use_container_width=True, hide_index=True)
-            st.dataframe(df_cxp, use_container_width=True, hide_index=True)
-        else:
-            st.info("No hay cuentas por pagar.")
-
-        st.markdown("##### Bajar estos listados a tu computadora")
-        ts_car = _backup_file_timestamp()
-        _parts_dl = []
-        if not df_dl_cob.empty:
-            _parts_dl.append(df_dl_cob.assign(**{"Listado": "Clientes que te deben"}))
-        if not df_dl_pag.empty:
-            _parts_dl.append(df_dl_pag.assign(**{"Listado": "Proveedores a pagar"}))
-        df_car_csv = pd.concat(_parts_dl, ignore_index=True) if _parts_dl else pd.DataFrame()
-
-        ca1, ca2, ca3 = st.columns(3)
-        with ca1:
-            try:
+                res_x["Debes USD"] = _rep_series_montos_enteros(res_x["Debes USD"])
+                st.markdown("**Resumen: debes — agrupado por plazo**")
+                st.dataframe(res_x, use_container_width=True, hide_index=True)
+                st.dataframe(df_cxp, use_container_width=True, hide_index=True)
+            else:
+                st.info("No hay cuentas por pagar.")
+    
+            st.markdown("##### Bajar estos listados a tu computadora")
+            ts_car = _backup_file_timestamp()
+            _parts_dl = []
+            if not df_dl_cob.empty:
+                _parts_dl.append(df_dl_cob.assign(**{"Listado": "Clientes que te deben"}))
+            if not df_dl_pag.empty:
+                _parts_dl.append(df_dl_pag.assign(**{"Listado": "Proveedores a pagar"}))
+            df_car_csv = pd.concat(_parts_dl, ignore_index=True) if _parts_dl else pd.DataFrame()
+    
+            ca1, ca2, ca3 = st.columns(3)
+            with ca1:
+                try:
+                    st.download_button(
+                        label=f"Excel — clientes_que_deben_{ts_car}.xlsx",
+                        data=_reporte_tabla_a_excel(df_dl_cob, nombre_hoja="Te deben"),
+                        file_name=f"clientes_que_deben_{ts_car}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="rep_dl_car_cxc_xlsx",
+                        use_container_width=True,
+                        disabled=df_dl_cob.empty,
+                    )
+                except ImportError:
+                    st.caption("Instalá **openpyxl** para generar Excel.")
+            with ca2:
+                try:
+                    st.download_button(
+                        label=f"Excel — proveedores_a_pagar_{ts_car}.xlsx",
+                        data=_reporte_tabla_a_excel(df_dl_pag, nombre_hoja="Debes pagar"),
+                        file_name=f"proveedores_a_pagar_{ts_car}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="rep_dl_car_cxp_xlsx",
+                        use_container_width=True,
+                        disabled=df_dl_pag.empty,
+                    )
+                except ImportError:
+                    pass
+            with ca3:
                 st.download_button(
-                    label=f"Excel — clientes_que_deben_{ts_car}.xlsx",
-                    data=_reporte_tabla_a_excel(df_dl_cob, nombre_hoja="Te deben"),
-                    file_name=f"clientes_que_deben_{ts_car}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="rep_dl_car_cxc_xlsx",
+                    label=f"CSV — todo_junto_{ts_car}.csv",
+                    data=_reporte_tabla_a_csv(df_car_csv),
+                    file_name=f"cartera_cobrar_y_pagar_{ts_car}.csv",
+                    mime="text/csv",
+                    key="rep_dl_car_csv",
                     use_container_width=True,
-                    disabled=df_dl_cob.empty,
+                    disabled=df_car_csv.empty,
                 )
-            except ImportError:
-                st.caption("Instalá **openpyxl** para generar Excel.")
-        with ca2:
-            try:
-                st.download_button(
-                    label=f"Excel — proveedores_a_pagar_{ts_car}.xlsx",
-                    data=_reporte_tabla_a_excel(df_dl_pag, nombre_hoja="Debes pagar"),
-                    file_name=f"proveedores_a_pagar_{ts_car}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="rep_dl_car_cxp_xlsx",
-                    use_container_width=True,
-                    disabled=df_dl_pag.empty,
-                )
-            except ImportError:
-                pass
-        with ca3:
-            st.download_button(
-                label=f"CSV — todo_junto_{ts_car}.csv",
-                data=_reporte_tabla_a_csv(df_car_csv),
-                file_name=f"cartera_cobrar_y_pagar_{ts_car}.csv",
-                mime="text/csv",
-                key="rep_dl_car_csv",
-                use_container_width=True,
-                disabled=df_car_csv.empty,
-            )
+
+    with tab_cat:
+        panel_reportes_catalogo_fotos(sb, erp_uid)
+
 def module_usuarios(sb: Client) -> None:
     st.subheader("Usuarios del sistema")
     st.caption("Solo el superusuario puede crear cuentas y definir la contraseña inicial de cada persona.")
@@ -7940,7 +8012,7 @@ def module_usuarios(sb: Client) -> None:
             format_func=lambda x: {
                 "vendedor": "Vendedor (ventas y cobros CXC)",
                 "admin": "Administrador (compras, cajas, reportes, tasas…)",
-                "almacen": "Almacén (solo inventario)",
+                "almacen": "Almacén (inventario; catálogo y etiquetas en Reportes)",
                 "superuser": "Superusuario (acceso total)",
             }[x],
             key="nu_rol",
@@ -8364,16 +8436,16 @@ def main() -> None:
             opts.append("Dashboard")
         if role_can(rol, "inventario"):
             opts.append("Inventario")
-        if role_can(rol, "catalogo"):
-            opts.append("Catálogo")
+        if role_can(rol, "reportes"):
+            opts.append("Reportes")
+        elif role_can(rol, "catalogo"):
+            opts.append("Reportes")
         if role_can(rol, "ventas"):
             opts.append("Ventas / CXC")
         if role_can(rol, "compras"):
             opts.append("Compras / CXP")
         if role_can(rol, "cajas"):
             opts.append("Cajas y bancos")
-        if role_can(rol, "reportes"):
-            opts.append("Reportes")
         if role_can(rol, "usuarios"):
             opts.append("Usuarios")
         if rol == "superuser":
@@ -8388,16 +8460,14 @@ def main() -> None:
         module_dashboard(sb, t)
     elif mod == "Inventario" and role_can(rol, "inventario"):
         module_inventario(sb, erp_uid, t)
-    elif mod == "Catálogo" and role_can(rol, "catalogo"):
-        module_catalogo(sb, erp_uid)
     elif mod == "Ventas / CXC" and role_can(rol, "ventas"):
         module_ventas(sb, erp_uid, t)
     elif mod == "Compras / CXP" and role_can(rol, "compras"):
         module_compras(sb, erp_uid, t)
     elif mod == "Cajas y bancos" and role_can(rol, "cajas"):
         module_cajas(sb, erp_uid)
-    elif mod == "Reportes" and role_can(rol, "reportes"):
-        module_reportes(sb, t)
+    elif mod == "Reportes" and (role_can(rol, "reportes") or role_can(rol, "catalogo")):
+        module_reportes(sb, erp_uid, t, rol)
     elif mod == "Usuarios" and role_can(rol, "usuarios"):
         module_usuarios(sb)
     elif mod == "Mantenimiento" and rol == "superuser":
