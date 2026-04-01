@@ -2,8 +2,9 @@
 -- Objetivo: permitir múltiples fotos por producto + foto principal.
 --
 -- Requisitos:
--- - Crear un bucket en Supabase Storage (recomendado público) llamado `movi-productos`
---   o el que configures en la app (ver `app.py`).
+-- - En Supabase: **Storage** → **New bucket** (el SQL no crea el bucket). Nombre por defecto en la app: `movi-productos`.
+--   Recomendado **público** para URLs de imágenes en catálogo/HTML; o definí políticas de lectura.
+--   Otro nombre: sección `[catalogo] bucket` en `secrets.toml` (ver `app.py`).
 -- - La app sube archivos a `productos/<producto_id>/...` dentro del bucket.
 --
 -- Nota: este parche crea SOLO la tabla en Postgres; el bucket se crea desde el panel de Supabase.

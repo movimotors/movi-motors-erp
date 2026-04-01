@@ -2764,6 +2764,20 @@ def _catalogo_bucket_name() -> str:
     return "movi-productos"
 
 
+def _movi_foto_upload_bucket_hint(bucket: str, ex: BaseException) -> str:
+    """Si Storage devuelve bucket inexistente, guía para crearlo en el panel de Supabase."""
+    low = str(ex).lower()
+    if "bucket not found" in low or ("404" in str(ex) and "bucket" in low):
+        b = str(bucket or _catalogo_bucket_name()).strip() or "movi-productos"
+        return (
+            f"\n\n**Falta el bucket en Supabase Storage:** creá uno llamado exactamente **`{b}`** "
+            "(menú **Storage** → **New bucket**). Para que las URLs públicas del catálogo funcionen, "
+            "dejalo **público** o configurá políticas de lectura. "
+            "Otro nombre: en `secrets.toml` → `[catalogo]` → `bucket = \"...\"`."
+        )
+    return ""
+
+
 def _supabase_url_base() -> str:
     u = st.secrets["connections"]["supabase"]["SUPABASE_URL"]
     return str(u).rstrip("/")
@@ -5123,7 +5137,9 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                                 _upd_f["imagen_url"] = _storage_public_object_url(bucket, obj)
                                         except Exception as ex_img:
                                             st.warning(
-                                                f"No se pudo subir la foto; se guardó el resto con la URL del campo texto si la hubo. Detalle: {ex_img}"
+                                                f"No se pudo subir la **foto al Storage**; **el producto sí se actualizó** en la base "
+                                                f"(código, stock, texto de URL, etc.—solo falló el archivo). Detalle: {ex_img}"
+                                                + _movi_foto_upload_bucket_hint(bucket, ex_img)
                                             )
                                     try:
                                         sb.table("productos").update(_upd_f).eq("id", _pid).execute()
@@ -5333,6 +5349,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                                 st.warning(
                                                     f"Producto guardado, pero la foto no se registró: {_ex_foto}. "
                                                     "Revisá Storage (bucket), **patch_021** y `GRANT` sobre `producto_fotos`."
+                                                    + _movi_foto_upload_bucket_hint(bucket, _ex_foto)
                                                 )
                                         _insert_ok = True
                                         break
@@ -5411,6 +5428,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                         st.warning(
                                             f"Producto guardado, pero la foto no se registró: {_ex_foto_m}. "
                                             "Revisá Storage (bucket), **patch_021** y `GRANT` sobre `producto_fotos`."
+                                            + _movi_foto_upload_bucket_hint(bucket, _ex_foto_m)
                                         )
                                 st.success("Producto guardado en la base.")
                                 _movi_reset_producto_alta_fields()
