@@ -7076,7 +7076,8 @@ def _rep_movimientos_caja_filtrados(
 def panel_reportes_catalogo_fotos(sb: Client, erp_uid: str) -> None:
     st.markdown("#### Catálogo: fotos y etiquetas imprimibles")
     st.caption(
-        "Elegí un producto abajo para ver o subir fotos. La **principal** es la que se muestra en listados y en el HTML del catálogo."
+        "Elegí un producto para ver o subir fotos. **Foto de portada** = la imagen que el sistema usa como “cara” del producto: "
+        "la grande de la izquierda, el catálogo imprimible (HTML) y donde el inventario muestre una sola foto."
     )
 
     bucket = _catalogo_bucket_name()
@@ -7129,11 +7130,12 @@ def panel_reportes_catalogo_fotos(sb: Client, erp_uid: str) -> None:
 
     c0, c1 = st.columns([1, 1])
     with c0:
-        st.markdown("#### Imagen principal actual")
+        st.markdown("#### Foto de portada (vista previa)")
+        st.caption("Es la imagen que se muestra hoy para este producto en listados y catálogo.")
         if cur_img:
             st.image(cur_img, use_container_width=True)
         else:
-            st.caption("Sin imagen en `productos.imagen_url`.")
+            st.caption("Todavía no hay foto de portada (`productos.imagen_url`). Subí una o elegí una en la galería abajo.")
     with c1:
         st.markdown("#### Subir fotos")
         up = st.file_uploader(
@@ -7141,13 +7143,13 @@ def panel_reportes_catalogo_fotos(sb: Client, erp_uid: str) -> None:
             type=["jpg", "jpeg", "png", "webp"],
             accept_multiple_files=True,
             key=f"cat_upl_{pid}",
-            help="JPG, PNG o WebP. Podés subir varias a la vez; luego elegís cuál es la principal en la galería.",
+            help="JPG, PNG o WebP. Podés subir varias a la vez; en la galería elegís cuál será la foto de portada.",
         )
         make_primary_first = st.checkbox(
-            "Poner la primera foto subida como principal automáticamente",
+            "La primera foto que suba pasa a ser la de portada automáticamente",
             value=True,
             key=f"cat_make_primary_{pid}",
-            help="Si lo desmarcás, las nuevas fotos quedan en la galería y marcás la principal con el botón correspondiente.",
+            help="Si lo desmarcás, las nuevas fotos solo se guardan en la galería; después tocá **Poner como portada** en la que quieras.",
         )
         if up and st.button("Subir", key=f"cat_do_upload_{pid}", use_container_width=True):
             try:
@@ -7198,6 +7200,10 @@ def panel_reportes_catalogo_fotos(sb: Client, erp_uid: str) -> None:
 
     st.divider()
     st.markdown("#### Galería")
+    st.caption(
+        "Todas las fotos del producto. **Solo una** puede ser la de portada (la que se ve arriba a la izquierda y en el catálogo HTML). "
+        "El resto son adicionales."
+    )
     try:
         fotos = _catalogo_fetch_fotos(sb, pid)
     except Exception as ex:
@@ -7221,7 +7227,8 @@ def panel_reportes_catalogo_fotos(sb: Client, erp_uid: str) -> None:
             url = _storage_public_object_url(bucket, path) if path else ""
             with c:
                 if is_p:
-                    st.markdown("**Principal**")
+                    st.markdown("**Foto de portada**")
+                    st.caption("Esta es la que se muestra en listados y catálogo.")
                 else:
                     st.caption(" ")
                 if url:
@@ -7231,10 +7238,11 @@ def panel_reportes_catalogo_fotos(sb: Client, erp_uid: str) -> None:
                 b1, b2 = st.columns(2)
                 with b1:
                     if st.button(
-                        "Principal",
+                        "Poner como portada",
                         key=f"cat_primary_{fid}",
                         disabled=is_p,
                         use_container_width=True,
+                        help="Esta imagen pasará a ser la que se ve en inventario y en el HTML imprimible.",
                     ):
                         try:
                             _catalogo_set_primary(sb, producto_id=pid, foto_id=fid)
@@ -7456,7 +7464,7 @@ def module_reportes(sb: Client, erp_uid: str, t: dict[str, Any] | None, rol: str
             )
     else:
         st.caption(
-            "Catálogo de productos: **fotos**, imagen principal y **página HTML** para imprimir etiquetas o listados."
+            "Catálogo de productos: **fotos** (una de portada + galería) y **página HTML** para imprimir etiquetas o listados."
         )
 
     if can_fin:
