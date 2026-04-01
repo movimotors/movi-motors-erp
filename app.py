@@ -2854,11 +2854,42 @@ def _catalogo_delete_foto(sb: Client, *, bucket: str, foto_row: dict[str, Any]) 
         sb.table("producto_fotos").delete().eq("id", fid).execute()
 
 
+def _catalogo_row_is_primary(row: dict[str, Any]) -> bool:
+    """PostgREST a veces devuelve booleanos raros; normalizamos."""
+    v = row.get("is_primary")
+    if v is True:
+        return True
+    if v is False or v is None:
+        return False
+    if isinstance(v, (int, float)):
+        return v != 0
+    s = str(v).strip().lower()
+    return s in ("true", "t", "1", "yes", "si", "sí")
+
+
+def _catalogo_sync_primary_foto(
+    sb: Client, *, bucket: str, producto_id: str, storage_path: str
+) -> None:
+    """
+    Tras insertar una fila en producto_fotos: marca esa foto como principal y actualiza productos.imagen_url.
+    Evita el caso en que el insert llegue con is_primary false por defecto en BD y el catálogo no muestre la imagen.
+    """
+    pid = str(producto_id).strip()
+    path = str(storage_path).strip()
+    if not pid or not path:
+        return
+    fotos_now = _catalogo_fetch_fotos(sb, pid)
+    match = next((r for r in fotos_now if str(r.get("storage_path") or "").strip() == path), None)
+    if match and str(match.get("id") or "").strip():
+        _catalogo_set_primary(sb, producto_id=pid, foto_id=str(match["id"]).strip())
+    sb.table("productos").update({"imagen_url": _storage_public_object_url(bucket, path)}).eq("id", pid).execute()
+
+
 def _catalogo_primary_path_for_producto(sb: Client, producto_id: str) -> str | None:
     fotos = _catalogo_fetch_fotos(sb, producto_id)
     if not fotos:
         return None
-    prim = next((x for x in fotos if bool(x.get("is_primary"))), None) or fotos[0]
+    prim = next((x for x in fotos if _catalogo_row_is_primary(x)), None) or fotos[0]
     sp = str(prim.get("storage_path") or "").strip()
     return sp or None
 
@@ -5134,6 +5165,9 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                                 if _cb_fc:
                                                     _row_pf_ficha["created_by"] = _cb_fc
                                                 sb.table("producto_fotos").insert(_row_pf_ficha).execute()
+                                                _catalogo_sync_primary_foto(
+                                                    sb, bucket=bucket, producto_id=str(_pid), storage_path=obj
+                                                )
                                                 _upd_f["imagen_url"] = _storage_public_object_url(bucket, obj)
                                         except Exception as ex_img:
                                             st.warning(
@@ -5342,9 +5376,9 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                                     if _cb_foto:
                                                         row_pf["created_by"] = _cb_foto
                                                     sb.table("producto_fotos").insert(row_pf).execute()
-                                                    sb.table("productos").update(
-                                                        {"imagen_url": _storage_public_object_url(bucket, obj)}
-                                                    ).eq("id", new_id).execute()
+                                                    _catalogo_sync_primary_foto(
+                                                        sb, bucket=bucket, producto_id=new_id, storage_path=obj
+                                                    )
                                             except Exception as _ex_foto:
                                                 st.warning(
                                                     f"Producto guardado, pero la foto no se registró: {_ex_foto}. "
@@ -5421,9 +5455,9 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                             if _cb_foto:
                                                 row_pfm["created_by"] = _cb_foto
                                             sb.table("producto_fotos").insert(row_pfm).execute()
-                                            sb.table("productos").update(
-                                                {"imagen_url": _storage_public_object_url(bucket, obj)}
-                                            ).eq("id", new_id).execute()
+                                            _catalogo_sync_primary_foto(
+                                                sb, bucket=bucket, producto_id=new_id, storage_path=obj
+                                            )
                                     except Exception as _ex_foto_m:
                                         st.warning(
                                             f"Producto guardado, pero la foto no se registró: {_ex_foto_m}. "
@@ -7144,7 +7178,7 @@ def module_catalogo(sb: Client, erp_uid: str) -> None:
         for c, r in zip(cs, grp):
             fid = str(r.get("id") or "")
             path = str(r.get("storage_path") or "")
-            is_p = bool(r.get("is_primary"))
+            is_p = _catalogo_row_is_primary(r)
             url = _storage_public_object_url(bucket, path) if path else ""
             with c:
                 if is_p:
@@ -7192,26 +7226,57 @@ def module_catalogo(sb: Client, erp_uid: str) -> None:
                             st.error(str(ex))
 
     st.divider()
-    st.markdown("#### Catálogo imprimible (online / descargar HTML)")
-    st.caption("Genera una página lista para imprimir (A4). También podés abrir el HTML en el navegador y compartirlo.")
+    st.markdown("#### Catálogo / etiquetas imprimibles (HTML)")
+    st.caption(
+        "Elegí **una ficha**, **varios ítems** o un **listado** con tope. Imprimí con **Ctrl+P** o descargá el HTML."
+    )
+    modo_imp = st.radio(
+        "Qué incluir en la hoja",
+        options=["uno", "varios", "listado"],
+        format_func=lambda v: {
+            "uno": "Solo el producto del selector de arriba",
+            "varios": "Varios productos (elegís en la lista)",
+            "listado": "Listado general (tope máximo + filtros)",
+        }[v],
+        horizontal=True,
+        key="cat_print_mode",
+    )
+
     only_active = st.checkbox("Solo productos activos", value=True, key="cat_print_only_active")
     precio_min = st.number_input("Precio USD mínimo (0 = sin filtro)", min_value=0.0, value=0.0, step=1.0, key="cat_print_pmin")
     precio_max = st.number_input("Precio USD máximo (0 = sin filtro)", min_value=0.0, value=0.0, step=1.0, key="cat_print_pmax")
-    limit = st.number_input("Máximo de productos a incluir", min_value=50, max_value=3000, value=300, step=50, key="cat_print_limit")
+
+    listado_limit = 300
+    if modo_imp == "listado":
+        listado_limit = int(
+            st.number_input(
+                "Máximo de productos en el listado",
+                min_value=50,
+                max_value=3000,
+                value=300,
+                step=50,
+                key="cat_print_limit",
+            )
+        )
+
+    fetch_cap = listado_limit if modo_imp == "listado" else 3000
 
     try:
-        q = sb.table("productos").select("id,codigo,sku_oem,descripcion,precio_v_usd,imagen_url,activo").order("descripcion")
+        q = (
+            sb.table("productos")
+            .select("id,codigo,sku_oem,descripcion,precio_v_usd,imagen_url,activo")
+            .order("descripcion")
+        )
         if only_active:
             q = q.eq("activo", True)
-        r = q.limit(int(limit)).execute()
-        items = list(r.data or [])
+        r = q.limit(int(fetch_cap)).execute()
+        items_pool = list(r.data or [])
     except Exception as ex:
         st.error(f"No se pudieron leer productos para el catálogo: {ex}")
-        items = []
+        items_pool = []
 
-    # Enriquecer imagen_url con la principal del catálogo si existe.
     try:
-        for it in items:
+        for it in items_pool:
             pid2 = str(it.get("id") or "").strip()
             if not pid2:
                 continue
@@ -7231,7 +7296,49 @@ def module_catalogo(sb: Client, erp_uid: str) -> None:
             return False
         return True
 
-    items = [x for x in items if _in_rango_precio(x)]
+    items_filtered = [x for x in items_pool if _in_rango_precio(x)]
+
+    items_out: list[dict[str, Any]] = []
+    titulo_cat = "Catálogo — Movi Motors"
+    subt_extra = ""
+
+    if modo_imp == "uno":
+        items_out = [x for x in items_filtered if str(x.get("id") or "") == pid]
+        if items_out:
+            c0 = str(items_out[0].get("codigo") or "").strip()
+            d0 = str(items_out[0].get("descripcion") or "").strip()[:40]
+            titulo_cat = f"Etiqueta / ficha — {c0 or d0 or 'producto'}"
+        else:
+            st.warning(
+                "El producto del selector no entra con los filtros (activo / precio). "
+                "Probá desmarcar *Solo productos activos* o ajustar precio mínimo/máximo."
+            )
+    elif modo_imp == "varios":
+        pick_labels: dict[str, str] = {}
+        for p in sorted(items_filtered, key=lambda x: str(x.get("descripcion") or "").casefold()):
+            i = str(p.get("id") or "").strip()
+            if not i:
+                continue
+            lab = f"{str(p.get('descripcion') or '')[:52]} · {p.get('codigo') or ''}".strip(" ·")
+            if lab in pick_labels:
+                lab = f"{lab} [{i[:8]}]"
+            pick_labels[lab] = i
+        plabs = sorted(pick_labels.keys(), key=str.casefold)
+        chosen = st.multiselect(
+            "Productos a imprimir (podés escribir para filtrar)",
+            options=plabs,
+            default=[],
+            key="cat_print_multisel",
+        )
+        if not chosen:
+            st.info("Elegí uno o más productos en la lista para generar la vista imprimible.")
+        cids = {pick_labels[L] for L in chosen}
+        items_out = [x for x in items_filtered if str(x.get("id") or "") in cids]
+        subt_extra = f"{len(items_out)} ítem(s) seleccionados"
+    else:
+        items_out = items_filtered[: int(listado_limit)]
+        subt_extra = f"hasta {len(items_out)} ítems (orden alfabético)"
+
     sub = []
     if only_active:
         sub.append("solo activos")
@@ -7239,19 +7346,24 @@ def module_catalogo(sb: Client, erp_uid: str) -> None:
         sub.append(f"precio ≥ {precio_min:g}")
     if precio_max:
         sub.append(f"precio ≤ {precio_max:g}")
+    if subt_extra:
+        sub.append(subt_extra)
     subt = " · ".join(sub)
 
-    html_cat = _html_catalogo_imprimible(items, titulo="Catálogo — Movi Motors", subtitulo=subt)
-    ts = _backup_file_timestamp()
-    st.download_button(
-        label=f"Descargar HTML imprimible — catalogo_{ts}.html",
-        data=html_cat.encode("utf-8"),
-        file_name=f"catalogo_{ts}.html",
-        mime="text/html",
-        key="cat_dl_html",
-        use_container_width=True,
-    )
-    components.html(html_cat, height=560, scrolling=True)
+    if items_out:
+        html_cat = _html_catalogo_imprimible(items_out, titulo=titulo_cat, subtitulo=subt)
+        ts = _backup_file_timestamp()
+        st.download_button(
+            label=f"Descargar HTML — catalogo_{ts}.html",
+            data=html_cat.encode("utf-8"),
+            file_name=f"catalogo_{ts}.html",
+            mime="text/html",
+            key="cat_dl_html",
+            use_container_width=True,
+        )
+        components.html(html_cat, height=560, scrolling=True)
+    elif modo_imp == "listado" and not items_filtered:
+        st.warning("No hay productos que cumplan activo + rango de precio.")
 
 
 def module_reportes(sb: Client, t: dict[str, Any] | None) -> None:
