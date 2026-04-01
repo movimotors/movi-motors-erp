@@ -46,7 +46,7 @@ from supabase import Client
 
 
 _APP_DIR = Path(__file__).resolve().parent
-BRAND_LOGO_PATH = _APP_DIR / "assets" / "logo_movimotors.png"
+BRAND_LOGO_PATH = _APP_DIR / "assets" / "logo_movimotors.jpg"
 
 
 def brand_logo_file() -> str | None:
@@ -62,8 +62,13 @@ def _brand_logo_data_uri() -> str | None:
         raw = p.read_bytes()
         if not raw:
             return None
-        suf = p.suffix.lower()
-        mime = "image/jpeg" if suf in (".jpg", ".jpeg") else "image/png"
+        if raw.startswith(b"\xff\xd8\xff"):
+            mime = "image/jpeg"
+        elif raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            mime = "image/png"
+        else:
+            suf = p.suffix.lower()
+            mime = "image/jpeg" if suf in (".jpg", ".jpeg") else "image/png"
         b64 = base64.standard_b64encode(raw).decode("ascii")
         return f"data:{mime};base64,{b64}"
     except OSError:
