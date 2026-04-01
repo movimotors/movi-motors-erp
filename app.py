@@ -42,7 +42,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
-from postgrest.types import ReturnMethod
 from supabase import Client
 
 
@@ -792,6 +791,19 @@ def _inv_alta_producto_id_missing_help() -> str:
         "(Supabase → Project Settings → API), no la clave **anon**. "
         "Con anon, RLS suele bloquear lecturas aunque el insert parezca OK."
     )
+
+
+def _movi_productos_insert_execute(sb: Client, row: dict[str, Any]) -> Any:
+    """
+    Compatibilidad postgrest-py / supabase:
+    - Reciente: `insert(row)` devuelve un builder **sin** `.select()`; basta `.execute()`
+      (el propio insert ya pide `return=representation` por defecto).
+    - Antigua: `insert(row).select('id').execute()`.
+    """
+    b = sb.table("productos").insert(row)
+    if hasattr(b, "select"):
+        return b.select("id").execute()
+    return b.execute()
 
 
 def _erp_user_uuid_or_none(erp_uid: str) -> str | None:
@@ -5272,7 +5284,8 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                 _last_ex: Exception | None = None
                                 for _ in range(10):
                                     try:
-                                        ins = sb.table("productos").insert(
+                                        ins = _movi_productos_insert_execute(
+                                            sb,
                                             {
                                                 "codigo": codigo_final,
                                                 "sku_oem": sku_oem.strip() or None,
@@ -5289,8 +5302,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                                 "categoria_id": cid,
                                                 "activo": True,
                                             },
-                                            returning=ReturnMethod.representation,
-                                        ).execute()
+                                        )
                                         new_id = _inv_resolve_producto_id_after_insert(
                                             sb, ins_data=ins.data, codigo=codigo_final
                                         )
@@ -5350,7 +5362,8 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                             if not _cm:
                                 st.error("Ingresá un **código manual** o activá el generador automático.")
                             else:
-                                insm = sb.table("productos").insert(
+                                insm = _movi_productos_insert_execute(
+                                    sb,
                                     {
                                         "codigo": _cm or None,
                                         "sku_oem": sku_oem.strip() or None,
@@ -5367,8 +5380,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                         "categoria_id": cid,
                                         "activo": True,
                                     },
-                                    returning=ReturnMethod.representation,
-                                ).execute()
+                                )
                                 new_id = _inv_resolve_producto_id_after_insert(
                                     sb, ins_data=insm.data, codigo=_cm
                                 )
