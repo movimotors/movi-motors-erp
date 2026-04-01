@@ -2965,11 +2965,39 @@ def _html_catalogo_imprimible(
     border-radius: 10px;
     overflow: hidden;
     background: #fff;
-    min-height: 185px;
+    min-height: 200px;
   }}
-  .photo {{ width: 100%; height: 112px; background: #f6f6f6; display:flex; align-items:center; justify-content:center; }}
-  .ph {{ width: 100%; height: 112px; object-fit: cover; display:block; }}
-  .ph-missing {{ width: 100%; height: 112px; display:flex; align-items:center; justify-content:center; color:#666; font-size:0.85rem; }}
+  .photo {{
+    width: 100%;
+    height: 148px;
+    min-height: 148px;
+    background: #f3f3f3;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px;
+    box-sizing: border-box;
+  }}
+  .ph {{
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    object-position: center;
+    display: block;
+    vertical-align: middle;
+  }}
+  .ph-missing {{
+    width: 100%;
+    height: 100%;
+    min-height: 120px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #666;
+    font-size: 0.85rem;
+  }}
   .meta {{ padding: 0.55rem 0.6rem; }}
   .desc {{ font-weight: 700; font-size: 0.86rem; line-height: 1.2; min-height: 2.1em; }}
   .code {{ color:#2a1f45; font-weight: 700; margin-top:0.2rem; font-size:0.8rem; }}
