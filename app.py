@@ -2764,6 +2764,24 @@ def _catalogo_bucket_name() -> str:
     return "movi-productos"
 
 
+def _catalogo_fotos_enabled() -> bool:
+    """
+    Si es False: no se muestra la pestaña de catálogo/fotos en Reportes, no se suben archivos a Storage
+    desde Inventario (sigue pudiendo usarse solo texto URL en imagen_url). Ahorra uso de Storage y consultas a producto_fotos.
+    En secrets.toml: [catalogo] enabled = false
+    """
+    try:
+        cfg = st.secrets.get("catalogo")
+        if not isinstance(cfg, dict) or "enabled" not in cfg:
+            return True
+        v = cfg.get("enabled")
+        if isinstance(v, str):
+            return v.strip().lower() not in ("0", "false", "no", "off", "")
+        return bool(v)
+    except Exception:
+        return True
+
+
 def _movi_foto_upload_bucket_hint(bucket: str, ex: BaseException) -> str:
     """Si Storage devuelve bucket inexistente, guía para crearlo en el panel de Supabase."""
     low = str(ex).lower()
@@ -5015,18 +5033,27 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                             )
                             with fu2:
                                 st.markdown("**Imagen del producto**")
-                                _ficha_img_file = st.file_uploader(
-                                    "Subir foto (JPG/PNG/WebP)",
-                                    type=["jpg", "jpeg", "png", "webp"],
-                                    accept_multiple_files=False,
-                                    key=f"inv_ficha_img_file_{_pid}",
-                                )
-                                _fimg = st.text_input(
-                                    "o pegar URL",
-                                    value=_export_cell_txt(_rw.get("imagen_url")),
-                                    key=f"inv_ficha_img_{_pid}",
-                                    help="Si subís una foto arriba, al guardar se usa esa y queda como principal en catálogo.",
-                                )
+                                if _catalogo_fotos_enabled():
+                                    _ficha_img_file = st.file_uploader(
+                                        "Subir foto (JPG/PNG/WebP)",
+                                        type=["jpg", "jpeg", "png", "webp"],
+                                        accept_multiple_files=False,
+                                        key=f"inv_ficha_img_file_{_pid}",
+                                    )
+                                    _fimg = st.text_input(
+                                        "o pegar URL",
+                                        value=_export_cell_txt(_rw.get("imagen_url")),
+                                        key=f"inv_ficha_img_{_pid}",
+                                        help="Si subís una foto arriba, al guardar se usa esa y queda como portada en catálogo/Storage.",
+                                    )
+                                else:
+                                    _ficha_img_file = None
+                                    _fimg = st.text_input(
+                                        "URL de imagen (opcional)",
+                                        value=_export_cell_txt(_rw.get("imagen_url")),
+                                        key=f"inv_ficha_img_{_pid}",
+                                        help="Subida de archivos desactivada (`[catalogo] enabled = false`). Solo enlace externo; no usa Storage.",
+                                    )
                             with st.form(
                                 f"inv_ficha_prod_form_{_pid}_{int(st.session_state.get(f'inv_ficha_form_nonce_{_pid}', 0))}"
                             ):
@@ -5163,7 +5190,11 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                         _upd_f["ubicacion"] = str(_fubi).strip() or None
                                     if "imagen_url" in df_view.columns:
                                         _upd_f["imagen_url"] = str(_fimg).strip() or None
-                                    if _ficha_img_file is not None and "imagen_url" in df_view.columns:
+                                    if (
+                                        _catalogo_fotos_enabled()
+                                        and _ficha_img_file is not None
+                                        and "imagen_url" in df_view.columns
+                                    ):
                                         try:
                                             bucket = _catalogo_bucket_name()
                                             data = _ficha_img_file.getvalue()
@@ -5234,24 +5265,39 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                     f"No se pudo guardar. Si el nombre ya existe, elegí otro (las categorías son únicas). Detalle: {ex}"
                                 )
             st.caption(
-                "**Ubicación y foto** van fuera del formulario de guardado: así Streamlit no pierde el archivo "
-                "al pulsar *Guardar producto* (comportamiento conocido del selector de archivos dentro de `st.form`)."
+                "**Ubicación"
+                + (" y foto** van" if _catalogo_fotos_enabled() else "** va")
+                + " fuera del formulario de guardado"
+                + (
+                    ": así Streamlit no pierde el archivo al pulsar *Guardar producto* (selector de archivos fuera de `st.form`)."
+                    if _catalogo_fotos_enabled()
+                    else "."
+                )
             )
             _ua1, _ua2 = st.columns(2)
             ubic = _ua1.text_input("Ubicación en almacén", key="inv_alta_ubic")
             with _ua2:
-                st.markdown("**Foto del producto (opcional)**")
-                img_file = st.file_uploader(
-                    "Subir foto (JPG/PNG/WebP)",
-                    type=["jpg", "jpeg", "png", "webp"],
-                    accept_multiple_files=False,
-                    key="inv_alta_img_file",
-                )
-                img_url = st.text_input(
-                    "o pegar URL (opcional)",
-                    key="inv_alta_img",
-                    help="Si subís foto arriba, al guardar se usa esa y se llena `imagen_url` automáticamente.",
-                )
+                if _catalogo_fotos_enabled():
+                    st.markdown("**Foto del producto (opcional)**")
+                    img_file = st.file_uploader(
+                        "Subir foto (JPG/PNG/WebP)",
+                        type=["jpg", "jpeg", "png", "webp"],
+                        accept_multiple_files=False,
+                        key="inv_alta_img_file",
+                    )
+                    img_url = st.text_input(
+                        "o pegar URL (opcional)",
+                        key="inv_alta_img",
+                        help="Si subís foto arriba, al guardar se usa esa y se llena `imagen_url` automáticamente.",
+                    )
+                else:
+                    img_file = None
+                    st.markdown("**Imagen (solo enlace, opcional)**")
+                    img_url = st.text_input(
+                        "URL de imagen (opcional)",
+                        key="inv_alta_img",
+                        help="Subida a Storage desactivada (`[catalogo] enabled = false`).",
+                    )
             with st.form(f"f_prod_{int(st.session_state.get('inv_prod_form_nonce', 0))}"):
                 desc = st.text_input("Descripción", max_chars=500, key="inv_alta_prod_desc")
                 cx, mx = st.columns(2)
@@ -5383,7 +5429,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                         )
                                         if not new_id:
                                             raise RuntimeError(_inv_alta_producto_id_missing_help())
-                                        if img_file is not None and new_id:
+                                        if _catalogo_fotos_enabled() and img_file is not None and new_id:
                                             try:
                                                 bucket = _catalogo_bucket_name()
                                                 data = img_file.getvalue()
@@ -5462,7 +5508,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                 )
                                 if not new_id:
                                     raise RuntimeError(_inv_alta_producto_id_missing_help())
-                                if img_file is not None and new_id:
+                                if _catalogo_fotos_enabled() and img_file is not None and new_id:
                                     try:
                                         bucket = _catalogo_bucket_name()
                                         data = img_file.getvalue()
@@ -7078,7 +7124,8 @@ def panel_reportes_catalogo_fotos(sb: Client, erp_uid: str) -> None:
     st.info(
         "**¿Para qué sirve esto?** Las fotos **no cambian el precio ni el stock**: solo ayudan a **reconocer el repuesto**. "
         "Sirven para mandar la foto al cliente por **WhatsApp**, enseñarla en el **mostrador**, o **imprimir** una hoja con foto y código. "
-        "El sistema guarda **varias fotos** por producto, pero **una sola** es la “de portada”: la que se ve primero en listados y en el catálogo HTML."
+        "El sistema guarda **varias fotos** por producto, pero **una sola** es la “de portada”: la que se ve primero en listados y en el catálogo HTML. "
+        "**Si no las usás**, en `secrets.toml` podés poner `[catalogo] enabled = false` y el ERP deja de mostrar esta sección y de subir archivos a Storage."
     )
     st.caption(
         "**Siguiente paso:** elegí un producto en el desplegable de abajo para subir imágenes, elegir la de portada o generar el HTML para imprimir."
@@ -7447,6 +7494,7 @@ def module_reportes(sb: Client, erp_uid: str, t: dict[str, Any] | None, rol: str
         return
 
     st.subheader("Reportes")
+    cat_fotos_on = _catalogo_fotos_enabled()
     have_t = bool(t) if can_fin else True
     t_bs = float(t["tasa_bs"]) if t else 0.0
     t_usdt = float(t["tasa_usdt"]) if t else 0.0
@@ -7458,30 +7506,54 @@ def module_reportes(sb: Client, erp_uid: str, t: dict[str, Any] | None, rol: str
             "las columnas en bolívares son **referencia** según la tasa del día guardada abajo."
         )
         if not have_t:
-            st.warning(
-                "Aún no hay **tasas del día** cargadas en el Dashboard: los reportes en bolívares no se muestran hasta que las registres. "
-                "La pestaña **Catálogo y etiquetas** funciona igual."
+            _w_tasas = (
+                "Aún no hay **tasas del día** cargadas en el Dashboard: los reportes en bolívares no se muestran hasta que las registres."
             )
+            if cat_fotos_on:
+                _w_tasas += " La pestaña **Catálogo y etiquetas** funciona igual."
+            st.warning(_w_tasas)
         else:
             st.caption(
                 f"Referencia: 1 USD equivale a **Bs** {int(round(t_bs)):,d} · **USDT** {int(round(t_usdt)):,d}"
             )
     else:
-        st.caption(
-            "Catálogo de productos: **fotos** (una de portada + galería) y **página HTML** para imprimir etiquetas o listados."
-        )
+        if cat_fotos_on:
+            st.caption(
+                "Catálogo de productos: **fotos** (una de portada + galería) y **página HTML** para imprimir etiquetas o listados."
+            )
+        else:
+            st.warning(
+                "Las **fotos de producto y el catálogo HTML** están **desactivados** en la configuración "
+                "(`secrets` → `[catalogo]` → `enabled = false`). No se usa Storage ni la tabla de fotos desde esta pantalla."
+            )
+            st.caption(
+                "Si querés volver a usarlas, poné `enabled = true` o quitá la clave `enabled`. "
+                "Los demás reportes no dependen de las fotos."
+            )
+            return
 
     if can_fin:
-        tab_inv, tab_caja, tab_ven, tab_comp, tab_cartera, tab_cat = st.tabs(
-            [
-                "Inventario",
-                "Entradas y salidas de caja",
-                "Ventas",
-                "Compras",
-                "Quién debe / a quién debemos",
-                "Catálogo y etiquetas",
-            ]
-        )
+        if cat_fotos_on:
+            tab_inv, tab_caja, tab_ven, tab_comp, tab_cartera, tab_cat = st.tabs(
+                [
+                    "Inventario",
+                    "Entradas y salidas de caja",
+                    "Ventas",
+                    "Compras",
+                    "Quién debe / a quién debemos",
+                    "Catálogo y etiquetas",
+                ]
+            )
+        else:
+            tab_inv, tab_caja, tab_ven, tab_comp, tab_cartera = st.tabs(
+                [
+                    "Inventario",
+                    "Entradas y salidas de caja",
+                    "Ventas",
+                    "Compras",
+                    "Quién debe / a quién debemos",
+                ]
+            )
     else:
         tab_cat = st.tabs(["Catálogo y etiquetas"])[0]
 
@@ -8023,8 +8095,9 @@ def module_reportes(sb: Client, erp_uid: str, t: dict[str, Any] | None, rol: str
                     disabled=df_car_csv.empty,
                 )
 
-    with tab_cat:
-        panel_reportes_catalogo_fotos(sb, erp_uid)
+    if cat_fotos_on:
+        with tab_cat:
+            panel_reportes_catalogo_fotos(sb, erp_uid)
 
 def module_usuarios(sb: Client) -> None:
     st.subheader("Usuarios del sistema")
