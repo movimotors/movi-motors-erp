@@ -42,6 +42,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
+from postgrest.types import ReturnMethod
 from supabase import Client
 
 
@@ -747,11 +748,30 @@ def _movi_reset_producto_alta_fields() -> None:
     )
 
 
+def _movi_api_response_first_row_data(data: Any) -> dict[str, Any] | None:
+    """Normaliza `data` de APIResponse: lista de filas, un solo dict, o vacío."""
+    if data is None:
+        return None
+    if isinstance(data, dict):
+        if data.get("message") and (
+            "code" in data or "hint" in data or "details" in data
+        ):
+            return None
+        return data
+    if isinstance(data, list):
+        if not data:
+            return None
+        r0 = data[0]
+        return r0 if isinstance(r0, dict) else None
+    return None
+
+
 def _inv_resolve_producto_id_after_insert(
-    sb: Client, *, ins_rows: list[dict[str, Any]] | None, codigo: str | None
+    sb: Client, *, ins_data: Any, codigo: str | None
 ) -> str:
-    """Si la respuesta del insert no trae `id`, recuperamos por código (único)."""
-    rid = str((ins_rows or [{}])[0].get("id") or "").strip()
+    """Obtiene `id` del cuerpo del insert o, si falta, con SELECT por código único."""
+    row = _movi_api_response_first_row_data(ins_data)
+    rid = str((row or {}).get("id") or "").strip()
     if rid:
         return rid
     c = (codigo or "").strip()
@@ -759,9 +779,19 @@ def _inv_resolve_producto_id_after_insert(
         return ""
     try:
         chk = sb.table("productos").select("id").eq("codigo", c).limit(1).execute()
-        return str((chk.data or [{}])[0].get("id") or "").strip()
+        row2 = _movi_api_response_first_row_data(chk.data)
+        return str((row2 or {}).get("id") or "").strip()
     except Exception:
         return ""
+
+
+def _inv_alta_producto_id_missing_help() -> str:
+    return (
+        "El alta no devolvió el ID del producto y no apareció al buscar por código. "
+        "En `.streamlit/secrets.toml` usá **SUPABASE_KEY** = clave **service_role** "
+        "(Supabase → Project Settings → API), no la clave **anon**. "
+        "Con anon, RLS suele bloquear lecturas aunque el insert parezca OK."
+    )
 
 
 def _erp_user_uuid_or_none(erp_uid: str) -> str | None:
@@ -5258,11 +5288,14 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                                 "precio_v_usd": float(pv),
                                                 "categoria_id": cid,
                                                 "activo": True,
-                                            }
+                                            },
+                                            returning=ReturnMethod.representation,
                                         ).execute()
                                         new_id = _inv_resolve_producto_id_after_insert(
-                                            sb, ins_rows=ins.data, codigo=codigo_final
+                                            sb, ins_data=ins.data, codigo=codigo_final
                                         )
+                                        if not new_id:
+                                            raise RuntimeError(_inv_alta_producto_id_missing_help())
                                         if img_file is not None and new_id:
                                             try:
                                                 bucket = _catalogo_bucket_name()
@@ -5333,11 +5366,14 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                         "precio_v_usd": float(pv),
                                         "categoria_id": cid,
                                         "activo": True,
-                                    }
+                                    },
+                                    returning=ReturnMethod.representation,
                                 ).execute()
                                 new_id = _inv_resolve_producto_id_after_insert(
-                                    sb, ins_rows=insm.data, codigo=_cm
+                                    sb, ins_data=insm.data, codigo=_cm
                                 )
+                                if not new_id:
+                                    raise RuntimeError(_inv_alta_producto_id_missing_help())
                                 if img_file is not None and new_id:
                                     try:
                                         bucket = _catalogo_bucket_name()
