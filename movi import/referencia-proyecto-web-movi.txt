@@ -1,4 +1,11 @@
 ================================================================================
+UBICACIÓN EN EL REPOSITORIO
+================================================================================
+
+  Carpeta: movi import/
+  Archivo: referencia-proyecto-web-movi.txt
+
+================================================================================
 PALABRA CLAVE / ETIQUETA PARA RETOMAR EN CURSOR O EN OTRO CHAT
 ================================================================================
 
@@ -50,4 +57,4 @@ DOCUMENTO DE ESTRUCTURA PROFESIONAL (INTERNO)
 ÚLTIMA ACTUALIZACIÓN DE ESTE ARCHIVO
 ================================================================================
 
-  2026-04-04
+  2026-04-04 — referencia movida a la carpeta "movi import"
