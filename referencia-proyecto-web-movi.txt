@@ -4,6 +4,10 @@ PALABRA CLAVE / ETIQUETA PARA RETOMAR EN CURSOR O EN OTRO CHAT
 
   MOV-WEB-LOVABLE
 
+  Palabra clave adicional (búsqueda / retomar tema negocio web):
+  IMPORTACION
+  (o frase: "Movi importación China Venezuela")
+
   (Frase alternativa: "proyecto web Movi Import Lovable")
 
 ================================================================================
