@@ -701,7 +701,7 @@ def _movi_bump_form_nonce(name: str) -> None:
 
 def _movi_reset_venta_form_fields() -> None:
     """Quita el estado de widgets del formulario de venta (incl. cobros y líneas de producto)."""
-    _movi_ss_pop_key_prefixes("vp_", "vq_", "vpu_", "vcb_", "vca_")
+    _movi_ss_pop_key_prefixes("vp_", "vq_", "vpu_", "vcb_", "vca_", "vsrl_")
     _movi_ss_pop_keys(
         "venta_doc_tasa_bs",
         "venta_abono_credito",
@@ -746,6 +746,7 @@ def _movi_reset_producto_alta_fields() -> None:
         "inv_alta_img",
         "inv_alta_img_file",
         "inv_alta_stock",
+        "inv_alta_seriales",
         "inv_alta_smin",
         "inv_alta_costo",
         "inv_alta_pv",
@@ -1294,6 +1295,47 @@ def _inv_build_compat_dict(marcas_csv: str, anos: str) -> dict[str, Any]:
     return out
 
 
+def _inv_categoria_sugiere_seriales_motor(nombre_categoria: str) -> bool:
+    """True si el nombre de categoría indica motores (p. ej. «Motores», «Motor usado»)."""
+    n = (nombre_categoria or "").strip().lower()
+    return "motor" in n
+
+
+def _inv_compat_seriales_motor_list(d: dict[str, Any]) -> list[str]:
+    raw = d.get("seriales_motor")
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if str(x).strip()]
+    return []
+
+
+def _inv_parse_seriales_motor_texto(s: str) -> list[str]:
+    out: list[str] = []
+    for line in (s or "").splitlines():
+        for part in line.replace(";", ",").split(","):
+            t = part.strip()
+            if t:
+                out.append(t)
+    return out
+
+
+def _inv_compat_merge_seriales(base: dict[str, Any], seriales: list[str]) -> dict[str, Any]:
+    out = dict(base)
+    if seriales:
+        out["seriales_motor"] = seriales
+    else:
+        out.pop("seriales_motor", None)
+    return out
+
+
+def _inv_compat_seriales_motor_resumen(d: dict[str, Any], *, max_vis: int = 4) -> str:
+    lst = _inv_compat_seriales_motor_list(d)
+    if not lst:
+        return ""
+    head = lst[:max_vis]
+    suf = f" (+{len(lst) - max_vis} más)" if len(lst) > max_vis else ""
+    return ", ".join(head) + suf
+
+
 def _inv_merge_marcas_catalogo_texto(seleccion: list[str], texto_extra: str) -> str:
     """Une marcas elegidas en multiselect + las que escribís a mano (coma o punto y coma)."""
     nombres: set[str] = set()
@@ -1570,12 +1612,15 @@ def _inv_enrich_compat_columns(df: pd.DataFrame) -> pd.DataFrame:
         return df
     vc: list[str] = []
     va: list[str] = []
+    vs: list[str] = []
     for _, row in df.iterrows():
         d = _inv_compat_as_dict(row.get("compatibilidad"))
         vc.append(_inv_compat_marcas_str(d))
         va.append(_inv_compat_anos_str(d))
+        vs.append(_inv_compat_seriales_motor_resumen(d))
     df["vehiculos_compat"] = vc
     df["años_compat"] = va
+    df["seriales_motor"] = vs
     return df
 
 
@@ -5380,9 +5425,39 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                     index=_cat_ix,
                                     key=f"inv_ficha_cat_{_pid}",
                                 )
+                                _srl_ini_f = "\n".join(_inv_compat_seriales_motor_list(_d_comp))
+                                _show_seriales_f = _inv_categoria_sugiere_seriales_motor(
+                                    str(_fsel_cat or "").strip()
+                                ) or bool(_srl_ini_f)
+                                if _show_seriales_f:
+                                    st.markdown("**Seriales (motores)**")
+                                    st.caption(
+                                        "Un número por **unidad física** en almacén. Al vender con serie, el sistema "
+                                        "saca ese valor del listado y lo guarda en la factura (ejecutá **patch_023** en Supabase)."
+                                    )
+                                    _f_srl = st.text_area(
+                                        "Números de serie — uno por línea o separados por coma",
+                                        value=_srl_ini_f,
+                                        height=120,
+                                        key=f"inv_ficha_srl_{_pid}",
+                                    )
+                                else:
+                                    _f_srl = ""
                                 if st.form_submit_button("Guardar cambios del producto"):
                                     _merged_mv = _inv_merge_marcas_catalogo_texto(_fpick_mv, _fextra_mv)
                                     _compat_f = _inv_build_compat_dict(_merged_mv, _fanos)
+                                    if _show_seriales_f:
+                                        _srl_parsed = _inv_parse_seriales_motor_texto(str(_f_srl))
+                                        _compat_f = _inv_compat_merge_seriales(_compat_f, _srl_parsed)
+                                        if _srl_parsed and int(_ns) != len(_srl_parsed):
+                                            st.warning(
+                                                f"Hay **{len(_srl_parsed)}** serie(s) cargadas y **stock {_ns}** unidades: "
+                                                "conviene que coincidan para controlar motores."
+                                            )
+                                    else:
+                                        _prev_srl = _inv_compat_seriales_motor_list(_d_comp)
+                                        if _prev_srl:
+                                            _compat_f = _inv_compat_merge_seriales(_compat_f, _prev_srl)
                                     _cid_f = (
                                         _nombre_a_id_cat.get(str(_fsel_cat).strip())
                                         if str(_fsel_cat or "").strip()
@@ -5594,6 +5669,16 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                     format="%d",
                     key="inv_alta_smin",
                 )
+                _alta_motor_cat = _inv_categoria_sugiere_seriales_motor(str(cname or ""))
+                _alta_srl = ""
+                if _alta_motor_cat:
+                    st.markdown("**Seriales (motores)**")
+                    st.caption("Un número de serie por cada unidad en **stock** (alinear con patch_023 en Supabase).")
+                    _alta_srl = st.text_area(
+                        "Números de serie — uno por línea o separados por coma",
+                        height=100,
+                        key="inv_alta_seriales",
+                    )
                 costo = st.number_input("Costo USD", min_value=0.0, value=0.0, format="%.2f", key="inv_alta_costo")
                 pv = st.number_input(
                     "Precio venta USD (precio_v_usd)",
@@ -5614,6 +5699,13 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                         _pick_mv = list(st.session_state.get("inv_alta_marcas_pick") or [])
                         _merged_mv = _inv_merge_marcas_catalogo_texto(_pick_mv, marcas_auto)
                         _compat_ins = _inv_build_compat_dict(_merged_mv, anos_auto)
+                        if _alta_motor_cat:
+                            _srl_alta = _inv_parse_seriales_motor_texto(str(_alta_srl))
+                            _compat_ins = _inv_compat_merge_seriales(_compat_ins, _srl_alta)
+                            if _srl_alta and int(stock) != len(_srl_alta):
+                                st.warning(
+                                    f"Seriales: **{len(_srl_alta)}** vs stock **{int(stock)}** — revisá que coincidan."
+                                )
                         if cod_auto:
                             if not cname:
                                 st.error("Para código automático elegí una **categoría**.")
@@ -6341,22 +6433,58 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
     try:
         prods = (
             sb.table("productos")
-            .select("id,descripcion,precio_v_usd,stock_actual,es_compuesto")
+            .select("id,descripcion,precio_v_usd,stock_actual,es_compuesto,categoria_id,categorias(nombre)")
             .eq("activo", True)
             .order("descripcion")
             .execute()
         )
     except Exception:
-        prods = (
-            sb.table("productos")
-            .select("id,descripcion,precio_v_usd,stock_actual")
-            .eq("activo", True)
-            .order("descripcion")
-            .execute()
-        )
+        try:
+            prods = (
+                sb.table("productos")
+                .select("id,descripcion,precio_v_usd,stock_actual,es_compuesto")
+                .eq("activo", True)
+                .order("descripcion")
+                .execute()
+            )
+        except Exception:
+            prods = (
+                sb.table("productos")
+                .select("id,descripcion,precio_v_usd,stock_actual")
+                .eq("activo", True)
+                .order("descripcion")
+                .execute()
+            )
     plist = prods.data or []
     for _p in plist:
         _p.setdefault("es_compuesto", False)
+
+    def _venta_cat_nombre(p: dict[str, Any]) -> str:
+        c = p.get("categorias")
+        if isinstance(c, dict):
+            return str(c.get("nombre") or "").strip()
+        return ""
+
+    def _venta_pide_seriales_motor(p: dict[str, Any]) -> bool:
+        return _inv_categoria_sugiere_seriales_motor(_venta_cat_nombre(p))
+
+    def _venta_validar_seriales_motor_lineas(lines: list[dict[str, Any]]) -> str | None:
+        for ln in lines:
+            pid = str(ln.get("producto_id") or "")
+            p = next((x for x in plist if str(x.get("id")) == pid), None)
+            if not p or not _venta_pide_seriales_motor(p):
+                continue
+            n = int(ln.get("cantidad") or 0)
+            srl = [str(s).strip() for s in (ln.get("seriales") or []) if str(s).strip()]
+            if len(srl) != n:
+                return (
+                    f"**Motores:** en cada línea hacen falta tantos seriales como unidades. "
+                    f"Producto «{str(p.get('descripcion') or '')[:48]}»: necesitás **{n}** número(s) de serie."
+                )
+            if len(set(srl)) != len(srl):
+                return "**Motores:** no repetir el mismo serial en una misma línea de venta."
+        return None
+
     if not plist:
         st.warning("No hay productos activos.")
         st.stop()
@@ -6446,7 +6574,24 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                 key=f"vq_{i}",
             )
             pu = c3.number_input("P.U. USD", min_value=0.0, value=float(id_to_price.get(pid, 0)), format="%.2f", key=f"vpu_{i}")
-            new_lines.append({"producto_id": pid, "cantidad": int(qty), "precio_unitario_usd": float(pu)})
+            row_line: dict[str, Any] = {"producto_id": pid, "cantidad": int(qty), "precio_unitario_usd": float(pu)}
+            _p_sel = next((x for x in plist if str(x.get("id")) == str(pid)), None)
+            if _p_sel and _venta_pide_seriales_motor(_p_sel):
+                st.caption(
+                    f"**Motores (línea {i + 1}):** indicá **{int(qty)}** número(s) de serie — deben estar cargados en **Inventario** "
+                    "para este producto (misma cantidad que unidades vendidas)."
+                )
+                _srl_v = st.text_area(
+                    f"Seriales línea {i + 1}",
+                    height=70,
+                    key=f"vsrl_{i}",
+                    placeholder="Uno por línea o separados por coma",
+                    label_visibility="collapsed",
+                )
+                _srl_list = _inv_parse_seriales_motor_texto(str(_srl_v))
+                if _srl_list:
+                    row_line["seriales"] = _srl_list
+            new_lines.append(row_line)
 
         est_total = round(sum(float(l["cantidad"]) * float(l["precio_unitario_usd"]) for l in new_lines), 2)
 
@@ -6584,64 +6729,29 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                     cobros_pl.append(_row_a)
 
         if st.form_submit_button("Registrar venta (atómica)"):
-            try:
-                t_bs_doc = _tasa_bs_para_documento(t, usar_bcv=(doc_tasa == DOC_TASA_BS_OPTS[0]))
-            except ValueError as e:
-                st.error(str(e))
+            _err_srl_v = _venta_validar_seriales_motor_lineas(new_lines)
+            if _err_srl_v:
+                st.error(_err_srl_v)
             else:
-                payload: dict[str, Any] = {
-                    "p_usuario_id": erp_uid,
-                    "p_cliente": cliente,
-                    "p_forma_pago": forma,
-                    "p_caja_id": None,
-                    "p_tasa_bs": t_bs_doc,
-                    "p_tasa_usdt": t_usdt,
-                    "p_fecha_vencimiento": str(fv) if forma == "credito" else None,
-                    "p_notas": notas,
-                    "p_lineas": new_lines,
-                }
-                if forma == "contado":
-                    if not caja_ids:
-                        st.error("Sin cajas.")
-                    else:
-                        p_cobros = [
-                            {"caja_id": str(row["caja_id"]), "moneda": row["moneda"], "monto": row["monto"]}
-                            for row in cobros_pl
-                        ]
-                        sum_eq = round(
-                            sum(
-                                _monto_nativo_a_usd(r["moneda"], r["monto"], t_bs_doc, t_usdt) for r in p_cobros
-                            ),
-                            2,
-                        )
-                        if any(r["monto"] <= 0 for r in p_cobros):
-                            st.error("Cada línea de cobro debe tener monto > 0.")
-                        elif abs(sum_eq - est_total) > 0.05:
-                            st.error(
-                                f"Los cobros equivalen a ~**US$ {sum_eq:,.2f}**; el total de la venta es **US$ {est_total:,.2f}**."
-                            )
-                        else:
-                            payload["p_caja_id"] = str(p_cobros[0]["caja_id"])
-                            payload["p_cobros"] = p_cobros
-                            try:
-                                sb.rpc("crear_venta_erp", payload).execute()
-                                st.success("Venta registrada.")
-                                _movi_reset_venta_session_nueva(plist, id_to_price)
-                                st.rerun()
-                            except Exception as e:
-                                err = str(e)
-                                if "p_cobros" in err or "could not find" in err.lower():
-                                    st.error(
-                                        f"{err} · Si falta el parámetro en BD, ejecutá `supabase/patch_008_movimientos_moneda_cobros.sql`."
-                                    )
-                                else:
-                                    st.error(f"No se pudo registrar: {e}")
+                try:
+                    t_bs_doc = _tasa_bs_para_documento(t, usar_bcv=(doc_tasa == DOC_TASA_BS_OPTS[0]))
+                except ValueError as e:
+                    st.error(str(e))
                 else:
-                    if abono_hoy:
+                    payload: dict[str, Any] = {
+                        "p_usuario_id": erp_uid,
+                        "p_cliente": cliente,
+                        "p_forma_pago": forma,
+                        "p_caja_id": None,
+                        "p_tasa_bs": t_bs_doc,
+                        "p_tasa_usdt": t_usdt,
+                        "p_fecha_vencimiento": str(fv) if forma == "credito" else None,
+                        "p_notas": notas,
+                        "p_lineas": new_lines,
+                    }
+                    if forma == "contado":
                         if not caja_ids:
-                            st.error("Sin cuentas activas para el abono.")
-                        elif not cobros_pl:
-                            st.error("Marcaste abono hoy pero no hay líneas de cobro.")
+                            st.error("Sin cajas.")
                         else:
                             p_cobros = [
                                 {"caja_id": str(row["caja_id"]), "moneda": row["moneda"], "monto": row["monto"]}
@@ -6649,47 +6759,88 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                             ]
                             sum_eq = round(
                                 sum(
-                                    _monto_nativo_a_usd(r["moneda"], r["monto"], t_bs_doc, t_usdt)
-                                    for r in p_cobros
+                                    _monto_nativo_a_usd(r["moneda"], r["monto"], t_bs_doc, t_usdt) for r in p_cobros
                                 ),
                                 2,
                             )
                             if any(r["monto"] <= 0 for r in p_cobros):
-                                st.error("Cada línea del abono debe tener monto mayor a cero.")
-                            elif sum_eq >= est_total - 0.05:
+                                st.error("Cada línea de cobro debe tener monto > 0.")
+                            elif abs(sum_eq - est_total) > 0.05:
                                 st.error(
-                                    "El abono cubre casi todo el total. Para eso usá **contado**. "
-                                    "El abono en crédito debe dejar **algo pendiente** por cobrar."
+                                    f"Los cobros equivalen a ~**US$ {sum_eq:,.2f}**; el total de la venta es **US$ {est_total:,.2f}**."
                                 )
-                            elif sum_eq <= 0.05:
-                                st.error("El abono en dólares equivalente es casi cero. Quitá el tilde de abono o cargá el monto.")
                             else:
+                                payload["p_caja_id"] = str(p_cobros[0]["caja_id"])
                                 payload["p_cobros"] = p_cobros
                                 try:
                                     sb.rpc("crear_venta_erp", payload).execute()
-                                    st.success(
-                                        f"Venta a crédito registrada. Abono ~US$ {sum_eq:,.2f}; "
-                                        f"pendiente ~US$ {est_total - sum_eq:,.2f} en cuentas por cobrar."
-                                    )
+                                    st.success("Venta registrada.")
                                     _movi_reset_venta_session_nueva(plist, id_to_price)
                                     st.rerun()
                                 except Exception as e:
                                     err = str(e)
-                                    if "abono" in err.lower() or "cobros" in err.lower():
+                                    if "p_cobros" in err or "could not find" in err.lower():
                                         st.error(
-                                            f"{err} · Si la base aún no acepta abono en crédito, ejecutá "
-                                            "`supabase/patch_016_venta_credito_abono_inicial.sql` en Supabase."
+                                            f"{err} · Si falta el parámetro en BD, ejecutá `supabase/patch_008_movimientos_moneda_cobros.sql`."
                                         )
                                     else:
                                         st.error(f"No se pudo registrar: {e}")
                     else:
-                        try:
-                            sb.rpc("crear_venta_erp", payload).execute()
-                            st.success("Venta a crédito registrada (todo pendiente de cobro).")
-                            _movi_reset_venta_session_nueva(plist, id_to_price)
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"No se pudo registrar: {e}")
+                        if abono_hoy:
+                            if not caja_ids:
+                                st.error("Sin cuentas activas para el abono.")
+                            elif not cobros_pl:
+                                st.error("Marcaste abono hoy pero no hay líneas de cobro.")
+                            else:
+                                p_cobros = [
+                                    {"caja_id": str(row["caja_id"]), "moneda": row["moneda"], "monto": row["monto"]}
+                                    for row in cobros_pl
+                                ]
+                                sum_eq = round(
+                                    sum(
+                                        _monto_nativo_a_usd(r["moneda"], r["monto"], t_bs_doc, t_usdt)
+                                        for r in p_cobros
+                                    ),
+                                    2,
+                                )
+                                if any(r["monto"] <= 0 for r in p_cobros):
+                                    st.error("Cada línea del abono debe tener monto mayor a cero.")
+                                elif sum_eq >= est_total - 0.05:
+                                    st.error(
+                                        "El abono cubre casi todo el total. Para eso usá **contado**. "
+                                        "El abono en crédito debe dejar **algo pendiente** por cobrar."
+                                    )
+                                elif sum_eq <= 0.05:
+                                    st.error(
+                                        "El abono en dólares equivalente es casi cero. Quitá el tilde de abono o cargá el monto."
+                                    )
+                                else:
+                                    payload["p_cobros"] = p_cobros
+                                    try:
+                                        sb.rpc("crear_venta_erp", payload).execute()
+                                        st.success(
+                                            f"Venta a crédito registrada. Abono ~US$ {sum_eq:,.2f}; "
+                                            f"pendiente ~US$ {est_total - sum_eq:,.2f} en cuentas por cobrar."
+                                        )
+                                        _movi_reset_venta_session_nueva(plist, id_to_price)
+                                        st.rerun()
+                                    except Exception as e:
+                                        err = str(e)
+                                        if "abono" in err.lower() or "cobros" in err.lower():
+                                            st.error(
+                                                f"{err} · Si la base aún no acepta abono en crédito, ejecutá "
+                                                "`supabase/patch_016_venta_credito_abono_inicial.sql` en Supabase."
+                                            )
+                                        else:
+                                            st.error(f"No se pudo registrar: {e}")
+                        else:
+                            try:
+                                sb.rpc("crear_venta_erp", payload).execute()
+                                st.success("Venta a crédito registrada (todo pendiente de cobro).")
+                                _movi_reset_venta_session_nueva(plist, id_to_price)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"No se pudo registrar: {e}")
 
     _ba, _bb = st.columns(2)
     with _ba:
