@@ -1383,6 +1383,51 @@ def _inv_stock_int(x: Any) -> int:
         return 0
 
 
+def _inv_fetch_productos_para_dropdown_eliminar(sb: Client) -> tuple[list[dict[str, Any]], str]:
+    """
+    Todos los productos para el desplegable de eliminar. Los kits también viven en `productos`
+    (`es_compuesto`); `productos_kit_items` solo guarda componentes. Pagina resultados para no
+    cortar en el límite típico de PostgREST (~1000 filas).
+    """
+    page = 1000
+    out: list[dict[str, Any]] = []
+    use_created = True
+    order_hint = "Listado: **últimos cargados primero** (por `created_at`)."
+    offset = 0
+    while True:
+        try:
+            if use_created:
+                r = (
+                    sb.table("productos")
+                    .select("id,codigo,descripcion,stock_actual,es_compuesto,created_at")
+                    .order("created_at", desc=True)
+                    .range(offset, offset + page - 1)
+                    .execute()
+                )
+            else:
+                r = (
+                    sb.table("productos")
+                    .select("id,codigo,descripcion,stock_actual,es_compuesto")
+                    .order("descripcion")
+                    .range(offset, offset + page - 1)
+                    .execute()
+                )
+        except Exception:
+            if use_created and offset == 0:
+                use_created = False
+                order_hint = "Listado: por **descripción** (A–Z); si falla `created_at`, sin orden de fecha."
+                continue
+            break
+        batch = r.data or []
+        out.extend(batch)
+        if len(batch) < page:
+            break
+        offset += page
+        if offset > 200_000:
+            break
+    return out, order_hint
+
+
 def _line_qty_int(x: Any, *, default: int = 1) -> int:
     """Cantidad en líneas de venta/compra: entero ≥ 1."""
     try:
@@ -1544,14 +1589,36 @@ def _fetch_productos_inventario_df(sb: Client) -> pd.DataFrame:
         "precio_v_bs_ref,costo_bs_ref,activo,categoria_id"
     )
     cols_min = "id,codigo,descripcion,stock_actual,stock_minimo,costo_usd,precio_v_usd,activo,categoria_id"
+    page = 1000
+
+    def _paged(cols: str) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            r = (
+                sb.table("productos")
+                .select(cols)
+                .order("descripcion")
+                .range(offset, offset + page - 1)
+                .execute()
+            )
+            batch = r.data or []
+            rows.extend(batch)
+            if len(batch) < page:
+                break
+            offset += page
+            if offset > 200_000:
+                break
+        return rows
+
     try:
-        r = sb.table("productos").select(cols_full).order("descripcion").execute()
+        data = _paged(cols_full)
     except Exception:
         try:
-            r = sb.table("productos").select(cols_base).order("descripcion").execute()
+            data = _paged(cols_base)
         except Exception:
-            r = sb.table("productos").select(cols_min).order("descripcion").execute()
-    return pd.DataFrame(r.data or [])
+            data = _paged(cols_min)
+    return pd.DataFrame(data)
 
 
 def _normalize_productos_inventario_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -5866,23 +5933,28 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
 
         with _t_del:
             st.caption(
-                "Solo con **stock en cero**. Si el producto ya tiene **ventas o compras**, la base suele **no dejar borrarlo**; "
-                "en ese caso desactivalo (**Activo** = no) en la tabla de abajo."
+                "Es la misma tabla **`productos`**: un **kit** es un producto con **compuesto** marcado; "
+                "no se lee `productos_kit_items` acá. Solo se **elimina** de la base si el ítem tiene **stock 0** "
+                "y sin ventas/compras que lo referencien; si no podés borrarlo, bajá stock en **Carga/Descarga** o "
+                "desactivalo (**Activo** = no) en la grilla."
             )
             try:
-                _pz = (
-                    sb.table("productos")
-                    .select("id,codigo,descripcion,stock_actual")
-                    .eq("stock_actual", 0)
-                    .order("descripcion")
-                    .execute()
-                )
-                _rows_z = _pz.data or []
+                _rows_z, _ord_hint_z = _inv_fetch_productos_para_dropdown_eliminar(sb)
             except Exception as exz:
-                _rows_z = []
+                _rows_z, _ord_hint_z = [], ""
                 st.error(str(exz))
+            if _ord_hint_z:
+                st.caption(_ord_hint_z)
+            _hide_kits_del = st.checkbox(
+                "Ocultar kits (solo ítems simples en la lista)",
+                value=False,
+                key="inv_del_hide_kits",
+                help="Los kits siguen siendo filas en productos; ocultalos si buscás un repuesto suelto.",
+            )
+            if _hide_kits_del:
+                _rows_z = [r for r in _rows_z if not r.get("es_compuesto")]
             if not _rows_z:
-                st.info("No hay productos con stock **0** para eliminar.")
+                st.info("No hay productos que mostrar (o ninguno coincide con el filtro de kits).")
             else:
                 _lab_z: dict[str, str] = {}
                 for _rz in _rows_z:
@@ -5891,7 +5963,13 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                         continue
                     _cz = _export_cell_txt(_rz.get("codigo")) or "—"
                     _dz = (_export_cell_txt(_rz.get("descripcion")) or "")[:56]
-                    _lab_z[f"{_cz} · {_dz}"] = _iz
+                    _stz = _inv_stock_int(_rz.get("stock_actual"))
+                    _ktz = " · kit" if _rz.get("es_compuesto") else ""
+                    _base_z = f"{_cz} · {_dz} · stock {_stz}{_ktz}"
+                    _lab_one = f"{_base_z} [{_iz[:8]}]"
+                    if _lab_one in _lab_z:
+                        _lab_one = f"{_base_z} [{_iz}]"
+                    _lab_z[_lab_one] = _iz
                 _keys_z = sorted(_lab_z.keys(), key=str.casefold)
                 with st.form(f"inv_form_del_prod_{int(st.session_state.get('inv_del_prod_form_nonce', 0))}"):
                     _sel_z = st.selectbox("Producto a eliminar", options=_keys_z, key="inv_del_prod_sel")
