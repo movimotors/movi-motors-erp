@@ -6548,9 +6548,8 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
 
     t_usdt = float(t["tasa_usdt"])
     st.caption(
-        "Líneas en **USD**: precio unitario y total son **1 USD = 1 USD** en el sistema. "
-        "Si cobrás o referenciás en **bolívares**, elegí la tasa (**BCV** o **P2P Binance**); "
-        "se guarda en la venta para equivalentes en Bs."
+        "Flujo: **cliente y condición** → **productos** (el stock baja al registrar) → **totales** → **cobros**. "
+        "Montos en **USD** (1:1)."
     )
 
     try:
@@ -6648,59 +6647,61 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
         ]
 
     st.session_state.setdefault("venta_n_cobros", 1)
-    b1, b2 = st.columns([1, 3])
-    with b1:
-        if st.button(
-            "➕ Agregar otra forma de pago",
-            help="Cada fila = una cuenta (caja) y un monto en USD, Zelle, bolívares o USDT. Podés combinar varias hasta 10 filas.",
-            key="venta_btn_mas_cobro",
-        ):
-            st.session_state["venta_n_cobros"] = min(10, int(st.session_state.get("venta_n_cobros", 1)) + 1)
-            st.rerun()
-    with b2:
-        if st.button(
-            "↺ Dejar una sola fila de cobro",
-            help="Vuelve a un solo medio de pago (una caja / una moneda).",
-            key="venta_btn_una_cobro",
-        ):
-            st.session_state["venta_n_cobros"] = 1
-            st.rerun()
-    st.info(
-        "**Pago mixto (Zelle + efectivo + Binance/USDT + bolívares, etc.):** tocá **Agregar otra forma de pago** y cargá "
-        "**una fila por cada medio**: elegí la **caja** donde entra el dinero, la **forma/moneda** y el **monto** en esa moneda. "
-        "La **suma en dólares equivalente** de todas las filas debe coincidir con el total de la venta (ver el resumen abajo del formulario)."
-    )
 
-    doc_tasa = st.radio(
-        "¿Con qué referencia querés calcular Bs/USD? (para mostrar equivalentes):",
-        options=DOC_TASA_BS_OPTS,
-        index=_infer_tasa_bs_oper_index(t),
-        horizontal=True,
-        key="venta_doc_tasa_bs",
-        help="Esto solo define la referencia (BCV o P2P) sugerida. Si cobraste Bs a una tasa distinta, ajustala en el campo de abajo.",
-    )
+    st.markdown("### 1. Cliente y condición de venta")
+    c_cli, c_not = st.columns([1, 1])
+    with c_cli:
+        cliente = st.text_input("Cliente", key="venta_cli", autocomplete="off")
+    with c_not:
+        notas = st.text_area(
+            "Notas (opcional)",
+            key="venta_notas",
+            help="Apartado, entrega en taller, teléfono, etc.",
+            height=100,
+        )
+    c_f1, c_f2 = st.columns([1, 1])
+    with c_f1:
+        forma = st.selectbox(
+            "Forma de pago",
+            ["contado", "credito"],
+            key="venta_forma",
+            help="**Crédito:** el cliente se lleva la mercancía y debe el saldo hasta la fecha límite. "
+            "Podés marcar abono el mismo día (apartado con seña). **Contado:** debe pagar todo en el acto.",
+        )
+    with c_f2:
+        fv = st.date_input(
+            "Fecha límite para saldar (solo venta a crédito)",
+            value=date.today() + timedelta(days=30),
+            key="venta_fv",
+            disabled=(forma != "credito"),
+            help="Solo aplica si la forma de pago es **crédito** (CXC).",
+        )
 
-    try:
-        t_bs_sugerida = _tasa_bs_para_documento(t, usar_bcv=(doc_tasa == DOC_TASA_BS_OPTS[0]))
-    except Exception:
-        t_bs_sugerida = 0.0
-
-    t_bs_doc_live = st.number_input(
-        "¿A qué tasa recibiste los bolívares? (Bs por 1 USD)",
-        min_value=0.0,
-        value=float(t_bs_sugerida or 0.0),
-        format="%.2f",
-        key="venta_tasa_bs_override",
-        help=(
-            "Esta es la tasa REAL usada para cobrar los bolívares (por ejemplo Binance P2P del momento). "
-            "Se usa para convertir VES↔USD equivalente, cuadrar cobros y se guarda en la venta."
-        ),
-    )
-
+    st.markdown("### 2. Productos e inventario")
     st.caption(
-        "Líneas de producto y **seriales** se actualizan **al instante** al cambiar producto o cantidad "
-        "(no hace falta **Registrar venta** todavía)."
+        "Al cambiar producto o cantidad, **seriales** y subtotales se actualizan al instante. "
+        "El **stock** se descuenta al pulsar **Registrar venta**."
     )
+    _ba, _bb = st.columns(2)
+    with _ba:
+        if st.button("➕ Añadir línea de producto", key="venta_btn_add_line"):
+            st.session_state["venta_lines"].append(
+                {
+                    "producto_id": str(plist[0]["id"]),
+                    "cantidad": 1,
+                    "precio_unitario_usd": id_to_price[str(plist[0]["id"])],
+                }
+            )
+            st.rerun()
+    with _bb:
+        if st.button(
+            "Limpiar pantalla (nueva venta)",
+            key="venta_btn_clear",
+            help="Borra cliente, notas, líneas y cobros en pantalla sin guardar en la base.",
+        ):
+            _movi_reset_venta_session_nueva(plist, id_to_price)
+            st.rerun()
+
     st.caption("Líneas (montos en USD)")
     new_lines: list[dict[str, Any]] = []
     for i, line in enumerate(st.session_state["venta_lines"]):
@@ -6766,6 +6767,39 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
 
     est_total = round(sum(float(l["cantidad"]) * float(l["precio_unitario_usd"]) for l in new_lines), 2)
 
+    st.markdown("### 3. Tasas y referencia en bolívares")
+    doc_tasa = st.radio(
+        "Referencia Bs/USD (para equivalentes y cobros en bolívares):",
+        options=DOC_TASA_BS_OPTS,
+        index=_infer_tasa_bs_oper_index(t),
+        horizontal=True,
+        key="venta_doc_tasa_bs",
+        help="Sugiere la tasa BCV o P2P. Si cobraste Bs a otra tasa, ajustala abajo.",
+    )
+
+    try:
+        t_bs_sugerida = _tasa_bs_para_documento(t, usar_bcv=(doc_tasa == DOC_TASA_BS_OPTS[0]))
+    except Exception:
+        t_bs_sugerida = 0.0
+
+    t_bs_doc_live = st.number_input(
+        "¿A qué tasa recibiste los bolívares? (Bs por 1 USD)",
+        min_value=0.0,
+        value=float(t_bs_sugerida or 0.0),
+        format="%.2f",
+        key="venta_tasa_bs_override",
+        help=(
+            "Tasa real para cobrar en VES y cuadrar montos. Se guarda en la venta."
+        ),
+    )
+
+    st.markdown("### 4. Totales de esta venta")
+    m1, m2 = st.columns(2)
+    with m1:
+        st.metric("Total venta (USD)", f"{est_total:,.2f}")
+    with m2:
+        st.caption("Equivalentes según tasas del operador y la tasa de arriba.")
+
     try:
         _tb_bcv_v = _tasa_bs_para_documento(t, usar_bcv=True)
         _tb_p2p_v = _tasa_bs_para_documento(t, usar_bcv=False)
@@ -6777,15 +6811,14 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
         _bs_bcv = est_total * _tb_bcv_v
         _bs_p2p = est_total * _tb_p2p_v
         st.info(
-            f"**Total venta US$ {est_total:,.2f}** → equivalente en bolívares: "
-            f"**BCV** {_bs_bcv:,.2f} Bs (@ {_tb_bcv_v:,.2f} Bs/USD) · "
-            f"**P2P Binance (mercado)** {_bs_p2p:,.2f} Bs (@ {_tb_p2p_v:,.2f} Bs/USD)."
+            f"**Equivalente en bolívares:** **BCV** {_bs_bcv:,.2f} Bs (@ {_tb_bcv_v:,.2f}) · "
+            f"**P2P** {_bs_p2p:,.2f} Bs (@ {_tb_p2p_v:,.2f})."
         )
         if _tb_doc_v is not None:
             _bs_doc = est_total * _tb_doc_v
             st.markdown(
-                f"**Aplicado a esta venta** (opción **{doc_tasa}**): el cliente debe pagar **{_bs_doc:,.2f} Bs** "
-                f"si liquidás todo en bolívares — **US$ {est_total:,.2f} × {_tb_doc_v:,.2f} Bs/USD**."
+                f"Con la **tasa aplicada** ({doc_tasa}): **{_bs_doc:,.2f} Bs** "
+                f"(US$ {est_total:,.2f} × {_tb_doc_v:,.2f} Bs/USD)."
             )
     elif _tb_doc_v is not None:
         st.caption(
@@ -6793,34 +6826,38 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             f"(@ {_tb_doc_v:,.2f} Bs/USD)."
         )
 
-    with st.form(f"f_venta_{int(st.session_state.get('venta_form_nonce', 0))}"):
-        cliente = st.text_input("Cliente", key="venta_cli", autocomplete="off")
-        forma = st.selectbox(
-            "Forma de pago",
-            ["contado", "credito"],
-            key="venta_forma",
-            help="**Crédito:** el cliente se lleva la mercancía y debe el saldo hasta la fecha límite. "
-            "Podés marcar abono el mismo día (apartado con seña). **Contado:** debe pagar todo en el acto.",
-        )
-        fv = st.date_input(
-            "Fecha límite para saldar (solo venta a crédito)",
-            value=date.today() + timedelta(days=30),
-            key="venta_fv",
-            help="Es la fecha en que en teoría debería estar pagado lo que quede debiendo. No bloquea el sistema; sirve para reportes y seguimiento.",
-        )
-        notas = st.text_area(
-            "Notas (opcional)",
-            key="venta_notas",
-            help="Podés escribir por ejemplo: Apartado, entrega en taller, teléfono del cliente, etc.",
-        )
+    st.markdown("### 5. Cobros y registro")
+    _bp1, _bp2, _bp3 = st.columns([1, 1, 2])
+    with _bp1:
+        if st.button(
+            "➕ Otra forma de pago",
+            key="venta_btn_mas_cobro",
+            help="Hasta 10 filas: una caja y un monto por medio (Zelle, efectivo, Bs, USDT…).",
+        ):
+            st.session_state["venta_n_cobros"] = min(10, int(st.session_state.get("venta_n_cobros", 1)) + 1)
+            st.rerun()
+    with _bp2:
+        if st.button(
+            "↺ Una sola fila de cobro",
+            key="venta_btn_una_cobro",
+            help="Vuelve a un solo medio de pago.",
+        ):
+            st.session_state["venta_n_cobros"] = 1
+            st.rerun()
+    with _bp3:
+        with st.expander("Ayuda: pago mixto y cuadre"):
+            st.caption(
+                "Podés combinar **varias cajas y monedas** en la misma venta. La **suma en USD equivalente** "
+                "de todas las filas debe coincidir con el total (±0,05). **Zelle** cuenta como USD 1:1."
+            )
 
+    with st.form(f"f_venta_{int(st.session_state.get('venta_form_nonce', 0))}"):
         cobros_pl: list[dict[str, Any]] = []
         if forma == "contado":
             st.markdown("**Cobro al contado — una o varias cajas / medios**")
             st.caption(
-                f"Total venta **US$ {est_total:,.2f}**. Podés usar **varias filas** (botón arriba): por ejemplo una caja **Zelle**, "
-                "otra **efectivo USD**, otra **USDT (Binance)** y otra en **bolívares (VES)**. La suma en **USD equivalente** debe "
-                "cuadrar con el total (±0,05). **Zelle** = USD 1:1. En *Nota de tesorería* podés detallar referencia del pago."
+                f"Total venta **US$ {est_total:,.2f}**. Usá **Otra forma de pago** si necesitás más filas. "
+                "La suma en **USD equivalente** debe cuadrar con el total (±0,05). En *Nota de tesorería* podés detallar referencia."
             )
             if not caja_ids:
                 st.error("No hay cajas activas. Cree una en el módulo Cajas.")
@@ -6901,8 +6938,8 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             if abono_hoy:
                 st.markdown("**Dinero que entra hoy (seña o abono) — una o varias cuentas**")
                 st.caption(
-                    f"Total de la venta **US$ {est_total:,.2f}**. Podés usar **varias filas** como en contado. El abono en USD "
-                    "equivalente debe ser **menor** que el total; el saldo queda en **cuentas por cobrar**. Si paga todo hoy, usá **contado**."
+                    f"Total **US$ {est_total:,.2f}**. El abono en USD equivalente debe ser **menor** que el total; el resto queda en **CXC**. "
+                    "Si cobra todo hoy, usá forma **contado**."
                 )
                 if not caja_ids:
                     st.error("No hay cuentas activas en Cajas. Creá una para registrar el abono.")
@@ -7144,24 +7181,75 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                                 else:
                                     st.error(f"No se pudo registrar: {err}")
 
-    _ba, _bb = st.columns(2)
-    with _ba:
-        if st.button("Añadir línea de producto"):
-            st.session_state["venta_lines"].append(
-                {
-                    "producto_id": str(plist[0]["id"]),
-                    "cantidad": 1,
-                    "precio_unitario_usd": id_to_price[str(plist[0]["id"])],
-                }
-            )
-            st.rerun()
-    with _bb:
-        if st.button(
-            "Limpiar formulario (nueva venta)",
-            help="Borra cliente, notas, líneas y cobros en pantalla sin guardar en la base.",
-        ):
-            _movi_reset_venta_session_nueva(plist, id_to_price)
-            st.rerun()
+    def _venta_fmt_hora_vz(fecha_val: Any) -> str:
+        if fecha_val is None:
+            return "—"
+        try:
+            s = str(fecha_val).strip()
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(ZoneInfo("America/Caracas")).strftime("%H:%M")
+        except Exception:
+            return str(fecha_val)[:16]
+
+    st.divider()
+    st.markdown("### Ventas de hoy (cuadre de caja)")
+    _tz_vz = ZoneInfo("America/Caracas")
+    _now_vz = datetime.now(_tz_vz)
+    _start = _now_vz.replace(hour=0, minute=0, second=0, microsecond=0)
+    _end = _start + timedelta(days=1)
+    try:
+        v_hoy = (
+            sb.table("ventas")
+            .select("numero,cliente,fecha,total_usd,forma_pago,caja_id")
+            .gte("fecha", _start.isoformat())
+            .lt("fecha", _end.isoformat())
+            .order("fecha", desc=True)
+            .execute()
+        )
+    except Exception as ex:
+        v_hoy = None
+        st.warning(f"No se pudo cargar las ventas del día: {ex}")
+
+    if v_hoy is not None:
+        rows_v = v_hoy.data or []
+        st.caption(
+            f"**{_now_vz.strftime('%d/%m/%Y')}** (America/Caracas). Sumás para cruzar con efectivo, Zelle y movimientos por caja."
+        )
+        if not rows_v:
+            st.info("Aún no hay ventas registradas hoy.")
+        else:
+            sum_all = sum(float(r.get("total_usd") or 0) for r in rows_v)
+            sum_c = sum(float(r.get("total_usd") or 0) for r in rows_v if r.get("forma_pago") == "contado")
+            sum_cr = sum(float(r.get("total_usd") or 0) for r in rows_v if r.get("forma_pago") == "credito")
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Ventas hoy (cantidad)", len(rows_v))
+            with k2:
+                st.metric("Total USD (todas)", f"{sum_all:,.2f}")
+            with k3:
+                st.metric("Contado (USD)", f"{sum_c:,.2f}")
+            with k4:
+                st.metric("Crédito (USD)", f"{sum_cr:,.2f}")
+
+            dfvh: list[dict[str, Any]] = []
+            for r in rows_v:
+                cid = r.get("caja_id")
+                caja_txt = caja_fmt(str(cid)) if cid and caja_ids else "—"
+                dfvh.append(
+                    {
+                        "Hora (VZ)": _venta_fmt_hora_vz(r.get("fecha")),
+                        "Nº": int(r.get("numero") or 0),
+                        "Cliente": str(r.get("cliente") or "")[:44],
+                        "Total USD": float(r.get("total_usd") or 0),
+                        "Forma": str(r.get("forma_pago") or "—"),
+                        "Caja ref.": caja_txt,
+                    }
+                )
+            st.dataframe(pd.DataFrame(dfvh), use_container_width=True, hide_index=True)
 
     st.divider()
     st.caption(
