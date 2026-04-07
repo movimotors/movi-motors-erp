@@ -1308,6 +1308,17 @@ def _inv_compat_seriales_motor_list(d: dict[str, Any]) -> list[str]:
     return []
 
 
+def _venta_serial_en_pool_motor(serial_vendido: str, pool: list[str]) -> bool:
+    """Igual que en `crear_venta_erp` (patch_023): compara con trim."""
+    a = (serial_vendido or "").strip()
+    if not a:
+        return False
+    for x in pool:
+        if (x or "").strip() == a:
+            return True
+    return False
+
+
 def _inv_parse_seriales_motor_texto(s: str) -> list[str]:
     out: list[str] = []
     for line in (s or "").splitlines():
@@ -3707,6 +3718,24 @@ _COBR_MON_LBL: dict[str, str] = {
 
 def _fmt_moneda_cobro(code: str) -> str:
     return _COBR_MON_LBL.get(code, code)
+
+
+def _error_msg_from_supabase_exc(e: BaseException) -> str:
+    """Intenta extraer el mensaje legible de errores de PostgREST/Supabase."""
+    m = getattr(e, "message", None)
+    if m:
+        return str(m)
+    s = str(e).strip()
+    if s.startswith("{") and "message" in s:
+        import ast
+
+        try:
+            d = ast.literal_eval(s)
+            if isinstance(d, dict) and d.get("message"):
+                return str(d["message"])
+        except (SyntaxError, ValueError, TypeError):
+            pass
+    return s
 
 
 def _monto_nativo_a_usd(mon: str, monto: float, t_bs: float, t_usdt: float) -> float:
@@ -6502,6 +6531,14 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                 )
             if len(set(srl)) != len(srl):
                 return "**Seriales:** no repetir el mismo número en una misma línea de venta."
+            pool = _inv_compat_seriales_motor_list(_inv_compat_as_dict(p.get("compatibilidad")))
+            for sv in srl:
+                if not _venta_serial_en_pool_motor(sv, pool):
+                    return (
+                        f"**Serial `{sv}`:** no está cargado en **Inventario** para «{str(p.get('descripcion') or '')[:48]}». "
+                        "Abrí **Inventario → editar ese producto** y agregá ese número en **Números de serie** (debe coincidir con lo que vendés). "
+                        "Después volvé a registrar la venta."
+                    )
         return None
 
     if not plist:
@@ -6862,13 +6899,18 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                                     _movi_reset_venta_session_nueva(plist, id_to_price)
                                     st.rerun()
                                 except Exception as e:
-                                    err = str(e)
+                                    err = _error_msg_from_supabase_exc(e)
                                     if "p_cobros" in err or "could not find" in err.lower():
                                         st.error(
                                             f"{err} · Si falta el parámetro en BD, ejecutá `supabase/patch_008_movimientos_moneda_cobros.sql`."
                                         )
+                                    elif "Serial" in err and "no está en el inventario" in err:
+                                        st.error(
+                                            f"**{err}** · Cargá ese número en **Inventario** (ficha del producto → números de serie) "
+                                            "y volvé a registrar la venta."
+                                        )
                                     else:
-                                        st.error(f"No se pudo registrar: {e}")
+                                        st.error(f"No se pudo registrar: {err}")
                     else:
                         if abono_hoy:
                             if not caja_ids:
@@ -6909,14 +6951,19 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                                         _movi_reset_venta_session_nueva(plist, id_to_price)
                                         st.rerun()
                                     except Exception as e:
-                                        err = str(e)
+                                        err = _error_msg_from_supabase_exc(e)
                                         if "abono" in err.lower() or "cobros" in err.lower():
                                             st.error(
                                                 f"{err} · Si la base aún no acepta abono en crédito, ejecutá "
                                                 "`supabase/patch_016_venta_credito_abono_inicial.sql` en Supabase."
                                             )
+                                        elif "Serial" in err and "no está en el inventario" in err:
+                                            st.error(
+                                                f"**{err}** · Cargá ese número en **Inventario** (ficha del producto → números de serie) "
+                                                "y volvé a registrar la venta."
+                                            )
                                         else:
-                                            st.error(f"No se pudo registrar: {e}")
+                                            st.error(f"No se pudo registrar: {err}")
                         else:
                             try:
                                 sb.rpc("crear_venta_erp", payload).execute()
@@ -6924,7 +6971,14 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                                 _movi_reset_venta_session_nueva(plist, id_to_price)
                                 st.rerun()
                             except Exception as e:
-                                st.error(f"No se pudo registrar: {e}")
+                                err = _error_msg_from_supabase_exc(e)
+                                if "Serial" in err and "no está en el inventario" in err:
+                                    st.error(
+                                        f"**{err}** · Cargá ese número en **Inventario** (ficha del producto → números de serie) "
+                                        "y volvé a registrar la venta."
+                                    )
+                                else:
+                                    st.error(f"No se pudo registrar: {err}")
 
     _ba, _bb = st.columns(2)
     with _ba:
