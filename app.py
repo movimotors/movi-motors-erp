@@ -6575,7 +6575,7 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
         except Exception:
             prods = (
                 sb.table("productos")
-                .select("id,descripcion,precio_v_usd,stock_actual")
+                .select("id,descripcion,precio_v_usd,stock_actual,compatibilidad")
                 .eq("activo", True)
                 .order("descripcion")
                 .execute()
@@ -6697,6 +6697,102 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
         ),
     )
 
+    st.caption(
+        "Líneas de producto y **seriales** se actualizan **al instante** al cambiar producto o cantidad "
+        "(no hace falta **Registrar venta** todavía)."
+    )
+    st.caption("Líneas (montos en USD)")
+    new_lines: list[dict[str, Any]] = []
+    for i, line in enumerate(st.session_state["venta_lines"]):
+        c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
+        pid = c1.selectbox(
+            f"Producto {i+1}",
+            options=list(id_to_label.keys()),
+            format_func=lambda x: id_to_label[x],
+            key=f"vp_{i}",
+            index=list(id_to_label.keys()).index(line["producto_id"]) if line["producto_id"] in id_to_label else 0,
+        )
+        qty = c2.number_input(
+            "Cant.",
+            min_value=1,
+            value=_line_qty_int(line.get("cantidad"), default=1),
+            step=1,
+            format="%d",
+            key=f"vq_{i}",
+        )
+        pu = c3.number_input("P.U. USD", min_value=0.0, value=float(id_to_price.get(pid, 0)), format="%.2f", key=f"vpu_{i}")
+        row_line: dict[str, Any] = {"producto_id": pid, "cantidad": int(qty), "precio_unitario_usd": float(pu)}
+        _p_sel = next((x for x in plist if str(x.get("id")) == str(pid)), None)
+        if _p_sel and _venta_pide_seriales_motor(_p_sel):
+            _pool_s = _inv_compat_seriales_motor_list(_inv_compat_as_dict(_p_sel.get("compatibilidad")))
+            _nq = int(qty)
+            if _pool_s and len(_pool_s) >= _nq:
+                st.caption(
+                    f"**Seriales (línea {i + 1}):** elegí **exactamente {_nq}** de la lista (cargados en **Inventario**)."
+                )
+                _sel_ser = st.multiselect(
+                    f"Seriales en stock — línea {i + 1}",
+                    options=_pool_s,
+                    default=[],
+                    key=f"vsrl_ms_{i}_{pid}",
+                    max_selections=_nq,
+                    help=f"Seleccioná {_nq} número(s) distintos. Solo aparecen los que están en la ficha del producto.",
+                )
+                if len(_sel_ser) == _nq and len(set(_sel_ser)) == len(_sel_ser):
+                    row_line["seriales"] = list(_sel_ser)
+                elif _sel_ser and len(_sel_ser) != _nq:
+                    st.caption(f"Elegí **{_nq}** seriales (marcados: {len(_sel_ser)}).")
+            elif _pool_s and len(_pool_s) < _nq:
+                st.error(
+                    f"**Seriales (línea {i + 1}):** en inventario hay **{len(_pool_s)}** serial(es) cargado(s) y la cantidad es **{_nq}**. "
+                    "Bajá la cantidad o cargá más seriales en **Inventario**."
+                )
+            else:
+                st.warning(
+                    f"**Seriales (línea {i + 1}):** no hay seriales cargados en la ficha del producto. "
+                    "Cargalos en **Inventario → editar producto** o escribí abajo (solo si no podés usar la lista)."
+                )
+                _srl_v = st.text_area(
+                    f"Seriales línea {i + 1} (texto libre)",
+                    height=70,
+                    key=f"vsrl_{i}",
+                    placeholder="Uno por línea o separados por coma",
+                    label_visibility="collapsed",
+                )
+                _srl_list = _inv_parse_seriales_motor_texto(str(_srl_v))
+                if _srl_list:
+                    row_line["seriales"] = _srl_list
+        new_lines.append(row_line)
+
+    est_total = round(sum(float(l["cantidad"]) * float(l["precio_unitario_usd"]) for l in new_lines), 2)
+
+    try:
+        _tb_bcv_v = _tasa_bs_para_documento(t, usar_bcv=True)
+        _tb_p2p_v = _tasa_bs_para_documento(t, usar_bcv=False)
+        _tb_doc_v = float(t_bs_doc_live) if float(t_bs_doc_live or 0) > 0 else None
+    except ValueError:
+        _tb_bcv_v = _tb_p2p_v = _tb_doc_v = None
+
+    if _tb_bcv_v is not None and _tb_p2p_v is not None:
+        _bs_bcv = est_total * _tb_bcv_v
+        _bs_p2p = est_total * _tb_p2p_v
+        st.info(
+            f"**Total venta US$ {est_total:,.2f}** → equivalente en bolívares: "
+            f"**BCV** {_bs_bcv:,.2f} Bs (@ {_tb_bcv_v:,.2f} Bs/USD) · "
+            f"**P2P Binance (mercado)** {_bs_p2p:,.2f} Bs (@ {_tb_p2p_v:,.2f} Bs/USD)."
+        )
+        if _tb_doc_v is not None:
+            _bs_doc = est_total * _tb_doc_v
+            st.markdown(
+                f"**Aplicado a esta venta** (opción **{doc_tasa}**): el cliente debe pagar **{_bs_doc:,.2f} Bs** "
+                f"si liquidás todo en bolívares — **US$ {est_total:,.2f} × {_tb_doc_v:,.2f} Bs/USD**."
+            )
+    elif _tb_doc_v is not None:
+        st.caption(
+            f"Equivalente Bs del total (tasa **{doc_tasa}**): **{est_total * _tb_doc_v:,.2f} Bs** "
+            f"(@ {_tb_doc_v:,.2f} Bs/USD)."
+        )
+
     with st.form(f"f_venta_{int(st.session_state.get('venta_form_nonce', 0))}"):
         cliente = st.text_input("Cliente", key="venta_cli", autocomplete="off")
         forma = st.selectbox(
@@ -6717,98 +6813,6 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             key="venta_notas",
             help="Podés escribir por ejemplo: Apartado, entrega en taller, teléfono del cliente, etc.",
         )
-
-        st.caption("Líneas (montos en USD)")
-        new_lines: list[dict[str, Any]] = []
-        for i, line in enumerate(st.session_state["venta_lines"]):
-            c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
-            pid = c1.selectbox(
-                f"Producto {i+1}",
-                options=list(id_to_label.keys()),
-                format_func=lambda x: id_to_label[x],
-                key=f"vp_{i}",
-                index=list(id_to_label.keys()).index(line["producto_id"]) if line["producto_id"] in id_to_label else 0,
-            )
-            qty = c2.number_input(
-                "Cant.",
-                min_value=1,
-                value=_line_qty_int(line.get("cantidad"), default=1),
-                step=1,
-                format="%d",
-                key=f"vq_{i}",
-            )
-            pu = c3.number_input("P.U. USD", min_value=0.0, value=float(id_to_price.get(pid, 0)), format="%.2f", key=f"vpu_{i}")
-            row_line: dict[str, Any] = {"producto_id": pid, "cantidad": int(qty), "precio_unitario_usd": float(pu)}
-            _p_sel = next((x for x in plist if str(x.get("id")) == str(pid)), None)
-            if _p_sel and _venta_pide_seriales_motor(_p_sel):
-                _pool_s = _inv_compat_seriales_motor_list(_inv_compat_as_dict(_p_sel.get("compatibilidad")))
-                _nq = int(qty)
-                if _pool_s and len(_pool_s) >= _nq:
-                    st.caption(
-                        f"**Seriales (línea {i + 1}):** elegí **exactamente {_nq}** de la lista (cargados en **Inventario**)."
-                    )
-                    _sel_ser = st.multiselect(
-                        f"Seriales en stock — línea {i + 1}",
-                        options=_pool_s,
-                        default=[],
-                        key=f"vsrl_ms_{i}_{pid}",
-                        max_selections=_nq,
-                        help=f"Seleccioná {_nq} número(s) distintos. Solo aparecen los que están en la ficha del producto.",
-                    )
-                    if len(_sel_ser) == _nq and len(set(_sel_ser)) == len(_sel_ser):
-                        row_line["seriales"] = list(_sel_ser)
-                    elif _sel_ser and len(_sel_ser) != _nq:
-                        st.caption(f"Elegí **{_nq}** seriales (marcados: {len(_sel_ser)}).")
-                elif _pool_s and len(_pool_s) < _nq:
-                    st.error(
-                        f"**Seriales (línea {i + 1}):** en inventario hay **{len(_pool_s)}** serial(es) cargado(s) y la cantidad es **{_nq}**. "
-                        "Bajá la cantidad o cargá más seriales en **Inventario**."
-                    )
-                else:
-                    st.warning(
-                        f"**Seriales (línea {i + 1}):** no hay seriales cargados en la ficha del producto. "
-                        "Cargalos en **Inventario → editar producto** o escribí abajo (solo si no podés usar la lista)."
-                    )
-                    _srl_v = st.text_area(
-                        f"Seriales línea {i + 1} (texto libre)",
-                        height=70,
-                        key=f"vsrl_{i}",
-                        placeholder="Uno por línea o separados por coma",
-                        label_visibility="collapsed",
-                    )
-                    _srl_list = _inv_parse_seriales_motor_texto(str(_srl_v))
-                    if _srl_list:
-                        row_line["seriales"] = _srl_list
-            new_lines.append(row_line)
-
-        est_total = round(sum(float(l["cantidad"]) * float(l["precio_unitario_usd"]) for l in new_lines), 2)
-
-        try:
-            _tb_bcv_v = _tasa_bs_para_documento(t, usar_bcv=True)
-            _tb_p2p_v = _tasa_bs_para_documento(t, usar_bcv=False)
-            _tb_doc_v = float(t_bs_doc_live) if float(t_bs_doc_live or 0) > 0 else None
-        except ValueError:
-            _tb_bcv_v = _tb_p2p_v = _tb_doc_v = None
-
-        if _tb_bcv_v is not None and _tb_p2p_v is not None:
-            _bs_bcv = est_total * _tb_bcv_v
-            _bs_p2p = est_total * _tb_p2p_v
-            st.info(
-                f"**Total venta US$ {est_total:,.2f}** → equivalente en bolívares: "
-                f"**BCV** {_bs_bcv:,.2f} Bs (@ {_tb_bcv_v:,.2f} Bs/USD) · "
-                f"**P2P Binance (mercado)** {_bs_p2p:,.2f} Bs (@ {_tb_p2p_v:,.2f} Bs/USD)."
-            )
-            if _tb_doc_v is not None:
-                _bs_doc = est_total * _tb_doc_v
-                st.markdown(
-                    f"**Aplicado a esta venta** (opción **{doc_tasa}**): el cliente debe pagar **{_bs_doc:,.2f} Bs** "
-                    f"si liquidás todo en bolívares — **US$ {est_total:,.2f} × {_tb_doc_v:,.2f} Bs/USD**."
-                )
-        elif _tb_doc_v is not None:
-            st.caption(
-                f"Equivalente Bs del total (tasa **{doc_tasa}**): **{est_total * _tb_doc_v:,.2f} Bs** "
-                f"(@ {_tb_doc_v:,.2f} Bs/USD)."
-            )
 
         cobros_pl: list[dict[str, Any]] = []
         if forma == "contado":
