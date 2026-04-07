@@ -4126,6 +4126,14 @@ def _caja_etiqueta_lista(c: dict[str, Any]) -> str:
     return f"{s} ({tipo})" if tipo else s
 
 
+def _round_money_2(x: Any) -> float:
+    """Montos en pantalla / tablas: máximo 2 decimales (evita colas de ceros por precisión float)."""
+    try:
+        return round(float(x), 2)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _cajas_fetch_rows(sb: Client, *, solo_activas: bool) -> list[dict[str, Any]]:
     q = (
         sb.table("cajas_bancos")
@@ -4267,8 +4275,8 @@ def _dashboard_resumen_cobros_por_moneda(sb: Client, *, d_a: date, r_fut: str) -
                 "Fecha": str(r.get("created_at", ""))[:19],
                 "Caja": caj_map.get(str(r.get("caja_id")), str(r.get("caja_id"))),
                 "Moneda": mon,
-                "Monto moneda": native,
-                "Equiv. USD": mu,
+                "Monto moneda": _round_money_2(native),
+                "Equiv. USD": _round_money_2(mu),
                 "Concepto": (r.get("concepto") or "")[:80],
                 "Nota tesorería": str(r.get("nota_operacion") or "")[:100],
             }
@@ -4276,15 +4284,15 @@ def _dashboard_resumen_cobros_por_moneda(sb: Client, *, d_a: date, r_fut: str) -
 
     m1, m2, m3, m4, m5 = st.columns(5)
     with m1:
-        st.metric("Cobrado VES (Bs)", f"{tot_ves:,.2f}")
+        st.metric("Cobrado VES (Bs)", f"{_round_money_2(tot_ves):,.2f}")
     with m2:
-        st.metric("Cobrado USDT", f"{tot_usdt:,.4f}")
+        st.metric("Cobrado USDT", f"{_round_money_2(tot_usdt):,.2f}")
     with m3:
-        st.metric("Cobrado USD", f"US$ {tot_usd_cash:,.2f}")
+        st.metric("Cobrado USD", f"US$ {_round_money_2(tot_usd_cash):,.2f}")
     with m4:
-        st.metric("Zelle (USD)", f"US$ {tot_zelle:,.2f}")
+        st.metric("Zelle (USD)", f"US$ {_round_money_2(tot_zelle):,.2f}")
     with m5:
-        st.metric("Ingresos (equiv. USD)", f"US$ {sum_equiv_usd:,.2f}")
+        st.metric("Ingresos (equiv. USD)", f"US$ {_round_money_2(sum_equiv_usd):,.2f}")
 
     st.caption(
         "Equiv. USD es lo que suma al **saldo de cada caja** (VES y USDT convertidos con la tasa de la venta / cobro)."
@@ -4294,7 +4302,7 @@ def _dashboard_resumen_cobros_por_moneda(sb: Client, *, d_a: date, r_fut: str) -
         use_container_width=True,
         hide_index=True,
         column_config={
-            "Monto moneda": st.column_config.NumberColumn(format="%.4f"),
+            "Monto moneda": st.column_config.NumberColumn(format="%.2f"),
             "Equiv. USD": st.column_config.NumberColumn(format="%.2f"),
         },
     )
@@ -4388,13 +4396,13 @@ def _dashboard_seccion_cambios_tesoreria(
                 "Origen": id_to_et.get(str(oid), "—") if oid else "—",
                 "Destino": id_to_et.get(str(did), "—") if did else "—",
                 "Moneda dest.": _md,
-                "Bs usados": m_ves,
-                "Equiv. USD (pactado)": m_usd,
-                "≈ USDT (ref. día)": round(_usdt_ref_dia, 4),
-                "Precio compra (Bs/USD)": round(t_compra, 6) if t_compra else None,
-                "Comparar con (Bs/USD)": round(t_comp, 6) if t_comp else None,
-                "USD a esa comparación": round(usd_a_comp, 4) if usd_a_comp is not None else None,
-                "Diff vs comparación (USD)": round(diff_usd, 4) if diff_usd is not None else None,
+                "Bs usados": _round_money_2(m_ves),
+                "Equiv. USD (pactado)": _round_money_2(m_usd),
+                "≈ USDT (ref. día)": _round_money_2(_usdt_ref_dia),
+                "Precio compra (Bs/USD)": round(t_compra, 4) if t_compra else None,
+                "Comparar con (Bs/USD)": round(t_comp, 4) if t_comp else None,
+                "USD a esa comparación": _round_money_2(usd_a_comp) if usd_a_comp is not None else None,
+                "Diff vs comparación (USD)": _round_money_2(diff_usd) if diff_usd is not None else None,
                 "Nota": (r.get("nota") or "")[:120],
             }
         )
@@ -4409,11 +4417,11 @@ def _dashboard_seccion_cambios_tesoreria(
     with m2:
         st.metric("Bs pasados a cambio (suma)", f"{tot_bs_cambios:,.2f}")
     with m3:
-        st.metric("Equiv. USD obtenido (suma pactada)", f"{tot_usd_pact:,.4f}")
+        st.metric("Equiv. USD obtenido (suma pactada)", f"{_round_money_2(tot_usd_pact):,.2f}")
     with m4:
         st.metric(
             "≈ USDT ref. día (suma)",
-            f"{tot_usdt_ref:,.4f}",
+            f"{_round_money_2(tot_usdt_ref):,.2f}",
             help="Equiv. USD × tasa USDT/USD del día operativo (seguimiento; no es saldo on-chain).",
         )
 
@@ -4422,7 +4430,7 @@ def _dashboard_seccion_cambios_tesoreria(
         tot_diff = sum(diffs_comp) if diffs_comp else None
         st.metric(
             "Suma diff vs comparación (USD)",
-            f"{tot_diff:+,.4f}" if tot_diff is not None else "—",
+            f"{_round_money_2(tot_diff):+,.2f}" if tot_diff is not None else "—",
             help="Solo suma filas donde cargaste *Comparar con*. Positivo = mejor que esa tasa.",
         )
     with m6:
@@ -4445,12 +4453,12 @@ def _dashboard_seccion_cambios_tesoreria(
             hide_index=True,
             column_config={
                 "Bs usados": st.column_config.NumberColumn(format="%.2f"),
-                "Equiv. USD (pactado)": st.column_config.NumberColumn(format="%.4f"),
-                "≈ USDT (ref. día)": st.column_config.NumberColumn(format="%.4f"),
-                "Precio compra (Bs/USD)": st.column_config.NumberColumn(format="%.4f"),
-                "Comparar con (Bs/USD)": st.column_config.NumberColumn(format="%.4f"),
-                "USD a esa comparación": st.column_config.NumberColumn(format="%.4f"),
-                "Diff vs comparación (USD)": st.column_config.NumberColumn(format="%.4f"),
+                "Equiv. USD (pactado)": st.column_config.NumberColumn(format="%.2f"),
+                "≈ USDT (ref. día)": st.column_config.NumberColumn(format="%.2f"),
+                "Precio compra (Bs/USD)": st.column_config.NumberColumn(format="%.2f"),
+                "Comparar con (Bs/USD)": st.column_config.NumberColumn(format="%.2f"),
+                "USD a esa comparación": st.column_config.NumberColumn(format="%.2f"),
+                "Diff vs comparación (USD)": st.column_config.NumberColumn(format="%.2f"),
             },
         )
     else:
@@ -4747,7 +4755,7 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
             _sum_usdt_ref = _sum_usd * _t_ut_d
             st.success(
                 f"En este período registraste **{len(rows_cambios_bitacora)}** cambio(s): **{_sum_bs:,.2f} Bs** "
-                f"pasados a moneda estable (equiv. **US$ {_sum_usd:,.4f}** al pactado; **≈ {_sum_usdt_ref:,.4f} USDT** ref. "
+                f"pasados a moneda estable (equiv. **US$ {_round_money_2(_sum_usd):,.2f}** al pactado; **≈ {_round_money_2(_sum_usdt_ref):,.2f} USDT** ref. "
                 f"con tasa USDT/USD **{_t_ut_d:,.6f}** del día). "
                 f"Detalle y tabla en **Caja, cobros y tasas**."
             )
@@ -4757,9 +4765,9 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
             with b2:
                 st.metric("Bs en cambios (suma)", f"{_sum_bs:,.2f}")
             with b3:
-                st.metric("Equiv. USD pactado (suma)", f"{_sum_usd:,.4f}")
+                st.metric("Equiv. USD pactado (suma)", f"{_round_money_2(_sum_usd):,.2f}")
             with b4:
-                st.metric("≈ USDT ref. día (suma)", f"{_sum_usdt_ref:,.4f}")
+                st.metric("≈ USDT ref. día (suma)", f"{_round_money_2(_sum_usdt_ref):,.2f}")
         else:
             st.info(
                 "No hay **registros de bitácora** (Bs → USD/USDT) en el rango **Desde/Hasta**. "
@@ -5020,6 +5028,8 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
                 how="left",
             )
             merged_ie = pd.merge(merged_ie, egr, on="dia", how="left").fillna(0)
+            merged_ie["Ingreso"] = pd.to_numeric(merged_ie["Ingreso"], errors="coerce").fillna(0).round(2)
+            merged_ie["Egreso"] = pd.to_numeric(merged_ie["Egreso"], errors="coerce").fillna(0).round(2)
             fig_ie = px.bar(
                 merged_ie,
                 x="dia",
@@ -5027,7 +5037,10 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
                 barmode="group",
                 labels={"value": "USD", "dia": "Día", "variable": ""},
             )
-            fig_ie.update_traces(marker_line_width=0)
+            fig_ie.update_traces(
+                marker_line_width=0,
+                hovertemplate="<b>%{data.name}</b><br>%{x}<br>%{y:,.2f} USD<extra></extra>",
+            )
             _plotly_apply_dash_theme(fig_ie, title="Ingresos y egresos por día")
             st.plotly_chart(fig_ie, use_container_width=True)
 
@@ -5133,7 +5146,18 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
             df_mc = df_mc.drop(columns=["caja_id"], errors="ignore")
             cols = ["created_at", "tipo", "monto_usd", "moneda", "caja", "concepto", "nota_operacion"]
             df_mc = df_mc[[c for c in cols if c in df_mc.columns]]
-            st.dataframe(df_mc, use_container_width=True, hide_index=True)
+            if "monto_usd" in df_mc.columns:
+                df_mc["monto_usd"] = pd.to_numeric(df_mc["monto_usd"], errors="coerce").fillna(0).round(2)
+            st.dataframe(
+                df_mc,
+                use_container_width=True,
+                hide_index=True,
+                column_config=(
+                    {"monto_usd": st.column_config.NumberColumn(format="%.2f")}
+                    if "monto_usd" in df_mc.columns
+                    else {}
+                ),
+            )
         else:
             st.caption("Sin movimientos.")
 
@@ -8518,8 +8542,8 @@ def module_reportes(sb: Client, erp_uid: str, t: dict[str, Any] | None, rol: str
             for m in movs:
                 mon = (m.get("moneda") or "USD") or "USD"
                 mm = m.get("monto_moneda")
-                _musd = int(round(float(m.get("monto_usd") or 0)))
-                _mm_orig = int(round(float(mm))) if mm is not None else ""
+                _musd = _round_money_2(m.get("monto_usd"))
+                _mm_orig = _round_money_2(mm) if mm is not None and str(mm).strip() != "" else None
                 filas_mc.append(
                     {
                         "Fecha y hora": str(m.get("created_at", ""))[:19],
@@ -8538,14 +8562,26 @@ def module_reportes(sb: Client, erp_uid: str, t: dict[str, Any] | None, rol: str
             if df_mc.empty:
                 st.info("No hay movimientos en esas fechas y filtros. Probá ampliar el rango o elegir **Todas las cuentas**.")
             else:
-                st.dataframe(df_mc, use_container_width=True, hide_index=True)
-                tot_in = df_mc[df_mc["Entrada o salida"].str.startswith("Entrada")]["Monto en USD (sistema)"].sum()
-                tot_out = df_mc[df_mc["Entrada o salida"].str.startswith("Salida")]["Monto en USD (sistema)"].sum()
+                st.dataframe(
+                    df_mc,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Monto en USD (sistema)": st.column_config.NumberColumn(format="%.2f"),
+                        "Monto en moneda original": st.column_config.NumberColumn(format="%.2f"),
+                    },
+                )
+                tot_in = _round_money_2(
+                    df_mc[df_mc["Entrada o salida"].str.startswith("Entrada")]["Monto en USD (sistema)"].sum()
+                )
+                tot_out = _round_money_2(
+                    df_mc[df_mc["Entrada o salida"].str.startswith("Salida")]["Monto en USD (sistema)"].sum()
+                )
                 m1, m2 = st.columns(2)
                 with m1:
-                    st.metric("Total entradas (USD en el sistema)", f"{int(round(tot_in)):,d}")
+                    st.metric("Total entradas (USD en el sistema)", f"{tot_in:,.2f}")
                 with m2:
-                    st.metric("Total salidas (USD en el sistema)", f"{int(round(tot_out)):,d}")
+                    st.metric("Total salidas (USD en el sistema)", f"{tot_out:,.2f}")
                 st.caption(
                     "Los **USD** son el equivalente que guardó el sistema al momento del movimiento (bolívares y USDT convertidos con la tasa de entonces)."
                 )
