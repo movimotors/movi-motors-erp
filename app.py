@@ -4982,12 +4982,23 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
             )
             out_vc = pd.DataFrame({"dia": dias})
             out_vc = out_vc.merge(vsum, on="dia", how="left").merge(csum, on="dia", how="left").fillna(0)
+            for _col in ("Ventas USD", "Compras USD"):
+                if _col in out_vc.columns:
+                    out_vc[_col] = pd.to_numeric(out_vc[_col], errors="coerce").fillna(0.0)
+
+            out_vc_long = out_vc.melt(
+                id_vars=["dia"],
+                value_vars=[c for c in ("Ventas USD", "Compras USD") if c in out_vc.columns],
+                var_name="serie",
+                value_name="value",
+            )
             fig_vc = px.line(
-                out_vc,
+                out_vc_long,
                 x="dia",
-                y=["Ventas USD", "Compras USD"],
+                y="value",
+                color="serie",
                 markers=True,
-                labels={"value": "USD", "dia": "Día"},
+                labels={"value": "USD", "dia": "Día", "serie": ""},
             )
             fig_vc.update_traces(line=dict(width=2))
             _plotly_apply_dash_theme(fig_vc, title="Ventas vs compras (USD)")
