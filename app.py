@@ -785,7 +785,14 @@ def _movi_reset_venta_session_nueva(plist: list[dict[str, Any]], id_to_price: di
 
 def _movi_reset_compra_form_fields() -> None:
     _movi_ss_pop_key_prefixes("cp_", "cq_", "ccu_")
-    _movi_ss_pop_keys("forma_compra", "caja_compra", "fv_compra", "compra_doc_tasa_bs")
+    _movi_ss_pop_keys(
+        "forma_compra",
+        "caja_compra",
+        "fv_compra",
+        "compra_doc_tasa_bs",
+        "compra_prov",
+        "compra_notas",
+    )
 
 
 def _movi_reset_producto_alta_fields() -> None:
@@ -3763,6 +3770,21 @@ def _infer_tasa_bs_oper_index(lt: dict[str, Any]) -> int:
 
 DOC_TASA_BS_OPTS = ("BCV oficial", "P2P Binance (mercado)")
 
+# Gastos operativos (no compra de inventario): categoría va a movimientos_caja.categoria_gasto (patch_025).
+GASTO_OPERATIVO_CATEGORIAS: tuple[str, ...] = (
+    "Alquiler y local",
+    "Servicios (luz, agua, internet, teléfono)",
+    "Nómina y cargas sociales",
+    "Impuestos y tasas",
+    "Marketing y publicidad",
+    "Transporte y fletes",
+    "Mantenimiento y reparaciones (local, equipos)",
+    "Honorarios profesionales",
+    "Gastos bancarios y comisiones",
+    "Otros",
+)
+GASTO_OPERATIVO_OTRO = "Otro (escribir categoría)"
+
 # Cobros en caja: ZELLE se contabiliza 1:1 como USD (mismo tratamiento en RPC).
 COBRO_MONEDAS: tuple[str, ...] = ("USD", "ZELLE", "VES", "USDT")
 
@@ -4338,9 +4360,10 @@ def _dashboard_seccion_cambios_tesoreria(
     st.markdown('<div class="dash-bento">', unsafe_allow_html=True)
     st.markdown("##### Bitácora: Bs → USD / USDT")
     st.caption(
-        "Registrás **cuántos Bs** salieron y **qué equivalente en USD** recibiste. "
-        "Si **no** marcás «solo bitácora», el sistema genera **egreso de Bs** en la cuenta origen e **ingreso** en la cuenta destino (USD o USDT), "
-        "igual que en ventas. La comparación con otra tasa (BCV/mercado) sigue siendo opcional."
+        "Registrás **cuántos Bs** usaste en el cambio y **qué equivalente en USD** tomás como referencia en el sistema. "
+        "Si **no** marcás «solo bitácora», el ERP registra **egreso de bolívares** en la cuenta **VES** origen e **ingreso** del equivalente en la cuenta destino: "
+        "esos Bs **dejan de figurar** en bolívares y el valor pasa a **USD**, **USDT** o **efectivo en dólares** según la caja destino (**Zelle** suele ser una caja en **USD**). "
+        "La comparación con otra tasa (BCV/mercado) sigue siendo opcional."
     )
 
     if rows_raw is not None:
@@ -4437,11 +4460,12 @@ def _dashboard_seccion_cambios_tesoreria(
         st.metric(
             "Saldo equiv. VES en cajas (ahora)",
             f"US$ {sum(float(c.get('saldo_actual_usd') or 0) for c in rows_caj if c.get('activo') and str(c.get('moneda_cuenta') or '').strip().upper() == 'VES'):,.2f}",
-            help="Lo que aún figura en cuentas en bolívares (no confundir con lo ya cambiado en bitácora).",
+            help="Solo el **remanente** en cuentas **VES** después de ventas, egresos y cambios. Lo que ya pasaste a bitácora **con movimientos de caja** **ya salió** de este saldo.",
         )
     with m7:
         st.caption(
-            "**Seguimiento:** los Bs de cada fila ya figuran como **convertidos** en tu registro; el **destino** indica si fue a **USD** o **USDT**."
+            "**Seguimiento:** en la tabla, los Bs de cada fila son los que **destinaste al cambio**; con movimientos aplicados, ese monto **ya no está** en la caja en bolívares "
+            "y el equivalente quedó en la cuenta **destino** (USD, USDT o dólares físicos según la caja)."
         )
 
     if recs:
@@ -4528,7 +4552,7 @@ def _dashboard_seccion_cambios_tesoreria(
                 "Solo anotar en bitácora (no mover saldos entre cajas)",
                 value=False,
                 key="dash_ct_solo_bit",
-                help="Si lo **desmarcás**, se registra **egreso** de bolívares en la cuenta VES y **ingreso** en la cuenta USD/USDT.",
+                help="Si lo **desmarcás**, los bolívares **salen** del saldo de la cuenta **VES** y el equivalente **entra** en la cuenta destino (USD / USDT / efectivo dólar).",
             )
             nota_in = st.text_input("Nota (opcional)", key="dash_ct_nota")
             if st.form_submit_button("Guardar registro"):
@@ -4558,8 +4582,9 @@ def _dashboard_seccion_cambios_tesoreria(
                         nn = (nota_in or "").strip()
                         if nn:
                             payload_rpc["p_nota"] = nn
+                        _dm_dest = ""
                         if aplicar_mov:
-                            _dm = next(
+                            _dm_dest = next(
                                 (
                                     str(c.get("moneda_cuenta") or "").strip().upper()
                                     for c in rows_caj
@@ -4567,7 +4592,7 @@ def _dashboard_seccion_cambios_tesoreria(
                                 ),
                                 "",
                             )
-                            if _dm == "USDT":
+                            if _dm_dest == "USDT":
                                 _t_ut = float(_nf(t.get("tasa_usdt")) or 0) if t else 0.0
                                 if _t_ut <= 0:
                                     _lt = latest_tasas(sb) or {}
@@ -4577,14 +4602,13 @@ def _dashboard_seccion_cambios_tesoreria(
                                     st.stop()
                                 payload_rpc["p_tasa_usdt"] = _t_ut
                         sb.rpc("registrar_cambio_tesoreria_erp", payload_rpc).execute()
-                        st.success(
-                            "Registro guardado."
-                            + (
-                                " Movimientos de caja (egreso Bs + ingreso destino) aplicados."
-                                if aplicar_mov
-                                else " Solo bitácora (sin movimientos en cajas)."
-                            )
-                        )
+                        st.session_state["dash_bitacora_flash"] = {
+                            "aplicar_mov": bool(aplicar_mov),
+                            "monto_bs": float(m_ves_in),
+                            "monto_usd": float(m_usd_in),
+                            "dest_moneda": _dm_dest or None,
+                            "dest_etiqueta": id_to_et.get(str(sd), "") if sd != opt_none else "",
+                        }
                         _movi_bump_form_nonce("dash_cambio_teso_form_nonce")
                         _movi_ss_pop_keys(
                             "dash_ct_orig",
@@ -4634,6 +4658,30 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
         st.error("La fecha *Hasta* debe ser ≥ *Desde*.")
         st.stop()
 
+    _bit_flash = st.session_state.pop("dash_bitacora_flash", None)
+    if isinstance(_bit_flash, dict):
+        if _bit_flash.get("aplicar_mov"):
+            _dm_f = str(_bit_flash.get("dest_moneda") or "").strip().upper()
+            if _dm_f == "USDT":
+                _dest_txt = "El equivalente quedó en **USDT** (moneda estable en la caja destino)."
+            elif _dm_f == "USD":
+                _dest_txt = (
+                    "El equivalente quedó en **USD** en la cuenta destino (banco, efectivo en dólares o **Zelle**, según cómo tengas nombrada esa caja)."
+                )
+            else:
+                _dest_txt = "El equivalente quedó en la **cuenta destino** en moneda estable."
+            st.success(
+                f"**Bitácora guardada con movimientos en caja:** salieron **{_bit_flash.get('monto_bs', 0):,.2f} Bs** del saldo en bolívares; "
+                f"ingresó **~US$ {float(_bit_flash.get('monto_usd') or 0):,.2f}** de equivalente en destino. {_dest_txt} "
+                "Ese monto en **VES** ya no debería figurar como bolívares en caja; si algo no cuadra, revisá **Caja, cobros y tasas**."
+            )
+        else:
+            st.info(
+                "**Bitácora guardada solo como anotación:** no se movieron saldos entre cajas. "
+                "Cuando quieras que los Bs **salgan** de la cuenta en bolívares y el valor **entre** a USD/USDT/efectivo dólar, "
+                "desmarcá «solo bitácora», elegí origen y destino, y guardá de nuevo."
+            )
+
     _caj_ves_alert = _cajas_fetch_rows(sb, solo_activas=True)
     sum_ves_equiv_usd = sum(
         float(c.get("saldo_actual_usd") or 0)
@@ -4642,8 +4690,10 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
     )
     if sum_ves_equiv_usd >= 0.01:
         st.warning(
-            f"**Hay bolívares en caja/banco:** las cuentas en **VES** suman ~**US$ {sum_ves_equiv_usd:,.2f}** de equivalente en el sistema. "
-            "Conviene evaluar pasar a **USD / USDT** (o vía que usen) y **registrar** el cambio más abajo para ver si la tasa te dejó ganancia o pérdida vs tu referencia (BCV/mercado)."
+            f"**Todavía hay equivalente en cuentas en bolívares (VES):** suman ~**US$ {sum_ves_equiv_usd:,.2f}** en el sistema — es lo que **aún está** en caja/banco en Bs. "
+            "Si **registraste un cambio con movimientos de caja**, lo que cambiaste **ya salió** de ahí: el valor pasó a la cuenta destino en **USD**, **USDT** o **efectivo en dólares** "
+            "(**Zelle** suele registrarse en una caja en **USD**). Este aviso solo refleja **lo que sigue** en VES, no lo ya convertido. "
+            "Podés llevar el resto a moneda más estable y **registrar** el cambio en **Caja, cobros y tasas** para seguir la tasa vs BCV/mercado."
         )
 
     n_days = max(1, (d_b - d_a).days + 1)
@@ -4792,9 +4842,10 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
             _sum_usdt_ref = _sum_usd * _t_ut_d
             st.success(
                 f"En este período registraste **{len(rows_cambios_bitacora)}** cambio(s): **{_sum_bs:,.2f} Bs** "
-                f"pasados a moneda estable (equiv. **US$ {_round_money_2(_sum_usd):,.2f}** al pactado; **≈ {_round_money_2(_sum_usdt_ref):,.2f} USDT** ref. "
+                f"que **destinaste al cambio** a moneda más estable (equiv. **US$ {_round_money_2(_sum_usd):,.2f}** al pactado; **≈ {_round_money_2(_sum_usdt_ref):,.2f} USDT** ref. "
                 f"con tasa USDT/USD **{_t_ut_d:,.6f}** del día). "
-                f"Detalle y tabla en **Caja, cobros y tasas**."
+                "Si esos registros llevan **movimientos de caja**, esos bolívares **ya no están** en la cuenta VES: el valor quedó en **USD**, **USDT** o dólares físicos según la caja destino. "
+                "Detalle y tabla en **Caja, cobros y tasas**."
             )
             b1, b2, b3, b4 = st.columns(4)
             with b1:
@@ -4807,9 +4858,9 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
                 st.metric("≈ USDT ref. día (suma)", f"{_round_money_2(_sum_usdt_ref):,.2f}")
 
             st.caption(
-                "**¿Por qué abajo no ves el cambio?** Los bloques **Origen de la liquidez** y **Compras por categoría** "
-                "no usan la bitácora: el primero muestra **saldos actuales** en cajas; el segundo, **compras a proveedores**. "
-                "Si al guardar **no** elegiste «solo bitácora», también se generaron **movimientos de caja**. El gráfico de abajo resume los **equiv. USD** registrados en bitácora en el período."
+                "**¿Por qué abajo no ves el cambio en el gráfico de barras?** Los bloques **Origen de la liquidez** y **Compras por categoría** "
+                "no leen la bitácora: el primero muestra **saldos actuales** (los Bs ya convertidos **bajan** en VES y **suben** en USD/USDT si aplicaste movimientos); el segundo, **compras a proveedores**. "
+                "El gráfico de abajo resume solo los **equiv. USD** anotados en **bitácora** en el período."
             )
             _df_bt = pd.DataFrame(
                 [
@@ -4834,8 +4885,9 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
             st.plotly_chart(fig_bt, use_container_width=True)
         else:
             st.info(
-                "No hay **registros de bitácora** (Bs → USD/USDT) en el rango **Desde/Hasta**. "
-                "Si compraste USDT con Bs, cargalo en **Caja, cobros y tasas → Registrar cambio (bitácora)**."
+                "No hay **registros de bitácora** (Bs → USD / USDT / efectivo dólar) en el rango **Desde/Hasta**. "
+                "Si pasaste Bs a **USDT**, **Zelle** (caja USD) o **dólares en efectivo**, registrá el cambio en **Caja, cobros y tasas → Registrar cambio (bitácora)** "
+                "para que quede claro que esos bolívares **salieron** de VES y el valor quedó en la cuenta destino (con movimientos de caja si corresponde)."
             )
 
         row2a, row2b = st.columns([1.15, 1])
@@ -7538,6 +7590,65 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
         st.info("No hay cuentas por cobrar pendientes.")
 
 
+def _compra_parse_lineas_csv(
+    raw: bytes,
+    id_to_label: dict[str, str],
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """CSV con columnas: producto_id, cantidad, costo_unitario_usd
+    o: descripcion, cantidad, costo_unitario_usd (descripción exacta como en inventario)."""
+    try:
+        df = pd.read_csv(BytesIO(raw))
+    except Exception as ex:
+        return None, f"No se pudo leer el CSV: {ex}"
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    has_pid = "producto_id" in df.columns
+    has_desc = "descripcion" in df.columns
+    if not has_pid and not has_desc:
+        return None, "El CSV debe incluir columna **producto_id** o **descripcion** (y cantidad, costo_unitario_usd)."
+    need = {"cantidad", "costo_unitario_usd"}
+    if not need.issubset(df.columns):
+        return None, f"Faltan columnas obligatorias: {', '.join(sorted(need))}."
+    desc_to_id = {v.strip().lower(): k for k, v in id_to_label.items()}
+    out: list[dict[str, Any]] = []
+
+    def _resolve_pid(row: Any, ix: int) -> tuple[str | None, str | None]:
+        raw_id = row.get("producto_id") if has_pid else None
+        if raw_id is not None and str(raw_id).strip() and str(raw_id).strip().lower() != "nan":
+            pid = str(raw_id).strip()
+            if pid not in id_to_label:
+                return None, f"Fila {ix}: producto_id `{pid}` no existe o no está activo."
+            return pid, None
+        if has_desc:
+            d = str(row.get("descripcion") or "").strip().lower()
+            pid = desc_to_id.get(d)
+            if not pid:
+                return None, f"Fila {ix}: descripción «{row.get('descripcion')}» no coincide con un producto activo."
+            return pid, None
+        return None, f"Fila {ix}: indicá **producto_id** o **descripcion**."
+
+    for _ix, row in df.iterrows():
+        row_no = int(_ix) + 2  # encabezado = 1
+        pid, err = _resolve_pid(row, row_no)
+        if err or not pid:
+            return None, err
+        try:
+            q = int(float(row["cantidad"]))
+        except (TypeError, ValueError):
+            return None, f"Fila {row_no}: cantidad inválida."
+        if q < 1:
+            return None, f"Fila {row_no}: cantidad debe ser ≥ 1."
+        try:
+            cu = float(row["costo_unitario_usd"])
+        except (TypeError, ValueError):
+            return None, f"Fila {row_no}: costo_unitario_usd inválido."
+        if cu < 0:
+            return None, f"Fila {row_no}: costo no puede ser negativo."
+        out.append({"producto_id": pid, "cantidad": q, "costo_unitario_usd": cu})
+    if not out:
+        return None, "El archivo no tiene filas de datos."
+    return out, None
+
+
 def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
     st.subheader("Compras y CXP")
     if not t:
@@ -7545,7 +7656,8 @@ def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
 
     t_usdt = float(t["tasa_usdt"])
     st.caption(
-        "Líneas en **USD** (1:1). Para equivalente en **bolívares** en esta compra, elegí **BCV** o **P2P Binance**."
+        "Podés cargar **varias líneas** (botón abajo o **CSV**). Montos en **USD** (1:1). "
+        "Para equivalente en **bolívares**, elegí **BCV** o **P2P Binance**."
     )
 
     prods = (
@@ -7571,47 +7683,113 @@ def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             {"producto_id": str(plist[0]["id"]), "cantidad": 1, "costo_unitario_usd": id_to_cost[str(plist[0]["id"])]}
         ]
 
-    with st.form(f"f_compra_{int(st.session_state.get('compra_form_nonce', 0))}"):
-        prov = st.text_input("Proveedor")
+    st.markdown("#### Datos del documento")
+    prov = st.text_input("Proveedor", key="compra_prov", autocomplete="off")
+    c_fp, c_caja = st.columns([1, 1])
+    with c_fp:
         forma = st.selectbox("Forma de pago compra", ["contado", "credito"], key="forma_compra")
+    with c_caja:
         caja_id_compra = (
             st.selectbox("Caja (solo contado)", options=caja_ids_c, format_func=caja_fmt_c, key="caja_compra")
             if caja_ids_c
             else None
         )
-        fv = st.date_input("Vencimiento (crédito compra)", value=date.today() + timedelta(days=30), key="fv_compra")
-        notas = st.text_area("Notas compra")
+    fv = st.date_input("Vencimiento (crédito compra)", value=date.today() + timedelta(days=30), key="fv_compra")
+    notas = st.text_area("Notas compra", key="compra_notas")
 
-        doc_tasa_c = st.radio(
-            "Tasa Bs/USD para esta compra:",
-            options=DOC_TASA_BS_OPTS,
-            index=_infer_tasa_bs_oper_index(t),
-            horizontal=True,
-            key="compra_doc_tasa_bs",
-            help="Montos de línea en USD sin cambio; la tasa queda en el registro de compra.",
+    doc_tasa_c = st.radio(
+        "Tasa Bs/USD para esta compra:",
+        options=DOC_TASA_BS_OPTS,
+        index=_infer_tasa_bs_oper_index(t),
+        horizontal=True,
+        key="compra_doc_tasa_bs",
+        help="Montos de línea en USD sin cambio; la tasa queda en el registro de compra.",
+    )
+
+    st.markdown("#### Líneas de la compra")
+    st.caption(
+        "**Añadir línea** agrega una fila más. Para facturas con muchos ítems, usá **importar CSV** "
+        "(exportá desde Excel con las columnas indicadas)."
+    )
+    _ba, _bb, _bc = st.columns([1, 1, 2])
+    with _ba:
+        if st.button("➕ Añadir línea", key="compra_btn_add_line"):
+            st.session_state["compra_lines"].append(
+                {
+                    "producto_id": str(plist[0]["id"]),
+                    "cantidad": 1,
+                    "costo_unitario_usd": id_to_cost[str(plist[0]["id"])],
+                }
+            )
+            st.rerun()
+    with _bb:
+        if len(st.session_state["compra_lines"]) > 1 and st.button(
+            "➖ Quitar última línea", key="compra_btn_drop_line"
+        ):
+            st.session_state["compra_lines"].pop()
+            st.rerun()
+
+    with st.expander("Importar líneas desde CSV (facturas largas)", expanded=False):
+        st.markdown(
+            "Columnas requeridas: **`cantidad`**, **`costo_unitario_usd`**, y además **`producto_id`** "
+            "(UUID) **o** **`descripcion`** (texto **idéntico** al producto en inventario, sin importar mayúsculas)."
         )
+        sample = (
+            "descripcion,cantidad,costo_unitario_usd\n"
+            f'"{plist[0]["descripcion"]}",2,10.50\n'
+        )
+        st.download_button(
+            "Descargar ejemplo CSV",
+            data=sample.encode("utf-8"),
+            file_name="ejemplo_compra_lineas.csv",
+            mime="text/csv",
+            key="compra_dl_sample_csv",
+        )
+        up = st.file_uploader("Archivo .csv", type=["csv"], key="compra_csv_up")
+        if st.button("Importar líneas del archivo", key="compra_csv_apply"):
+            if up is None:
+                st.error("Elegí un archivo CSV primero.")
+            else:
+                raw = up.getvalue()
+                parsed, err = _compra_parse_lineas_csv(raw, id_to_label)
+                if err:
+                    st.error(err)
+                elif parsed:
+                    st.session_state["compra_lines"] = parsed
+                    _movi_reset_compra_form_fields()
+                    _movi_bump_form_nonce("compra_form_nonce")
+                    st.success(f"Se cargaron **{len(parsed)}** líneas. Revisalas abajo y pulsá **Registrar compra**.")
+                    st.rerun()
 
-        new_lines: list[dict[str, Any]] = []
-        for i, line in enumerate(st.session_state["compra_lines"]):
-            c1, c2, c3 = st.columns([3, 1, 1])
-            pid = c1.selectbox(
-                f"Producto {i+1}",
-                options=list(id_to_label.keys()),
-                format_func=lambda x: id_to_label[x],
-                key=f"cp_{i}",
-                index=list(id_to_label.keys()).index(line["producto_id"]) if line["producto_id"] in id_to_label else 0,
-            )
-            qty = c2.number_input(
-                "Cant.",
-                min_value=1,
-                value=_line_qty_int(line.get("cantidad"), default=1),
-                step=1,
-                format="%d",
-                key=f"cq_{i}",
-            )
-            cu = c3.number_input("Costo u. USD", min_value=0.0, value=float(id_to_cost.get(pid, 0)), format="%.2f", key=f"ccu_{i}")
-            new_lines.append({"producto_id": pid, "cantidad": int(qty), "costo_unitario_usd": float(cu)})
+    new_lines: list[dict[str, Any]] = []
+    for i, line in enumerate(st.session_state["compra_lines"]):
+        c1, c2, c3 = st.columns([3, 1, 1])
+        pid = c1.selectbox(
+            f"Producto {i+1}",
+            options=list(id_to_label.keys()),
+            format_func=lambda x: id_to_label[x],
+            key=f"cp_{i}",
+            index=list(id_to_label.keys()).index(line["producto_id"]) if line["producto_id"] in id_to_label else 0,
+        )
+        qty = c2.number_input(
+            "Cant.",
+            min_value=1,
+            value=_line_qty_int(line.get("cantidad"), default=1),
+            step=1,
+            format="%d",
+            key=f"cq_{i}",
+        )
+        cu = c3.number_input(
+            "Costo u. USD", min_value=0.0, value=float(line.get("costo_unitario_usd", id_to_cost.get(pid, 0))), format="%.2f", key=f"ccu_{i}"
+        )
+        new_lines.append({"producto_id": pid, "cantidad": int(qty), "costo_unitario_usd": float(cu)})
 
+    n_lin = len(new_lines)
+    tot_usd = sum(float(x["cantidad"]) * float(x["costo_unitario_usd"]) for x in new_lines)
+    st.metric("Líneas en esta compra", f"{n_lin} · Total USD {tot_usd:,.2f}")
+
+    with st.form(f"f_compra_{int(st.session_state.get('compra_form_nonce', 0))}"):
+        st.caption("Un solo **registro atómico** en base: stock, costos, caja o CXP.")
         if st.form_submit_button("Registrar compra (atómica)"):
             try:
                 t_bs_doc = _tasa_bs_para_documento(t, usar_bcv=(doc_tasa_c == DOC_TASA_BS_OPTS[0]))
@@ -7648,17 +7826,170 @@ def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                     except Exception as e:
                         st.error(f"No se pudo registrar: {e}")
 
-    if st.button("Añadir línea compra"):
-        st.session_state["compra_lines"].append(
-            {"producto_id": str(plist[0]["id"]), "cantidad": 1, "costo_unitario_usd": id_to_cost[str(plist[0]["id"])]}
+
+def _movi_fetch_egresos_caja_recientes(sb: Client, *, limit: int = 50) -> tuple[list[dict[str, Any]], bool]:
+    """Devuelve egresos recientes y si la tabla expone categoria_gasto (patch_025)."""
+    try:
+        r = (
+            sb.table("movimientos_caja")
+            .select("created_at,caja_id,monto_usd,concepto,referencia,categoria_gasto,nota_operacion")
+            .eq("tipo", "Egreso")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
         )
-        st.rerun()
+        return list(r.data or []), True
+    except Exception:
+        r = (
+            sb.table("movimientos_caja")
+            .select("created_at,caja_id,monto_usd,concepto,referencia,nota_operacion")
+            .eq("tipo", "Egreso")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return list(r.data or []), False
+
+
+def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
+    st.subheader("Gastos operativos")
+    st.caption(
+        "Salidas de efectivo que **no** son compra de mercancía para inventario (eso va en **Compras / CXP**). "
+        "Cada registro es un **egreso** en la caja elegida; el saldo equiv. USD baja igual que en **Cajas → movimiento manual**. "
+        "Para guardar la **categoría** en base de datos, ejecutá en Supabase **`supabase/patch_025_gastos_operativos.sql`**."
+    )
+
+    caja_rows = _cajas_fetch_rows(sb, solo_activas=True)
+    caja_ids, caja_fmt = _caja_select_options(caja_rows) if caja_rows else ([], lambda x: str(x))
+    if not caja_ids:
+        st.warning("No hay cajas activas. Creá una en **Cajas y bancos**.")
+        st.stop()
+
+    cat_opts = GASTO_OPERATIVO_CATEGORIAS + (GASTO_OPERATIVO_OTRO,)
+
+    with st.form(f"f_gasto_op_{int(st.session_state.get('gasto_op_form_nonce', 0))}"):
+        cat = st.selectbox("Categoría", options=cat_opts, key="gasto_op_cat")
+        cat_custom = ""
+        if cat == GASTO_OPERATIVO_OTRO:
+            cat_custom = st.text_input("Nombre de la categoría", key="gasto_op_cat_custom", placeholder="Ej.: Suscripción software")
+        desc = st.text_input("Descripción / detalle", key="gasto_op_desc", placeholder="Ej.: Alquiler enero local principal")
+        monto = st.number_input("Monto (USD equivalente)", min_value=0.01, format="%.2f", key="gasto_op_monto")
+        if t:
+            try:
+                _tb_g = _tasa_bs_para_documento(t, usar_bcv=False)
+                st.caption(
+                    f"Referencia **P2P** (solo informativa): ~{float(monto) * float(_tb_g):,.2f} Bs "
+                    f"por US$ {float(monto):,.2f} @ {_tb_g:,.2f} Bs/USD."
+                )
+            except ValueError:
+                pass
+        cid = st.selectbox("Caja de donde sale el dinero", options=caja_ids, format_func=caja_fmt, key="gasto_op_caja")
+        ref = st.text_input("Referencia (Nº factura, recibo…)", key="gasto_op_ref")
+        nota = st.text_input(
+            "Nota de tesorería (opcional)",
+            key="gasto_op_nota",
+            placeholder="Ej.: Pago Banesco / efectivo",
+        )
+        submitted = st.form_submit_button("Registrar gasto operativo")
+        if submitted:
+            cat_final = (cat_custom or "").strip() if cat == GASTO_OPERATIVO_OTRO else cat
+            if cat == GASTO_OPERATIVO_OTRO and not cat_final:
+                st.error("Completá el nombre de la categoría.")
+            elif not (desc or "").strip():
+                st.error("La descripción es obligatoria.")
+            else:
+                payload: dict[str, Any] = {
+                    "p_usuario_id": erp_uid,
+                    "p_caja_id": str(cid),
+                    "p_tipo": "Egreso",
+                    "p_monto_usd": float(monto),
+                    "p_concepto": (desc or "").strip(),
+                    "p_referencia": (ref or "").strip(),
+                }
+                if (nota or "").strip():
+                    payload["p_nota_operacion"] = (nota or "").strip()
+                payload_cat = cat_final if cat_final else None
+                if payload_cat:
+                    payload["p_categoria_gasto"] = payload_cat
+                try:
+                    sb.rpc("registrar_movimiento_caja_erp", payload).execute()
+                    st.success("Gasto registrado.")
+                    _movi_ss_pop_keys(
+                        "gasto_op_cat",
+                        "gasto_op_cat_custom",
+                        "gasto_op_desc",
+                        "gasto_op_monto",
+                        "gasto_op_caja",
+                        "gasto_op_ref",
+                        "gasto_op_nota",
+                    )
+                    _movi_bump_form_nonce("gasto_op_form_nonce")
+                    st.rerun()
+                except Exception as e:
+                    err = _error_msg_from_supabase_exc(e)
+                    low = err.lower()
+                    if payload_cat and any(
+                        x in low for x in ("categoria_gasto", "p_categoria", "could not find", "42883", "42725")
+                    ):
+                        payload.pop("p_categoria_gasto", None)
+                        payload["p_concepto"] = f"[{cat_final}] {(desc or '').strip()}"
+                        try:
+                            sb.rpc("registrar_movimiento_caja_erp", payload).execute()
+                            st.warning(
+                                "Se guardó el gasto **sin** columna de categoría en BD. La categoría quedó al inicio del **concepto**. "
+                                "Ejecutá **`supabase/patch_025_gastos_operativos.sql`** en Supabase para clasificar en reportes."
+                            )
+                            _movi_ss_pop_keys(
+                                "gasto_op_cat",
+                                "gasto_op_cat_custom",
+                                "gasto_op_desc",
+                                "gasto_op_monto",
+                                "gasto_op_caja",
+                                "gasto_op_ref",
+                                "gasto_op_nota",
+                            )
+                            _movi_bump_form_nonce("gasto_op_form_nonce")
+                            st.rerun()
+                        except Exception as e2:
+                            st.error(_error_msg_from_supabase_exc(e2))
+                    else:
+                        st.error(err)
+
+    rows_eg, tiene_cat = _movi_fetch_egresos_caja_recientes(sb, limit=50)
+    if not tiene_cat:
+        st.caption(
+            "Para ver la columna **Categoría** en la tabla de abajo, aplicá **`patch_025_gastos_operativos.sql`** en Supabase."
+        )
+    if rows_eg:
+        cmap = {str(c["id"]): _caja_etiqueta_lista(c) for c in _cajas_fetch_rows(sb, solo_activas=False)}
+        disp: list[dict[str, Any]] = []
+        for r in rows_eg:
+            cid_s = str(r.get("caja_id") or "")
+            row_d: dict[str, Any] = {
+                "Fecha": str(r.get("created_at") or "")[:19].replace("T", " "),
+                "Caja": cmap.get(cid_s, cid_s[:8] + "…"),
+                "USD": float(r.get("monto_usd") or 0),
+                "Concepto": r.get("concepto") or "",
+            }
+            if tiene_cat:
+                row_d["Categoría"] = r.get("categoria_gasto") or "—"
+            if r.get("referencia"):
+                row_d["Ref."] = r.get("referencia")
+            disp.append(row_d)
+        st.markdown("##### Últimos egresos de caja (incluye compras al contado y otros pagos)")
+        st.dataframe(pd.DataFrame(disp), use_container_width=True, hide_index=True)
+        st.caption(
+            "Si necesitás filtrar **solo** gastos operativos, usá la columna **Categoría** tras el patch, o revisá **Reportes → movimientos de caja**."
+        )
+    else:
+        st.info("Aún no hay egresos registrados en caja.")
 
 
 def module_cajas(sb: Client, erp_uid: str) -> None:
     st.subheader("Cajas y bancos")
     st.caption(
-        "Cada fila es una **cuenta concreta**: banco o entidad (Banesco, Bancamiga…), alias interno, moneda de la cuenta (VES/USD/USDT), número y titular."
+        "Cada fila es una **cuenta concreta**: banco o entidad (Banesco, Bancamiga…), alias interno, moneda de la cuenta (VES/USD/USDT), número y titular. "
+        "Los **gastos operativos** (alquiler, servicios, nómina…) podés registrarlos en el módulo **Gastos operativos**."
     )
     rows = sb.table("cajas_bancos").select("*").order("nombre").execute()
     if rows.data:
@@ -9573,6 +9904,7 @@ def main() -> None:
             opts.append("Compras / CXP")
         if role_can(rol, "cajas"):
             opts.append("Cajas y bancos")
+            opts.append("Gastos operativos")
         if role_can(rol, "usuarios"):
             opts.append("Usuarios")
         if rol == "superuser":
@@ -9593,6 +9925,8 @@ def main() -> None:
         module_compras(sb, erp_uid, t)
     elif mod == "Cajas y bancos" and role_can(rol, "cajas"):
         module_cajas(sb, erp_uid)
+    elif mod == "Gastos operativos" and role_can(rol, "cajas"):
+        module_gastos_operativos(sb, erp_uid, t)
     elif mod == "Reportes" and (role_can(rol, "reportes") or role_can(rol, "catalogo")):
         module_reportes(sb, erp_uid, t, rol)
     elif mod == "Usuarios" and role_can(rol, "usuarios"):

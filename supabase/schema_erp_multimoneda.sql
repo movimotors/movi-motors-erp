@@ -251,6 +251,7 @@ CREATE TABLE IF NOT EXISTS public.movimientos_caja (
   concepto TEXT NOT NULL,
   referencia TEXT,
   nota_operacion TEXT,
+  categoria_gasto TEXT,
   venta_id UUID REFERENCES public.ventas (id) ON DELETE SET NULL,
   compra_id UUID REFERENCES public.compras (id) ON DELETE SET NULL,
   usuario_id UUID REFERENCES public.erp_users (id) ON DELETE SET NULL,
@@ -798,7 +799,8 @@ GRANT EXECUTE ON FUNCTION public.crear_compra_erp(UUID, TEXT, TEXT, UUID, NUMERI
 -- -----------------------------------------------------------------------------
 -- RPC: movimiento manual de caja
 -- -----------------------------------------------------------------------------
-DROP FUNCTION IF EXISTS public.registrar_movimiento_caja_erp(UUID, UUID, TEXT, NUMERIC, TEXT, TEXT);
+DROP FUNCTION IF EXISTS public.registrar_movimiento_caja_erp(UUID, UUID, TEXT, NUMERIC, TEXT, TEXT, TEXT);
+DROP FUNCTION IF EXISTS public.registrar_movimiento_caja_erp(UUID, UUID, TEXT, NUMERIC, TEXT, TEXT, TEXT, TEXT);
 CREATE OR REPLACE FUNCTION public.registrar_movimiento_caja_erp(
   p_usuario_id UUID,
   p_caja_id UUID,
@@ -806,7 +808,8 @@ CREATE OR REPLACE FUNCTION public.registrar_movimiento_caja_erp(
   p_monto_usd NUMERIC,
   p_concepto TEXT,
   p_referencia TEXT,
-  p_nota_operacion TEXT DEFAULT NULL
+  p_nota_operacion TEXT DEFAULT NULL,
+  p_categoria_gasto TEXT DEFAULT NULL
 )
 RETURNS UUID
 LANGUAGE plpgsql
@@ -815,6 +818,7 @@ SET search_path = public
 AS $$
 DECLARE
   v_id UUID;
+  v_cat TEXT;
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM public.erp_users WHERE id = p_usuario_id AND activo = TRUE) THEN
     RAISE EXCEPTION 'Usuario ERP inválido o inactivo';
@@ -836,8 +840,13 @@ BEGIN
     RAISE EXCEPTION 'Caja inválida';
   END IF;
 
+  v_cat := NULLIF(TRIM(p_categoria_gasto), '');
+  IF v_cat IS NOT NULL AND p_tipo <> 'Egreso' THEN
+    v_cat := NULL;
+  END IF;
+
   INSERT INTO public.movimientos_caja (
-    caja_id, tipo, monto_usd, concepto, referencia, nota_operacion, venta_id, compra_id, usuario_id
+    caja_id, tipo, monto_usd, concepto, referencia, nota_operacion, venta_id, compra_id, usuario_id, categoria_gasto
   ) VALUES (
     p_caja_id,
     p_tipo,
@@ -847,7 +856,8 @@ BEGIN
     NULLIF(TRIM(p_nota_operacion), ''),
     NULL,
     NULL,
-    p_usuario_id
+    p_usuario_id,
+    v_cat
   )
   RETURNING id INTO v_id;
 
@@ -855,8 +865,8 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.registrar_movimiento_caja_erp(UUID, UUID, TEXT, NUMERIC, TEXT, TEXT, TEXT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.registrar_movimiento_caja_erp(UUID, UUID, TEXT, NUMERIC, TEXT, TEXT, TEXT) TO service_role;
+REVOKE ALL ON FUNCTION public.registrar_movimiento_caja_erp(UUID, UUID, TEXT, NUMERIC, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.registrar_movimiento_caja_erp(UUID, UUID, TEXT, NUMERIC, TEXT, TEXT, TEXT, TEXT) TO service_role;
 
 -- -----------------------------------------------------------------------------
 -- RPC: registrar cambio Bs → estable (tasa pactada + comparación opcional vs BCV/mercado)
