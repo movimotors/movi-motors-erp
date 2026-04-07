@@ -4768,6 +4768,33 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
                 st.metric("Equiv. USD pactado (suma)", f"{_round_money_2(_sum_usd):,.2f}")
             with b4:
                 st.metric("≈ USDT ref. día (suma)", f"{_round_money_2(_sum_usdt_ref):,.2f}")
+
+            st.caption(
+                "**¿Por qué abajo no ves el cambio?** Los bloques **Origen de la liquidez** y **Compras por categoría** "
+                "no usan la bitácora: el primero muestra **saldos actuales** en cajas; el segundo, **compras a proveedores**. "
+                "La bitácora es **solo seguimiento** del tipo de cambio (no mueve saldos sola). El gráfico de abajo resume **solo** tus cambios del período."
+            )
+            _df_bt = pd.DataFrame(
+                [
+                    {
+                        "Operación": f"#{i + 1} · {str(r.get('fecha') or '')[:16]}",
+                        "Equiv. USD (pactado)": _round_money_2(r.get("monto_usd_obtenido")),
+                        "Bs usados": _round_money_2(r.get("monto_ves")),
+                    }
+                    for i, r in enumerate(rows_cambios_bitacora)
+                ]
+            )
+            fig_bt = px.bar(
+                _df_bt,
+                x="Operación",
+                y="Equiv. USD (pactado)",
+                hover_data={"Bs usados": ":,.2f"},
+                labels={"Equiv. USD (pactado)": "Equiv. USD (bitácora)", "Operación": ""},
+            )
+            fig_bt.update_traces(texttemplate="%{y:,.2f} USD", textposition="outside")
+            _plotly_apply_dash_theme(fig_bt, title="Tus cambios Bs → moneda estable (equiv. USD en bitácora)")
+            fig_bt.update_layout(height=300, showlegend=False)
+            st.plotly_chart(fig_bt, use_container_width=True)
         else:
             st.info(
                 "No hay **registros de bitácora** (Bs → USD/USDT) en el rango **Desde/Hasta**. "
@@ -4808,7 +4835,10 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
                 agg_l = agg_l.sort_values("origen")
                 agg_l = agg_l[agg_l["saldo_actual_usd"] > 0]
                 if agg_l.empty:
-                    st.caption("Saldos en cero en todas las cajas.")
+                    st.info(
+                        "**Sin barras:** no hay **saldo positivo** en cajas activas para graficar (o todo está en cero). "
+                        "Esto **no** incluye la bitácora de cambio: ahí solo anotás la tasa; los **saldos reales** dependen de movimientos en **Cajas**."
+                    )
                 else:
                     colors = ["#00e5ff", "#ff9100", "#b388ff", "#78909c"]
                     fig_liq = go.Figure()
@@ -4830,7 +4860,7 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
                         legend=dict(orientation="h", yanchor="top", y=-0.2, x=0),
                     )
                     _plotly_apply_dash_theme(fig_liq, title="Composición por origen")
-                    fig_liq.update_layout(hoverlabel=dict(bgcolor="#1a1f2e", font_size=12))
+                    fig_liq.update_layout(hoverlabel=dict(bgcolor="#1a1f2e", font_size=12), height=320)
                     st.plotly_chart(fig_liq, use_container_width=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -4850,7 +4880,10 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
                 )
             ]
             if not cids:
-                st.caption("Sin compras en el rango.")
+                st.info(
+                    "**Sin compras en el rango:** no registraste **compras a proveedores** entre las fechas elegidas. "
+                    "Eso es independiente de la **bitácora** (cambio Bs→USD/USDT)."
+                )
             else:
                 cdet = sb.table("compras_detalles").select("producto_id, subtotal_usd").in_("compra_id", cids).execute()
                 cdf = pd.DataFrame(cdet.data or [])
