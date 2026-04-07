@@ -1089,7 +1089,7 @@ def gate_user_login(sb: Client, cm: Any | None) -> dict[str, Any] | None:
         else "Para recordar la sesión al refrescar, instala: `python -m pip install extra-streamlit-components`."
     )
     st.caption(
-        "Usuario y contraseña los asigna el superusuario en el módulo Usuarios. "
+        "Usuario y contraseña los asigna el superusuario en **Mantenimiento → Usuarios del sistema**. "
         "El nombre de usuario no distingue mayúsculas (admin = Admin). "
         + _persist_hint
     )
@@ -3889,96 +3889,6 @@ def render_sidebar_welcome(*, nombre: str, username: str, rol: str) -> None:
     )
 
 
-def render_sidebar_cotizaciones(t: dict[str, Any] | None) -> None:
-    """
-    Referencia web (caché ~2 min) + operativo en BD, en bloques visuales claros.
-    """
-    st.markdown('<p class="sb-block-title">Cotizaciones</p>', unsafe_allow_html=True)
-
-    live = get_live_exchange_rates()
-    ves = live.get("ves_bs_por_usd")
-    p2p = live.get("usdt_x_ves_p2p") or live.get("p2p_bs_por_usdt_aprox")
-    ut_ref = _nf(live.get("usdt_por_usd")) or 1.0
-    t_bs_bd = _nf(t.get("tasa_bs")) if t else None
-
-    with st.expander("Mercado en vivo (internet)", expanded=True):
-        st.caption("Referencia pública · se renueva solo ~cada 2 min")
-        if st.button(
-            "Actualizar cotización web",
-            key="sidebar_refresh_live_rates",
-            use_container_width=True,
-            help="Ignora la caché y vuelve a pedir datos a las APIs",
-        ):
-            get_live_exchange_rates.clear()
-            st.rerun()
-
-        if live.get("ok") and ves is not None:
-            fv = float(ves)
-            delta_vs = None
-            if t_bs_bd is not None and t_bs_bd > 0:
-                delta_vs = fv - float(t_bs_bd)
-            st.metric(
-                "Bs por 1 USD (web)",
-                f"{fv:,.2f}",
-                delta=f"{delta_vs:+,.2f} vs facturación" if delta_vs is not None else None,
-                delta_color="off",
-            )
-            st.metric("USDT por 1 USD (ref.)", f"{float(ut_ref):,.4f}", delta_color="off")
-        else:
-            st.info("Sin datos web por ahora. Revisa la conexión.")
-            for err in (live.get("errors") or [])[:2]:
-                st.caption(html.escape(str(err)[:140]))
-
-    with st.expander("USDT ↔ bolívares (P2P)", expanded=True):
-        if live.get("ok") and p2p is not None:
-            src = live.get("usdt_x_ves_p2p_source")
-            p2p_lbl = "Binance P2P" if src == "binance_p2p_median_buy" else "API referencia"
-            st.caption(f"Fuente: **{p2p_lbl}**")
-            st.metric("Bs por 1 USDT", f"{float(p2p):,.4f}", delta_color="off")
-        else:
-            st.caption("Sin P2P hasta que carguen datos web.")
-
-    with st.expander("Facturación · última cotización web", expanded=True):
-        st.caption(
-            "La **web** muestra **mercado** (ref. Bs/USD y P2P; no BCV oficial). Ventas/compras usan **`tasa_bs` en BD** "
-            "(BCV o ref. P2P/mercado, según elegiste al guardar) hasta que actualices tasas o corra el **auto-sync**."
-        )
-        if live.get("ok") and ves is not None:
-            st.metric(
-                "Bs por 1 USD (última web)",
-                f"{float(ves):,.2f}",
-                delta_color="off",
-            )
-            st.metric(
-                "USDT por 1 USD (última web)",
-                f"{float(ut_ref):,.6f}",
-                delta_color="off",
-            )
-        else:
-            st.warning("Sin cotización web ahora. Revisa conexión o **Mercado en vivo**.")
-
-        st.divider()
-        st.caption("**En documentos hoy** (Supabase · `tasa_bs` / `tasa_usdt`)")
-        if t:
-            tb = float(t["tasa_bs"])
-            delta_bd = None
-            if live.get("ok") and ves is not None:
-                delta_bd = f"{tb - float(ves):+,.2f} vs última web"
-            st.metric(
-                "Bs por 1 USD (guardado)",
-                f"{tb:,.2f}",
-                delta=delta_bd,
-                delta_color="off",
-            )
-            st.metric(
-                "USDT por 1 USD (guardado)",
-                f"{float(t['tasa_usdt']):,.6f}",
-                delta_color="off",
-            )
-        else:
-            st.info("No hay tasas en base de datos. En **Dashboard** abre *Cargar / editar tasas en base de datos*.")
-
-
 def render_tasas_tiempo_real(*, key_suffix: str, t_guardado: dict[str, Any] | None) -> dict[str, Any]:
     """Muestra tasas públicas en vivo (caché ~2 min) y opción de forzar refresco."""
     st.markdown("##### Tasas en tiempo real (internet)")
@@ -4224,6 +4134,99 @@ def _dash_kpi_card(label: str, value: str, trend_pct: float | None = None, sub: 
 """,
         unsafe_allow_html=True,
     )
+
+
+def _dash_mercado_card(label: str, value: str, *, foot: str | None = None) -> None:
+    """Tarjeta estilo dashboard para cotizaciones (sin tendencia vs período)."""
+    ft = (
+        f'<div class="dash-kpi-sub">{html.escape(foot)}</div>'
+        if foot
+        else '<div class="dash-kpi-sub"> </div>'
+    )
+    st.markdown(
+        f"""
+<div class="dash-bento">
+  <div class="dash-kpi-label">{html.escape(label)}</div>
+  <div class="dash-kpi-value">{html.escape(value)}</div>
+  {ft}
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def render_dashboard_mercado_live_tarjetas(t: dict[str, Any] | None) -> None:
+    """Cotizaciones web (caché ~2 min) en tarjetas — referencia de mercado en Resumen ejecutivo."""
+    st.markdown("##### Referencia de mercado (tiempo real)")
+    st.caption(
+        "Fuentes públicas en internet · caché **~2 min** · **no** es BCV oficial. "
+        "Ventas y compras siguen usando **`tasa_bs` / `tasa_usdt` guardadas en BD** hasta que las actualices o corra el **auto-sync**."
+    )
+
+    _bref, _ = st.columns([1, 5])
+    with _bref:
+        if st.button(
+            "Refrescar ahora",
+            key="dash_mercado_refresh_live",
+            help="Ignora la caché y vuelve a consultar las APIs",
+        ):
+            get_live_exchange_rates.clear()
+            st.rerun()
+
+    live = get_live_exchange_rates()
+    ves = live.get("ves_bs_por_usd")
+    p2p = live.get("usdt_x_ves_p2p") or live.get("p2p_bs_por_usdt_aprox")
+    ut_ref = _nf(live.get("usdt_por_usd")) or 1.0
+    t_bs_bd = _nf(t.get("tasa_bs")) if t else None
+
+    if not live.get("ok") or ves is None:
+        st.info("Sin datos web por ahora. Revisá la conexión o probá **Refrescar ahora**.")
+        for err in (live.get("errors") or [])[:3]:
+            st.caption(html.escape(str(err)[:160]))
+        if t:
+            st.markdown("**Operativo en documentos (BD)**")
+            c1, c2 = st.columns(2)
+            with c1:
+                _dash_mercado_card("Bs por 1 USD (guardado)", f"{float(t['tasa_bs']):,.2f}", foot="Facturación / compras")
+            with c2:
+                _dash_mercado_card("USDT por 1 USD (guardado)", f"{float(t['tasa_usdt']):,.6f}", foot="Sistema")
+        return
+
+    fv = float(ves)
+    delta_vs = None
+    if t_bs_bd is not None and float(t_bs_bd) > 0:
+        delta_vs = fv - float(t_bs_bd)
+
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        _foot = (
+            f"{delta_vs:+,.2f} Bs vs tu Bs/USD guardado en BD" if delta_vs is not None else "Mercado web · no BCV"
+        )
+        _dash_mercado_card("Bs por 1 USD (web)", f"{fv:,.2f}", foot=_foot)
+    with m2:
+        _dash_mercado_card("USDT por 1 USD (ref. web)", f"{float(ut_ref):,.4f}", foot="Cruce USDT/USD")
+    with m3:
+        if p2p is not None:
+            src = live.get("usdt_x_ves_p2p_source")
+            p2p_lbl = "Binance P2P" if src == "binance_p2p_median_buy" else "API referencia"
+            _dash_mercado_card("Bs por 1 USDT", f"{float(p2p):,.4f}", foot=f"Fuente: {p2p_lbl}")
+        else:
+            _dash_mercado_card("Bs por 1 USDT", "—", foot="Sin dato P2P (revisá conexión)")
+
+    if t:
+        tbusd = float(t["tasa_bs"])
+        tusdt = float(t["tasa_usdt"])
+        d_bd_web = tbusd - fv
+        st.caption("**Comparación con lo guardado en base (lo que usan los documentos hoy)**")
+        b1, b2 = st.columns(2)
+        with b1:
+            _dash_mercado_card(
+                "Bs por 1 USD (guardado en BD)",
+                f"{tbusd:,.2f}",
+                foot=f"{d_bd_web:+,.2f} vs web ahora",
+            )
+        with b2:
+            _dash_mercado_card("USDT por 1 USD (guardado en BD)", f"{tusdt:,.6f}", foot="Misma fila de tasas del día")
 
 
 def _dash_semaforo(*, stock: float, minimo: float, vendido_periodo: float) -> str:
@@ -4640,19 +4643,7 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
         d_a = st.date_input("Desde", value=date.today() - timedelta(days=30), key="dash_d0")
         d_b = st.date_input("Hasta", value=date.today(), key="dash_d1")
     with h3:
-        q_search = st.text_input("Buscar", placeholder="Producto, código…", key="dash_global_search", label_visibility="visible")
-        live = get_live_exchange_rates()
-        p2p = live.get("usdt_x_ves_p2p") or live.get("p2p_bs_por_usdt_aprox")
-        ves = live.get("ves_bs_por_usd")
-        if live.get("ok") and p2p is not None and ves is not None:
-            src = "Binance P2P" if live.get("usdt_x_ves_p2p_source") == "binance_p2p_median_buy" else "Ref."
-            st.markdown(
-                f'<div class="dash-live-chip">USDT/VES · {float(p2p):,.2f} Bs <small>({html.escape(src)})</small><br/>'
-                f"USD/VES web · {float(ves):,.2f}</div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown('<div class="dash-live-chip">Tipo cambio web: sin datos</div>', unsafe_allow_html=True)
+        st.text_input("Buscar", placeholder="Producto, código…", key="dash_global_search", label_visibility="visible")
 
     if d_b < d_a:
         st.error("La fecha *Hasta* debe ser ≥ *Desde*.")
@@ -4789,9 +4780,40 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
     except Exception:
         liquidez = 0.0
 
+    dsl_mov = f"{d_a.isoformat()}T00:00:00"
+    try:
+        cr_p = sb.table("compras").select("total_usd").gte("fecha", str(d_a)).lte("fecha", r_fut).execute()
+        compras_period_usd = sum(float(x.get("total_usd") or 0) for x in (cr_p.data or []))
+    except Exception:
+        compras_period_usd = 0.0
+
+    gastos_op_period_usd = 0.0
+    n_gastos_op_movs = 0
+    try:
+        mr_go = (
+            sb.table("movimientos_caja")
+            .select("monto_usd,categoria_gasto")
+            .gte("created_at", dsl_mov)
+            .lte("created_at", r_fut)
+            .eq("tipo", "Egreso")
+            .execute()
+        )
+        for row in mr_go.data or []:
+            cg = row.get("categoria_gasto")
+            if cg is not None and str(cg).strip():
+                gastos_op_period_usd += float(row.get("monto_usd") or 0)
+                n_gastos_op_movs += 1
+    except Exception:
+        gastos_op_period_usd = 0.0
+        n_gastos_op_movs = 0
+
+    total_salidas_op_usd = compras_period_usd + gastos_op_period_usd
+    ventas_menos_salidas_usd = ventas_usd - total_salidas_op_usd
+
     st.caption(
-        "**Cómo recorrer el dashboard:** 1) Elegí **Desde / Hasta** arriba. 2) Pestaña **Resumen** → números clave, **bitácora Bs→USD/USDT** y gráficos de liquidez y compras. "
-        "3) **Inventario** → semáforo y valor (el **Buscar** de arriba filtra la tabla). 4) **Caja** → flujo, cobros por moneda, detalle de bitácora, tasas y últimos movimientos."
+        "**Cómo recorrer el dashboard:** 1) Elegí **Desde / Hasta** arriba. 2) Pestaña **Resumen** → primero **referencia de mercado en vivo** (tarjetas), luego ventas, margen, **compras y gastos operativos**, bitácora, liquidez y compras por categoría. "
+        "3) **Inventario** → semáforo y valor (el **Buscar** de arriba filtra la tabla). 4) **Caja** → flujo, cobros por moneda, bitácora, tasas y últimos movimientos. "
+        "**Usuarios** del ERP están en **Mantenimiento** (superusuario)."
     )
     tab_d_res, tab_d_inv, tab_d_caja = st.tabs(
         [
@@ -4802,6 +4824,8 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
     )
 
     with tab_d_res:
+        render_dashboard_mercado_live_tarjetas(t)
+        st.divider()
         k1, k2, k3, k4 = st.columns(4)
         with k1:
             _dash_kpi_card(
@@ -4830,6 +4854,42 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
                 f"US$ {liquidez:,.2f}",
                 None,
                 "Saldos en cajas / bancos / wallets",
+            )
+
+        st.markdown("##### Compras, gastos operativos y flujo (mismo período)")
+        st.caption(
+            "**Gastos operativos** = egresos de caja con **categoría** (módulo **Gastos operativos**; requiere **`patch_025`** en Supabase). "
+            "Si no aplicaste el patch o no categorizás, aquí puede figurar **0** aunque haya otros egresos. "
+            "**Ventas − salidas** es solo orientativo (no reemplaza un estado de resultados ni incluye todo cobro/pago)."
+        )
+        s1, s2, s3, s4 = st.columns(4)
+        with s1:
+            _dash_kpi_card(
+                "Compras a proveedores (USD)",
+                f"US$ {compras_period_usd:,.2f}",
+                None,
+                "Mercancía en el período",
+            )
+        with s2:
+            _dash_kpi_card(
+                "Gastos operativos (USD)",
+                f"US$ {gastos_op_period_usd:,.2f}",
+                None,
+                (f"{n_gastos_op_movs} mov. con categoría" if n_gastos_op_movs else "Registrá en Gastos operativos"),
+            )
+        with s3:
+            _dash_kpi_card(
+                "Total salidas (compras + gastos op.)",
+                f"US$ {total_salidas_op_usd:,.2f}",
+                None,
+                "Suma de las dos tarjetas previas",
+            )
+        with s4:
+            _dash_kpi_card(
+                "Ventas − salidas (orientativo)",
+                f"US$ {ventas_menos_salidas_usd:,.2f}",
+                None,
+                "No incluye otros ingresos ni egresos",
             )
 
         st.markdown("##### Seguimiento: Bs → USD / USDT (bitácora de tesorería)")
@@ -9444,8 +9504,11 @@ def module_reportes(sb: Client, erp_uid: str, t: dict[str, Any] | None, rol: str
     with tab_cat:
         panel_reportes_catalogo_fotos(sb, erp_uid)
 
-def module_usuarios(sb: Client) -> None:
-    st.subheader("Usuarios del sistema")
+def module_usuarios(sb: Client, *, embedded_in_mantenimiento: bool = False) -> None:
+    if embedded_in_mantenimiento:
+        st.markdown("### Usuarios del sistema")
+    else:
+        st.subheader("Usuarios del sistema")
     st.caption("Solo el superusuario puede crear cuentas y definir la contraseña inicial de cada persona.")
 
     r = (
@@ -9738,6 +9801,8 @@ def panel_anular_venta_compra_mantenimiento(sb: Client, erp_uid: str) -> None:
 
 def module_mantenimiento(sb: Client, erp_uid: str) -> None:
     st.subheader("Mantenimiento")
+    module_usuarios(sb, embedded_in_mantenimiento=True)
+    st.divider()
     st.markdown("#### Respaldo de seguridad")
     st.caption(
         "Generá un archivo **JSON** con las tablas principales del ERP (ventas, compras, caja, productos, tasas, etc.). "
@@ -9887,17 +9952,13 @@ def main() -> None:
         if st.button("Cerrar sesión", key="movi_sidebar_logout", use_container_width=True):
             _logout()
             st.rerun()
-        render_sidebar_cotizaciones(t)
+        st.caption("Cotizaciones **en vivo**: **Dashboard → Resumen ejecutivo** (tarjetas arriba del todo).")
         render_cambiar_mi_password(sb, erp_uid)
         opts: list[str] = []
         if role_can(rol, "dashboard"):
             opts.append("Dashboard")
         if role_can(rol, "inventario"):
             opts.append("Inventario")
-        if role_can(rol, "reportes"):
-            opts.append("Reportes")
-        elif role_can(rol, "catalogo"):
-            opts.append("Reportes")
         if role_can(rol, "ventas"):
             opts.append("Ventas / CXC")
         if role_can(rol, "compras"):
@@ -9905,8 +9966,10 @@ def main() -> None:
         if role_can(rol, "cajas"):
             opts.append("Cajas y bancos")
             opts.append("Gastos operativos")
-        if role_can(rol, "usuarios"):
-            opts.append("Usuarios")
+        if role_can(rol, "reportes"):
+            opts.append("Reportes")
+        elif role_can(rol, "catalogo"):
+            opts.append("Reportes")
         if rol == "superuser":
             opts.append("Mantenimiento")
         if not opts:
@@ -9929,8 +9992,6 @@ def main() -> None:
         module_gastos_operativos(sb, erp_uid, t)
     elif mod == "Reportes" and (role_can(rol, "reportes") or role_can(rol, "catalogo")):
         module_reportes(sb, erp_uid, t, rol)
-    elif mod == "Usuarios" and role_can(rol, "usuarios"):
-        module_usuarios(sb)
     elif mod == "Mantenimiento" and rol == "superuser":
         module_mantenimiento(sb, erp_uid)
 
