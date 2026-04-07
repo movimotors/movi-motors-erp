@@ -6533,15 +6533,25 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
     b1, b2 = st.columns([1, 3])
     with b1:
         if st.button(
-            "➕ Otra fila de cobro o abono",
-            help="Sirve para venta al contado (varios medios) o para venta a crédito con seña (varias cuentas).",
+            "➕ Agregar otra forma de pago",
+            help="Cada fila = una cuenta (caja) y un monto en USD, Zelle, bolívares o USDT. Podés combinar varias hasta 10 filas.",
+            key="venta_btn_mas_cobro",
         ):
             st.session_state["venta_n_cobros"] = min(10, int(st.session_state.get("venta_n_cobros", 1)) + 1)
             st.rerun()
     with b2:
-        if st.button("↺ Dejar una sola fila", help="Vuelve a una sola línea de caja (contado o abono)."):
+        if st.button(
+            "↺ Dejar una sola fila de cobro",
+            help="Vuelve a un solo medio de pago (una caja / una moneda).",
+            key="venta_btn_una_cobro",
+        ):
             st.session_state["venta_n_cobros"] = 1
             st.rerun()
+    st.info(
+        "**Pago mixto (Zelle + efectivo + Binance/USDT + bolívares, etc.):** tocá **Agregar otra forma de pago** y cargá "
+        "**una fila por cada medio**: elegí la **caja** donde entra el dinero, la **forma/moneda** y el **monto** en esa moneda. "
+        "La **suma en dólares equivalente** de todas las filas debe coincidir con el total de la venta (ver el resumen abajo del formulario)."
+    )
 
     with st.form(f"f_venta_{int(st.session_state.get('venta_form_nonce', 0))}"):
         cliente = st.text_input("Cliente", key="venta_cli", autocomplete="off")
@@ -6643,11 +6653,11 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
 
         cobros_pl: list[dict[str, Any]] = []
         if forma == "contado":
-            st.markdown("**Cobro al contado — por moneda y cuenta**")
+            st.markdown("**Cobro al contado — una o varias cajas / medios**")
             st.caption(
-                f"Total venta **US$ {est_total:,.2f}**. La suma en USD equivalente de las filas debe coincidir (±0,05). "
-                "**Zelle** cuenta como dólares (1:1). En *Nota de tesorería* podés escribir si cambiaste Bs a USD, "
-                "quién te mandó el Zelle, etc. (sale en reportes de caja)."
+                f"Total venta **US$ {est_total:,.2f}**. Podés usar **varias filas** (botón arriba): por ejemplo una caja **Zelle**, "
+                "otra **efectivo USD**, otra **USDT (Binance)** y otra en **bolívares (VES)**. La suma en **USD equivalente** debe "
+                "cuadrar con el total (±0,05). **Zelle** = USD 1:1. En *Nota de tesorería* podés detallar referencia del pago."
             )
             if not caja_ids:
                 st.error("No hay cajas activas. Cree una en el módulo Cajas.")
@@ -6698,6 +6708,26 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                     _row_c["nota_operacion"] = (nota_cob or "").strip()
                 cobros_pl.append(_row_c)
 
+            if cobros_pl and _tb_doc_v is not None:
+                _sum_eq_v = round(
+                    sum(
+                        _monto_nativo_a_usd(r["moneda"], float(r["monto"]), float(_tb_doc_v), t_usdt)
+                        for r in cobros_pl
+                    ),
+                    2,
+                )
+                _dif_v = round(_sum_eq_v - est_total, 2)
+                st.markdown(
+                    f"**Resumen de cobros:** equivalente **US$ {_sum_eq_v:,.2f}** · Total venta **US$ {est_total:,.2f}** · "
+                    f"Diferencia **US$ {_dif_v:+,.2f}**"
+                )
+                if abs(_dif_v) <= 0.05:
+                    st.success("Los cobros cuadran con el total de la venta.")
+                else:
+                    st.warning(
+                        "Ajustá los montos o agregá más filas hasta que la diferencia quede en **±0,05 US$** (redondeos de Bs/USDT)."
+                    )
+
         abono_hoy = False
         if forma == "credito":
             abono_hoy = st.checkbox(
@@ -6706,11 +6736,10 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                 key="venta_abono_credito",
             )
             if abono_hoy:
-                st.markdown("**Dinero que entra hoy (seña o abono)**")
+                st.markdown("**Dinero que entra hoy (seña o abono) — una o varias cuentas**")
                 st.caption(
-                    f"Total de la venta **US$ {est_total:,.2f}**. El abono en dólares equivalente debe ser **menor** que ese total; "
-                    "lo que falte aparecerá en **cuentas por cobrar** para cobrarlo después (misma sección **Registrar cobro** de abajo). "
-                    "Si el cliente paga todo hoy, usá forma de pago **contado**."
+                    f"Total de la venta **US$ {est_total:,.2f}**. Podés usar **varias filas** como en contado. El abono en USD "
+                    "equivalente debe ser **menor** que el total; el saldo queda en **cuentas por cobrar**. Si paga todo hoy, usá **contado**."
                 )
                 if not caja_ids:
                     st.error("No hay cuentas activas en Cajas. Creá una para registrar el abono.")
@@ -6746,6 +6775,26 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                     if (nota_ab or "").strip():
                         _row_a["nota_operacion"] = (nota_ab or "").strip()
                     cobros_pl.append(_row_a)
+
+                if cobros_pl and _tb_doc_v is not None:
+                    _sum_ab = round(
+                        sum(
+                            _monto_nativo_a_usd(r["moneda"], float(r["monto"]), float(_tb_doc_v), t_usdt)
+                            for r in cobros_pl
+                        ),
+                        2,
+                    )
+                    _pend_ab = round(est_total - _sum_ab, 2)
+                    st.markdown(
+                        f"**Resumen del abono:** equivalente **US$ {_sum_ab:,.2f}** · Total venta **US$ {est_total:,.2f}** · "
+                        f"Saldo a financiar ~**US$ {_pend_ab:,.2f}**"
+                    )
+                    if _sum_ab <= 0:
+                        st.warning("Cargá montos en las filas o desmarcá el abono si no entra dinero hoy.")
+                    elif _sum_ab >= est_total - 0.05:
+                        st.warning("El abono cubre casi todo el total; para eso usá forma de pago **contado**.")
+                    else:
+                        st.success("El abono es menor al total; el resto quedará en cuentas por cobrar.")
 
         if st.form_submit_button("Registrar venta (atómica)"):
             _err_srl_v = _venta_validar_seriales_motor_lineas(new_lines)
