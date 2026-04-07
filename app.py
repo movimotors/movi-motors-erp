@@ -4336,11 +4336,11 @@ def _dashboard_seccion_cambios_tesoreria(
     """Bitácora Bs→USD/USDT: precio pactado + comparación opcional vs BCV/mercado."""
     erp_uid = str(st.session_state.get("erp_uid") or "").strip()
     st.markdown('<div class="dash-bento">', unsafe_allow_html=True)
-    st.markdown("##### Bitácora: Bs → USD / USDT (seguimiento, no mueve saldos)")
+    st.markdown("##### Bitácora: Bs → USD / USDT")
     st.caption(
-        "Registrás **cuántos Bs** usaste y **qué equivalente en USD** obtuviste al pactar con el cambista (o plataforma). "
-        "Si el destino es una **caja USDT**, el mismo monto se interpreta como **equivalente** a esos USDT en USD del sistema. "
-        "La **comparación** con otra tasa (BCV/mercado) es opcional. Los **saldos reales** siguen en **Cajas**."
+        "Registrás **cuántos Bs** salieron y **qué equivalente en USD** recibiste. "
+        "Si **no** marcás «solo bitácora», el sistema genera **egreso de Bs** en la cuenta origen e **ingreso** en la cuenta destino (USD o USDT), "
+        "igual que en ventas. La comparación con otra tasa (BCV/mercado) sigue siendo opcional."
     )
 
     if rows_raw is not None:
@@ -4524,6 +4524,12 @@ def _dashboard_seccion_cambios_tesoreria(
             )
             if float(t_comp_in) <= 0 and def_tasa > 0:
                 st.caption(f"Sugerido para comparar (BCV/ref. guardada): **{def_tasa:,.4f}** — copiá si querés medir vs eso.")
+            solo_bitacora = st.checkbox(
+                "Solo anotar en bitácora (no mover saldos entre cajas)",
+                value=False,
+                key="dash_ct_solo_bit",
+                help="Si lo **desmarcás**, se registra **egreso** de bolívares en la cuenta VES y **ingreso** en la cuenta USD/USDT.",
+            )
             nota_in = st.text_input("Nota (opcional)", key="dash_ct_nota")
             if st.form_submit_button("Guardar registro"):
                 try:
@@ -4534,32 +4540,63 @@ def _dashboard_seccion_cambios_tesoreria(
                                 f"El precio compra ({t_compra_in:,.4f}) no cuadra del todo con Bs/USD ingresados "
                                 f"(implicaría ~{usd_impl:,.4f} USD). Revisá montos o la tasa pactada."
                             )
-                    payload_rpc: dict[str, Any] = {
-                        "p_usuario_id": erp_uid,
-                        "p_caja_origen_id": None if so == opt_none else str(so),
-                        "p_caja_destino_id": None if sd == opt_none else str(sd),
-                        "p_monto_ves": float(m_ves_in),
-                        "p_monto_usd_obtenido": float(m_usd_in),
-                        "p_tasa_compra_bs_por_usd": float(t_compra_in),
-                    }
-                    if float(t_comp_in) > 0:
-                        payload_rpc["p_tasa_comparacion_bs_por_usd"] = float(t_comp_in)
-                    nn = (nota_in or "").strip()
-                    if nn:
-                        payload_rpc["p_nota"] = nn
-                    sb.rpc("registrar_cambio_tesoreria_erp", payload_rpc).execute()
-                    st.success("Registro guardado.")
-                    _movi_bump_form_nonce("dash_cambio_teso_form_nonce")
-                    _movi_ss_pop_keys(
-                        "dash_ct_orig",
-                        "dash_ct_dest",
-                        "dash_ct_mves",
-                        "dash_ct_musd",
-                        "dash_ct_tcompra",
-                        "dash_ct_tcomp",
-                        "dash_ct_nota",
-                    )
-                    st.rerun()
+                    aplicar_mov = not bool(solo_bitacora)
+                    if aplicar_mov and (so == opt_none or sd == opt_none):
+                        st.error("Para mover dinero entre cuentas elegí **caja origen (VES)** y **caja destino (USD/USDT)**.")
+                    else:
+                        payload_rpc: dict[str, Any] = {
+                            "p_usuario_id": erp_uid,
+                            "p_caja_origen_id": None if so == opt_none else str(so),
+                            "p_caja_destino_id": None if sd == opt_none else str(sd),
+                            "p_monto_ves": float(m_ves_in),
+                            "p_monto_usd_obtenido": float(m_usd_in),
+                            "p_tasa_compra_bs_por_usd": float(t_compra_in),
+                            "p_aplicar_movimientos": aplicar_mov,
+                        }
+                        if float(t_comp_in) > 0:
+                            payload_rpc["p_tasa_comparacion_bs_por_usd"] = float(t_comp_in)
+                        nn = (nota_in or "").strip()
+                        if nn:
+                            payload_rpc["p_nota"] = nn
+                        if aplicar_mov:
+                            _dm = next(
+                                (
+                                    str(c.get("moneda_cuenta") or "").strip().upper()
+                                    for c in rows_caj
+                                    if str(c.get("id")) == str(sd)
+                                ),
+                                "",
+                            )
+                            if _dm == "USDT":
+                                _t_ut = float(_nf(t.get("tasa_usdt")) or 0) if t else 0.0
+                                if _t_ut <= 0:
+                                    _lt = latest_tasas(sb) or {}
+                                    _t_ut = float(_nf(_lt.get("tasa_usdt")) or 0)
+                                if _t_ut <= 0:
+                                    st.error("Falta **tasa USDT/USD** (cargá tasas del día en **Tasas**).")
+                                    st.stop()
+                                payload_rpc["p_tasa_usdt"] = _t_ut
+                        sb.rpc("registrar_cambio_tesoreria_erp", payload_rpc).execute()
+                        st.success(
+                            "Registro guardado."
+                            + (
+                                " Movimientos de caja (egreso Bs + ingreso destino) aplicados."
+                                if aplicar_mov
+                                else " Solo bitácora (sin movimientos en cajas)."
+                            )
+                        )
+                        _movi_bump_form_nonce("dash_cambio_teso_form_nonce")
+                        _movi_ss_pop_keys(
+                            "dash_ct_orig",
+                            "dash_ct_dest",
+                            "dash_ct_mves",
+                            "dash_ct_musd",
+                            "dash_ct_tcompra",
+                            "dash_ct_tcomp",
+                            "dash_ct_nota",
+                            "dash_ct_solo_bit",
+                        )
+                        st.rerun()
                 except Exception as ex:
                     st.error(str(ex))
 
@@ -4772,7 +4809,7 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
             st.caption(
                 "**¿Por qué abajo no ves el cambio?** Los bloques **Origen de la liquidez** y **Compras por categoría** "
                 "no usan la bitácora: el primero muestra **saldos actuales** en cajas; el segundo, **compras a proveedores**. "
-                "La bitácora es **solo seguimiento** del tipo de cambio (no mueve saldos sola). El gráfico de abajo resume **solo** tus cambios del período."
+                "Si al guardar **no** elegiste «solo bitácora», también se generaron **movimientos de caja**. El gráfico de abajo resume los **equiv. USD** registrados en bitácora en el período."
             )
             _df_bt = pd.DataFrame(
                 [
@@ -4837,7 +4874,7 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
                 if agg_l.empty:
                     st.info(
                         "**Sin barras:** no hay **saldo positivo** en cajas activas para graficar (o todo está en cero). "
-                        "Esto **no** incluye la bitácora de cambio: ahí solo anotás la tasa; los **saldos reales** dependen de movimientos en **Cajas**."
+                        "Si registraste un cambio con **movimientos de caja**, los saldos ya deberían reflejar egreso de Bs e ingreso en USD/USDT."
                     )
                 else:
                     colors = ["#00e5ff", "#ff9100", "#b388ff", "#78909c"]
