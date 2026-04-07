@@ -704,12 +704,70 @@ def _movi_reset_venta_form_fields() -> None:
     _movi_ss_pop_key_prefixes("vp_", "vq_", "vpu_", "vcb_", "vca_", "vsrl_")
     _movi_ss_pop_keys(
         "venta_doc_tasa_bs",
+        "venta_tasa_bs_override",
         "venta_abono_credito",
         "venta_cli",
         "venta_forma",
         "venta_fv",
         "venta_notas",
     )
+
+
+def _rpc_resp_uuid(resp: Any) -> str | None:
+    """Extrae UUID devuelto por RPC `RETURNS UUID` (PostgREST / supabase-py)."""
+    data = getattr(resp, "data", None)
+    if data is None:
+        return None
+    if isinstance(data, str) and len(data) >= 32:
+        return data.strip()
+    if isinstance(data, list) and data:
+        x = data[0]
+        if isinstance(x, str) and len(x) >= 32:
+            return x.strip()
+    return None
+
+
+def _venta_firma_registro(cliente: str, est_total: float, new_lines: list[dict[str, Any]]) -> str:
+    """Firma del intento de venta para detectar doble envío inmediato."""
+    try:
+        payload = json.dumps(
+            {"c": (cliente or "").strip(), "t": round(float(est_total), 2), "l": new_lines},
+            sort_keys=True,
+            default=str,
+        )
+    except Exception:
+        payload = str(cliente) + str(est_total) + str(new_lines)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _venta_set_ok_banner_desde_id(
+    sb: Client,
+    *,
+    venta_id: str,
+    cliente: str,
+    est_total: float,
+    forma: str,
+    extra_caption: str | None = None,
+) -> None:
+    try:
+        rr = (
+            sb.table("ventas")
+            .select("numero,total_usd,forma_pago,cliente")
+            .eq("id", venta_id)
+            .limit(1)
+            .execute()
+        )
+        row = (rr.data or [{}])[0] if rr.data else {}
+    except Exception:
+        row = {}
+    st.session_state["venta_ok_banner"] = {
+        "id": venta_id,
+        "numero": row.get("numero"),
+        "total_usd": float(row.get("total_usd") if row.get("total_usd") is not None else est_total),
+        "cliente": (row.get("cliente") if row.get("cliente") is not None else cliente) or "",
+        "forma_pago": str(row.get("forma_pago") or forma or ""),
+        "extra": extra_caption,
+    }
 
 
 def _movi_reset_venta_session_nueva(plist: list[dict[str, Any]], id_to_price: dict[str, float]) -> None:
@@ -6465,6 +6523,29 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
     if not t:
         st.stop()
 
+    _okb = st.session_state.get("venta_ok_banner")
+    if isinstance(_okb, dict) and _okb.get("id"):
+        _n = _okb.get("numero")
+        _tid = str(_okb.get("id") or "")
+        _tot = float(_okb.get("total_usd") or 0)
+        _cli = str(_okb.get("cliente") or "—")
+        _fp = str(_okb.get("forma_pago") or "—")
+        st.success(
+            f"**Venta registrada** · Nº interno **{_n or '—'}** · Total **US$ {_tot:,.2f}** · "
+            f"Cliente: {_cli} · Forma: `{_fp}`"
+        )
+        st.caption(f"ID en base: `{_tid}` — también podés verla en **Reportes → Ventas**.")
+        if (_okb.get("extra") or "").strip():
+            st.caption(str(_okb.get("extra")).strip())
+        st.info(
+            "**Para no duplicar:** no vuelvas a pulsar **Registrar venta** si ya ves este aviso. "
+            "Si te equivocaste, **Mantenimiento → Anular venta** (superusuario)."
+        )
+        if st.button("Ocultar aviso y seguir", key="venta_ok_banner_dismiss"):
+            del st.session_state["venta_ok_banner"]
+            st.rerun()
+        st.divider()
+
     t_usdt = float(t["tasa_usdt"])
     st.caption(
         "Líneas en **USD**: precio unitario y total son **1 USD = 1 USD** en el sistema. "
@@ -6855,6 +6936,17 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             if _err_srl_v:
                 st.error(_err_srl_v)
             else:
+                _sig_v = _venta_firma_registro(cliente, est_total, new_lines)
+                _now_v = time.time()
+                if (
+                    st.session_state.get("venta_last_success_sig") == _sig_v
+                    and (_now_v - float(st.session_state.get("venta_last_success_ts", 0))) < 35
+                ):
+                    st.error(
+                        "Acabás de registrar una venta con los mismos datos. Revisá el aviso verde arriba o **Reportes → Ventas**. "
+                        "No vuelvas a registrar para no duplicar."
+                    )
+                    st.stop()
                 t_bs_doc = float(t_bs_doc_live or 0)
                 if t_bs_doc <= 0:
                     st.error("Tasa Bs/USD inválida para esta venta. Ajustala arriba (por ejemplo la tasa P2P real).")
@@ -6894,10 +6986,24 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                                 payload["p_caja_id"] = str(p_cobros[0]["caja_id"])
                                 payload["p_cobros"] = p_cobros
                                 try:
-                                    sb.rpc("crear_venta_erp", payload).execute()
-                                    st.success("Venta registrada.")
-                                    _movi_reset_venta_session_nueva(plist, id_to_price)
-                                    st.rerun()
+                                    _resp_v = sb.rpc("crear_venta_erp", payload).execute()
+                                    _vid = _rpc_resp_uuid(_resp_v)
+                                    if not _vid:
+                                        st.error(
+                                            "La venta pudo haberse guardado igual. Revisá **Reportes → Ventas** y no registres de nuevo."
+                                        )
+                                    else:
+                                        st.session_state["venta_last_success_sig"] = _sig_v
+                                        st.session_state["venta_last_success_ts"] = time.time()
+                                        _venta_set_ok_banner_desde_id(
+                                            sb,
+                                            venta_id=_vid,
+                                            cliente=cliente,
+                                            est_total=est_total,
+                                            forma=forma,
+                                        )
+                                        _movi_reset_venta_session_nueva(plist, id_to_price)
+                                        st.rerun()
                                 except Exception as e:
                                     err = _error_msg_from_supabase_exc(e)
                                     if "p_cobros" in err or "could not find" in err.lower():
@@ -6943,13 +7049,28 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                                 else:
                                     payload["p_cobros"] = p_cobros
                                     try:
-                                        sb.rpc("crear_venta_erp", payload).execute()
-                                        st.success(
-                                            f"Venta a crédito registrada. Abono ~US$ {sum_eq:,.2f}; "
-                                            f"pendiente ~US$ {est_total - sum_eq:,.2f} en cuentas por cobrar."
-                                        )
-                                        _movi_reset_venta_session_nueva(plist, id_to_price)
-                                        st.rerun()
+                                        _resp_v = sb.rpc("crear_venta_erp", payload).execute()
+                                        _vid = _rpc_resp_uuid(_resp_v)
+                                        if not _vid:
+                                            st.error(
+                                                "La venta pudo haberse guardado igual. Revisá **Reportes → Ventas** y no registres de nuevo."
+                                            )
+                                        else:
+                                            st.session_state["venta_last_success_sig"] = _sig_v
+                                            st.session_state["venta_last_success_ts"] = time.time()
+                                            _venta_set_ok_banner_desde_id(
+                                                sb,
+                                                venta_id=_vid,
+                                                cliente=cliente,
+                                                est_total=est_total,
+                                                forma=forma,
+                                                extra_caption=(
+                                                    f"Crédito con abono: abono ~US$ {sum_eq:,.2f}; "
+                                                    f"pendiente ~US$ {est_total - sum_eq:,.2f} en cuentas por cobrar."
+                                                ),
+                                            )
+                                            _movi_reset_venta_session_nueva(plist, id_to_price)
+                                            st.rerun()
                                     except Exception as e:
                                         err = _error_msg_from_supabase_exc(e)
                                         if "abono" in err.lower() or "cobros" in err.lower():
@@ -6966,10 +7087,25 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                                             st.error(f"No se pudo registrar: {err}")
                         else:
                             try:
-                                sb.rpc("crear_venta_erp", payload).execute()
-                                st.success("Venta a crédito registrada (todo pendiente de cobro).")
-                                _movi_reset_venta_session_nueva(plist, id_to_price)
-                                st.rerun()
+                                _resp_v = sb.rpc("crear_venta_erp", payload).execute()
+                                _vid = _rpc_resp_uuid(_resp_v)
+                                if not _vid:
+                                    st.error(
+                                        "La venta pudo haberse guardado igual. Revisá **Reportes → Ventas** y no registres de nuevo."
+                                    )
+                                else:
+                                    st.session_state["venta_last_success_sig"] = _sig_v
+                                    st.session_state["venta_last_success_ts"] = time.time()
+                                    _venta_set_ok_banner_desde_id(
+                                        sb,
+                                        venta_id=_vid,
+                                        cliente=cliente,
+                                        est_total=est_total,
+                                        forma=forma,
+                                        extra_caption="Crédito: todo pendiente de cobro (CXC).",
+                                    )
+                                    _movi_reset_venta_session_nueva(plist, id_to_price)
+                                    st.rerun()
                             except Exception as e:
                                 err = _error_msg_from_supabase_exc(e)
                                 if "Serial" in err and "no está en el inventario" in err:
