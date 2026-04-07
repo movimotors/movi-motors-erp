@@ -6554,12 +6554,29 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
     )
 
     doc_tasa = st.radio(
-        "Tasa Bs/USD para esta venta (equivalente en bolívares y registro en BD):",
+        "¿Con qué referencia querés calcular Bs/USD? (para mostrar equivalentes):",
         options=DOC_TASA_BS_OPTS,
         index=_infer_tasa_bs_oper_index(t),
         horizontal=True,
         key="venta_doc_tasa_bs",
-        help="Se aplica al cálculo en VES y al registro de la venta. Este selector está fuera del formulario para que el cálculo se actualice al instante.",
+        help="Esto solo define la referencia (BCV o P2P) sugerida. Si cobraste Bs a una tasa distinta, ajustala en el campo de abajo.",
+    )
+
+    try:
+        t_bs_sugerida = _tasa_bs_para_documento(t, usar_bcv=(doc_tasa == DOC_TASA_BS_OPTS[0]))
+    except Exception:
+        t_bs_sugerida = 0.0
+
+    t_bs_doc_live = st.number_input(
+        "¿A qué tasa recibiste los bolívares? (Bs por 1 USD)",
+        min_value=0.0,
+        value=float(t_bs_sugerida or 0.0),
+        format="%.2f",
+        key="venta_tasa_bs_override",
+        help=(
+            "Esta es la tasa REAL usada para cobrar los bolívares (por ejemplo Binance P2P del momento). "
+            "Se usa para convertir VES↔USD equivalente, cuadrar cobros y se guarda en la venta."
+        ),
     )
 
     with st.form(f"f_venta_{int(st.session_state.get('venta_form_nonce', 0))}"):
@@ -6627,7 +6644,7 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
         try:
             _tb_bcv_v = _tasa_bs_para_documento(t, usar_bcv=True)
             _tb_p2p_v = _tasa_bs_para_documento(t, usar_bcv=False)
-            _tb_doc_v = _tasa_bs_para_documento(t, usar_bcv=(doc_tasa == DOC_TASA_BS_OPTS[0]))
+            _tb_doc_v = float(t_bs_doc_live) if float(t_bs_doc_live or 0) > 0 else None
         except ValueError:
             _tb_bcv_v = _tb_p2p_v = _tb_doc_v = None
 
@@ -6801,10 +6818,9 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             if _err_srl_v:
                 st.error(_err_srl_v)
             else:
-                try:
-                    t_bs_doc = _tasa_bs_para_documento(t, usar_bcv=(doc_tasa == DOC_TASA_BS_OPTS[0]))
-                except ValueError as e:
-                    st.error(str(e))
+                t_bs_doc = float(t_bs_doc_live or 0)
+                if t_bs_doc <= 0:
+                    st.error("Tasa Bs/USD inválida para esta venta. Ajustala arriba (por ejemplo la tasa P2P real).")
                 else:
                     payload: dict[str, Any] = {
                         "p_usuario_id": erp_uid,
