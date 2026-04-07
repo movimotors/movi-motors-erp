@@ -4229,6 +4229,420 @@ def render_dashboard_mercado_live_tarjetas(t: dict[str, Any] | None) -> None:
             _dash_mercado_card("USDT por 1 USD (guardado en BD)", f"{tusdt:,.6f}", foot="Misma fila de tasas del día")
 
 
+def render_dashboard_resumen_cuentas_flujo_y_detalle(sb: Client, d_a: date, r_fut: str) -> None:
+    """Tarjetas: saldos por cuenta, ingresos/egresos del período, gastos por categoría, compras por proveedor."""
+    dsl = f"{d_a.isoformat()}T00:00:00"
+
+    st.markdown("##### Dónde está el dinero (cuentas activas · saldo hoy)")
+    st.caption(
+        "Equivalente **USD** que muestra el sistema por cada cuenta (**caja / banco / wallet**). "
+        "Ordenado de mayor a menor. El **tipo** de liquidez (caja fuerte, banco, crypto…) ayuda a ver **de dónde sale** el recurso."
+    )
+    cajas = _cajas_fetch_rows(sb, solo_activas=True)
+    with_saldo = [c for c in cajas if float(c.get("saldo_actual_usd") or 0) >= 0.005]
+    with_saldo.sort(key=lambda x: -float(x.get("saldo_actual_usd") or 0))
+    if not with_saldo:
+        st.info("No hay saldos positivos en **cajas activas** (o todo está en cero). Revisá **Cajas y bancos**.")
+    else:
+        for i in range(0, len(with_saldo), 3):
+            chunk = with_saldo[i : i + 3]
+            cols = st.columns(3)
+            for j in range(3):
+                with cols[j]:
+                    if j < len(chunk):
+                        c = chunk[j]
+                        et = _caja_etiqueta_lista(c)
+                        if len(et) > 44:
+                            et = et[:41] + "…"
+                        mon = str(c.get("moneda_cuenta") or "—").strip().upper() or "—"
+                        buck = _dash_liquidity_bucket(
+                            tipo=str(c.get("tipo") or ""),
+                            nombre=str(c.get("nombre") or ""),
+                            entidad=str(c.get("entidad") or ""),
+                        )
+                        _dash_mercado_card(
+                            et,
+                            f"US$ {_round_money_2(c.get('saldo_actual_usd')):,.2f}",
+                            foot=f"{mon} · {buck}",
+                        )
+
+    st.markdown("##### Qué entró y qué salió de cajas (en el período)")
+    st.caption(
+        "Suma de **movimientos de caja** entre **Desde** y **Hasta**. "
+        "**Entró:** cobros de ventas, abonos, traspasos de entrada, etc. "
+        "**Salió:** compras al contado, **gastos operativos**, pagos a proveedores (CXP), traspasos de salida, etc."
+    )
+    sum_in = sum_out = 0.0
+    try:
+        m_all = (
+            sb.table("movimientos_caja")
+            .select("tipo,monto_usd")
+            .gte("created_at", dsl)
+            .lte("created_at", r_fut)
+            .execute()
+        )
+        rows_m = m_all.data or []
+        sum_in = sum(float(r.get("monto_usd") or 0) for r in rows_m if r.get("tipo") == "Ingreso")
+        sum_out = sum(float(r.get("monto_usd") or 0) for r in rows_m if r.get("tipo") == "Egreso")
+    except Exception:
+        pass
+    fx1, fx2, fx3 = st.columns(3)
+    with fx1:
+        _dash_mercado_card("Ingresos a caja", f"US$ {_round_money_2(sum_in):,.2f}", foot="Total movimientos tipo Ingreso")
+    with fx2:
+        _dash_mercado_card("Egresos de caja", f"US$ {_round_money_2(sum_out):,.2f}", foot="Total movimientos tipo Egreso")
+    with fx3:
+        _dash_mercado_card("Neto movimientos", f"US$ {_round_money_2(sum_in - sum_out):,.2f}", foot="Ingresos − egresos (período)")
+
+    st.markdown("##### Qué se gastó (gastos operativos por categoría)")
+    st.caption(
+        "Solo egresos cargados en **Gastos operativos** con **categoría** (columna `categoria_gasto`; **`patch_025`** en Supabase). "
+        "Otros egresos (p. ej. compras al contado) no aparecen acá."
+    )
+    by_cat: dict[str, float] = {}
+    try:
+        mr = (
+            sb.table("movimientos_caja")
+            .select("monto_usd,categoria_gasto")
+            .gte("created_at", dsl)
+            .lte("created_at", r_fut)
+            .eq("tipo", "Egreso")
+            .execute()
+        )
+        for row in mr.data or []:
+            cg = row.get("categoria_gasto")
+            if cg is not None and str(cg).strip():
+                k = str(cg).strip()
+                by_cat[k] = by_cat.get(k, 0.0) + float(row.get("monto_usd") or 0)
+    except Exception:
+        by_cat = {}
+    if not by_cat:
+        st.info(
+            "No hay **gastos operativos categorizados** en el período. "
+            "Registrálos en **Gastos operativos** o ejecutá **`supabase/patch_025_gastos_operativos.sql`** si falta la columna."
+        )
+    else:
+        items = sorted(by_cat.items(), key=lambda x: -x[1])[:9]
+        for i in range(0, len(items), 3):
+            chunk = items[i : i + 3]
+            cols = st.columns(3)
+            for j in range(3):
+                with cols[j]:
+                    if j < len(chunk):
+                        cat, amt = chunk[j]
+                        lab = cat if len(cat) <= 44 else cat[:41] + "…"
+                        _dash_mercado_card(lab, f"US$ {_round_money_2(amt):,.2f}", foot="Gasto operativo")
+
+    st.markdown("##### Qué se compró (compras a proveedores en el período)")
+    st.caption("Suma en **USD** de **compras** registradas en el rango, agrupada por **proveedor** (mercancía / inventario).")
+    by_prov: dict[str, float] = {}
+    try:
+        cp = (
+            sb.table("compras")
+            .select("proveedor,total_usd")
+            .gte("fecha", str(d_a))
+            .lte("fecha", r_fut)
+            .execute()
+        )
+        for row in cp.data or []:
+            pv = str(row.get("proveedor") or "").strip() or "Sin nombre"
+            by_prov[pv] = by_prov.get(pv, 0.0) + float(row.get("total_usd") or 0)
+    except Exception:
+        by_prov = {}
+    if not by_prov:
+        st.info("No hay **compras a proveedores** en el período.")
+    else:
+        items_p = sorted(by_prov.items(), key=lambda x: -x[1])[:9]
+        for i in range(0, len(items_p), 3):
+            chunk = items_p[i : i + 3]
+            cols = st.columns(3)
+            for j in range(3):
+                with cols[j]:
+                    if j < len(chunk):
+                        pr, amt = chunk[j]
+                        lab = pr if len(pr) <= 44 else pr[:41] + "…"
+                        _dash_mercado_card(lab, f"US$ {_round_money_2(amt):,.2f}", foot="Compra mercancía")
+
+
+def _pdf_resumen_ejecutivo_bytes(
+    sb: Client,
+    t: dict[str, Any] | None,
+    d_a: date,
+    d_b: date,
+    r_fut: str,
+    *,
+    ventas_usd: float,
+    margen_bruto_usd: float,
+    unidades_stock: float,
+    n_sku: int,
+    liquidez_total_usd: float,
+    compras_periodo_usd: float,
+    gastos_op_periodo_usd: float,
+    total_salidas_usd: float,
+    ventas_menos_salidas_usd: float,
+    bitacora_rows: list[dict[str, Any]],
+) -> bytes:
+    """PDF imprimible del resumen ejecutivo (A4, márgenes ~18 mm)."""
+    from copy import deepcopy
+    from xml.sax.saxutils import escape as xml_esc
+
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.lib.utils import ImageReader
+    from reportlab.platypus import Image as RLImage
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    dsl = f"{d_a.isoformat()}T00:00:00"
+    tz_v = ZoneInfo("America/Caracas")
+    gen_txt = datetime.now(tz_v).strftime("%d/%m/%Y %H:%M")
+
+    cajas = _cajas_fetch_rows(sb, solo_activas=True)
+    with_saldo = sorted(
+        [c for c in cajas if float(c.get("saldo_actual_usd") or 0) >= 0.005],
+        key=lambda x: -float(x.get("saldo_actual_usd") or 0),
+    )
+    rows_cuentas: list[list[str]] = []
+    for c in with_saldo:
+        et = _caja_etiqueta_lista(c)
+        if len(et) > 52:
+            et = et[:49] + "…"
+        mon = str(c.get("moneda_cuenta") or "—").strip().upper() or "—"
+        buck = _dash_liquidity_bucket(
+            tipo=str(c.get("tipo") or ""),
+            nombre=str(c.get("nombre") or ""),
+            entidad=str(c.get("entidad") or ""),
+        )
+        rows_cuentas.append(
+            [
+                xml_esc(et),
+                xml_esc(mon),
+                xml_esc(buck),
+                f"{_round_money_2(c.get('saldo_actual_usd')):,.2f}",
+            ]
+        )
+
+    sum_in = sum_out = 0.0
+    try:
+        m_all = (
+            sb.table("movimientos_caja")
+            .select("tipo,monto_usd")
+            .gte("created_at", dsl)
+            .lte("created_at", r_fut)
+            .execute()
+        )
+        for r in m_all.data or []:
+            if r.get("tipo") == "Ingreso":
+                sum_in += float(r.get("monto_usd") or 0)
+            elif r.get("tipo") == "Egreso":
+                sum_out += float(r.get("monto_usd") or 0)
+    except Exception:
+        pass
+
+    by_cat: dict[str, float] = {}
+    try:
+        mr = (
+            sb.table("movimientos_caja")
+            .select("monto_usd,categoria_gasto")
+            .gte("created_at", dsl)
+            .lte("created_at", r_fut)
+            .eq("tipo", "Egreso")
+            .execute()
+        )
+        for row in mr.data or []:
+            cg = row.get("categoria_gasto")
+            if cg is not None and str(cg).strip():
+                k = str(cg).strip()
+                by_cat[k] = by_cat.get(k, 0.0) + float(row.get("monto_usd") or 0)
+    except Exception:
+        pass
+    rows_gasto = [[xml_esc(a), f"{_round_money_2(v):,.2f}"] for a, v in sorted(by_cat.items(), key=lambda x: -x[1])[:20]]
+
+    by_prov: dict[str, float] = {}
+    try:
+        cp = (
+            sb.table("compras")
+            .select("proveedor,total_usd")
+            .gte("fecha", str(d_a))
+            .lte("fecha", r_fut)
+            .execute()
+        )
+        for row in cp.data or []:
+            pv = str(row.get("proveedor") or "").strip() or "Sin nombre"
+            by_prov[pv] = by_prov.get(pv, 0.0) + float(row.get("total_usd") or 0)
+    except Exception:
+        pass
+    rows_prov = [[xml_esc(a), f"{_round_money_2(v):,.2f}"] for a, v in sorted(by_prov.items(), key=lambda x: -x[1])[:20]]
+
+    live = get_live_exchange_rates()
+    ves = live.get("ves_bs_por_usd")
+    p2p = live.get("usdt_x_ves_p2p") or live.get("p2p_bs_por_usdt_aprox")
+    linea_mercado = "Sin datos web (revisá conexión)."
+    if live.get("ok") and ves is not None:
+        linea_mercado = f"Bs/USD web ref.: {float(ves):,.2f}"
+        if p2p is not None:
+            linea_mercado += f" · Bs/USDT: {float(p2p):,.4f}"
+
+    sum_bs_bt = sum(float(r.get("monto_ves") or 0) for r in bitacora_rows)
+    sum_usd_bt = sum(float(r.get("monto_usd_obtenido") or 0) for r in bitacora_rows)
+
+    buf = BytesIO()
+    lm = rm = 18 * mm
+    tm = 14 * mm
+    bm = 18 * mm
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=lm, rightMargin=rm, topMargin=tm, bottomMargin=bm)
+    styles = getSampleStyleSheet()
+    story: list[Any] = []
+    tw = float(A4[0] - lm - rm)
+
+    if BRAND_LOGO_PATH.is_file():
+        try:
+            ir = ImageReader(str(BRAND_LOGO_PATH))
+            iw, ih = ir.getSize()
+            if iw > 0 and ih > 0:
+                target_w = 40 * mm
+                target_h = target_w * (float(ih) / float(iw))
+                max_h = 20 * mm
+                if target_h > max_h:
+                    target_h = max_h
+                    target_w = target_h * (float(iw) / float(ih))
+                lg = RLImage(str(BRAND_LOGO_PATH), width=target_w, height=target_h)
+                lg.hAlign = "CENTER"
+                story.append(lg)
+                story.append(Spacer(1, 2 * mm))
+        except Exception:
+            pass
+
+    tit = deepcopy(styles["Title"])
+    tit.fontSize = 15
+    tit.leading = 17
+    tit.textColor = colors.HexColor("#1a1f2e")
+    tit.alignment = TA_CENTER
+    story.append(Paragraph(xml_esc("Resumen ejecutivo"), tit))
+    meta = deepcopy(styles["Normal"])
+    meta.fontSize = 9
+    meta.alignment = TA_CENTER
+    story.append(
+        Paragraph(
+            xml_esc(f"Movi Motor's Importadora · Período: {d_a.isoformat()} → {d_b.isoformat()} · Generado: {gen_txt} (Caracas)"),
+            meta,
+        )
+    )
+    story.append(Paragraph(xml_esc(linea_mercado), meta))
+    story.append(Spacer(1, 3 * mm))
+
+    h_style = ParagraphStyle(name="rh", parent=styles["Heading2"], fontSize=11, textColor=colors.HexColor("#1a1f2e"), spaceAfter=4)
+
+    def _tbl(data: list[list[str]], hdr: list[str], wcols: list[float]) -> Table:
+        h_esc = [[xml_esc(x) for x in hdr]]
+        body = h_esc + data
+        t = Table(body, colWidths=wcols, repeatRows=1)
+        stl: list[tuple[Any, ...]] = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8eaf0")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#1a1f2e")),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("ALIGN", (-1, 0), (-1, -1), "RIGHT"),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cfd4dc")),
+        ]
+        if len(body) > 1:
+            stl.append(("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8f9fb")]))
+        t.setStyle(TableStyle(stl))
+        return t
+
+    story.append(Paragraph(xml_esc("Indicadores del período"), h_style))
+    kpi_data = [
+        ["Ventas totales (USD)", f"{ventas_usd:,.2f}"],
+        ["Margen bruto (USD)", f"{margen_bruto_usd:,.2f}"],
+        ["Unidades en stock", f"{unidades_stock:,.0f}"],
+        ["SKU activos", str(int(n_sku))],
+        ["Liquidez total (USD equiv.)", f"{liquidez_total_usd:,.2f}"],
+        ["Compras a proveedores (USD)", f"{compras_periodo_usd:,.2f}"],
+        ["Gastos operativos categorizados (USD)", f"{gastos_op_periodo_usd:,.2f}"],
+        ["Total salidas (compras + gastos op.)", f"{total_salidas_usd:,.2f}"],
+        ["Ventas − salidas (orientativo)", f"{ventas_menos_salidas_usd:,.2f}"],
+    ]
+    story.append(_tbl([[xml_esc(a), b] for a, b in kpi_data], ["Concepto", "USD"], [tw * 0.62, tw * 0.38]))
+    story.append(Spacer(1, 4 * mm))
+
+    if t:
+        story.append(
+            Paragraph(
+                xml_esc(
+                    f"Tasas en BD (documentos): Bs/USD {float(t['tasa_bs']):,.2f} · USDT/USD {float(t['tasa_usdt']):,.6f}"
+                ),
+                meta,
+            )
+        )
+        story.append(Spacer(1, 2 * mm))
+
+    story.append(Paragraph(xml_esc("Dónde está el dinero (cuentas activas)"), h_style))
+    if not rows_cuentas:
+        story.append(Paragraph(xml_esc("Sin saldos positivos en cajas activas."), meta))
+    else:
+        story.append(
+            _tbl(
+                rows_cuentas,
+                ["Cuenta", "Moneda", "Origen / tipo", "USD equiv."],
+                [tw * 0.36, tw * 0.1, tw * 0.3, tw * 0.24],
+            )
+        )
+    story.append(Spacer(1, 4 * mm))
+
+    story.append(Paragraph(xml_esc("Movimientos de caja en el período"), h_style))
+    mov_rows = [
+        ["Ingresos a caja", f"{_round_money_2(sum_in):,.2f}"],
+        ["Egresos de caja", f"{_round_money_2(sum_out):,.2f}"],
+        ["Neto (ingresos − egresos)", f"{_round_money_2(sum_in - sum_out):,.2f}"],
+    ]
+    story.append(_tbl([[xml_esc(a), b] for a, b in mov_rows], ["Concepto", "USD equiv."], [tw * 0.55, tw * 0.45]))
+    story.append(Spacer(1, 4 * mm))
+
+    story.append(Paragraph(xml_esc("Gastos operativos por categoría"), h_style))
+    if not rows_gasto:
+        story.append(Paragraph(xml_esc("Sin gastos con categoría en el período (ver módulo Gastos operativos / patch 025)."), meta))
+    else:
+        story.append(_tbl(rows_gasto, ["Categoría", "USD"], [tw * 0.62, tw * 0.38]))
+    story.append(Spacer(1, 4 * mm))
+
+    story.append(Paragraph(xml_esc("Compras por proveedor"), h_style))
+    if not rows_prov:
+        story.append(Paragraph(xml_esc("Sin compras en el período."), meta))
+    else:
+        story.append(_tbl(rows_prov, ["Proveedor", "USD"], [tw * 0.62, tw * 0.38]))
+    story.append(Spacer(1, 4 * mm))
+
+    story.append(Paragraph(xml_esc("Bitácora Bs → moneda estable (período)"), h_style))
+    story.append(
+        Paragraph(
+            xml_esc(
+                f"Operaciones: {len(bitacora_rows)} · Bs usados (suma): {sum_bs_bt:,.2f} · Equiv. USD pactado (suma): {_round_money_2(sum_usd_bt):,.2f}"
+            ),
+            meta,
+        )
+    )
+
+    foot = deepcopy(styles["Normal"])
+    foot.fontSize = 7.5
+    foot.textColor = colors.HexColor("#666666")
+    story.append(Spacer(1, 5 * mm))
+    story.append(
+        Paragraph(
+            xml_esc(
+                "Referencia de mercado web con caché ~2 min. Gastos por categoría requieren categoria_gasto en movimientos. "
+                "Cifras orientativas; no sustituyen asesoría contable."
+            ),
+            foot,
+        )
+    )
+
+    doc.build(story)
+    return buf.getvalue()
+
+
 def _dash_semaforo(*, stock: float, minimo: float, vendido_periodo: float) -> str:
     """Rojo / amarillo / verde para priorizar liquidación o reposición."""
     if stock <= minimo:
@@ -4813,7 +5227,7 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
     ventas_menos_salidas_usd = ventas_usd - total_salidas_op_usd
 
     st.caption(
-        "**Cómo recorrer el dashboard:** 1) Elegí **Desde / Hasta** arriba. 2) Pestaña **Resumen** → primero **referencia de mercado en vivo** (tarjetas), luego ventas, margen, **compras y gastos operativos**, bitácora, liquidez y compras por categoría. "
+        "**Cómo recorrer el dashboard:** 1) Elegí **Desde / Hasta** arriba. 2) Pestaña **Resumen** → mercado en vivo, KPIs, **tarjetas por cuenta / ingresos‑egresos / gastos por categoría / compras por proveedor**, totales de compras‑gastos, bitácora y gráficos. "
         "3) **Inventario** → semáforo y valor (el **Buscar** de arriba filtra la tabla). 4) **Caja** → flujo, cobros por moneda, bitácora, tasas y últimos movimientos. "
         "**Usuarios** del ERP están en **Mantenimiento** (superusuario)."
     )
@@ -4827,6 +5241,35 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
 
     with tab_d_res:
         render_dashboard_mercado_live_tarjetas(t)
+        try:
+            _pdf_re_sum = _pdf_resumen_ejecutivo_bytes(
+                sb,
+                t,
+                d_a,
+                d_b,
+                r_fut,
+                ventas_usd=ventas_usd,
+                margen_bruto_usd=margen_usd,
+                unidades_stock=unidades_stock,
+                n_sku=int(n_sku),
+                liquidez_total_usd=liquidez,
+                compras_periodo_usd=compras_period_usd,
+                gastos_op_periodo_usd=gastos_op_period_usd,
+                total_salidas_usd=total_salidas_op_usd,
+                ventas_menos_salidas_usd=ventas_menos_salidas_usd,
+                bitacora_rows=list(rows_cambios_bitacora or []),
+            )
+            _ts_res = datetime.now(ZoneInfo("America/Caracas")).strftime("%Y%m%d_%H%M")
+            st.download_button(
+                label=f"Descargar PDF — resumen ejecutivo ({_ts_res})",
+                data=_pdf_re_sum,
+                file_name=f"resumen_ejecutivo_{_ts_res}.pdf",
+                mime="application/pdf",
+                key="dash_resumen_pdf_dl",
+                help="Incluye KPIs, cuentas, movimientos, gastos por categoría, compras por proveedor y bitácora. Listo para imprimir.",
+            )
+        except Exception as ex_pdf:
+            st.caption(f"No se pudo preparar el PDF del resumen ({ex_pdf}). ¿Tenés **reportlab** instalado?")
         st.divider()
         k1, k2, k3, k4 = st.columns(4)
         with k1:
@@ -4857,6 +5300,10 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
                 None,
                 "Saldos en cajas / bancos / wallets",
             )
+
+        st.divider()
+        render_dashboard_resumen_cuentas_flujo_y_detalle(sb, d_a, r_fut)
+        st.divider()
 
         st.markdown("##### Compras, gastos operativos y flujo (mismo período)")
         st.caption(
