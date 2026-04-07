@@ -5426,38 +5426,27 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                                     key=f"inv_ficha_cat_{_pid}",
                                 )
                                 _srl_ini_f = "\n".join(_inv_compat_seriales_motor_list(_d_comp))
-                                _show_seriales_f = _inv_categoria_sugiere_seriales_motor(
-                                    str(_fsel_cat or "").strip()
-                                ) or bool(_srl_ini_f)
-                                if _show_seriales_f:
-                                    st.markdown("**Seriales (motores)**")
-                                    st.caption(
-                                        "Un número por **unidad física** en almacén. Al vender con serie, el sistema "
-                                        "saca ese valor del listado y lo guarda en la factura (ejecutá **patch_023** en Supabase)."
-                                    )
-                                    _f_srl = st.text_area(
-                                        "Números de serie — uno por línea o separados por coma",
-                                        value=_srl_ini_f,
-                                        height=120,
-                                        key=f"inv_ficha_srl_{_pid}",
-                                    )
-                                else:
-                                    _f_srl = ""
+                                st.markdown("**Números de serie (opcional)**")
+                                st.caption(
+                                    "Un valor por **unidad en stock** (motores, alternadores, etc.). "
+                                    "Si cargás seriales y ejecutaste **patch_023**, al vender se eligen y se guardan en la factura."
+                                )
+                                _f_srl = st.text_area(
+                                    "Seriales — uno por línea o separados por coma",
+                                    value=_srl_ini_f,
+                                    height=120,
+                                    key=f"inv_ficha_srl_{_pid}",
+                                )
                                 if st.form_submit_button("Guardar cambios del producto"):
                                     _merged_mv = _inv_merge_marcas_catalogo_texto(_fpick_mv, _fextra_mv)
                                     _compat_f = _inv_build_compat_dict(_merged_mv, _fanos)
-                                    if _show_seriales_f:
-                                        _srl_parsed = _inv_parse_seriales_motor_texto(str(_f_srl))
-                                        _compat_f = _inv_compat_merge_seriales(_compat_f, _srl_parsed)
-                                        if _srl_parsed and int(_ns) != len(_srl_parsed):
-                                            st.warning(
-                                                f"Hay **{len(_srl_parsed)}** serie(s) cargadas y **stock {_ns}** unidades: "
-                                                "conviene que coincidan para controlar motores."
-                                            )
-                                    else:
-                                        _prev_srl = _inv_compat_seriales_motor_list(_d_comp)
-                                        if _prev_srl:
-                                            _compat_f = _inv_compat_merge_seriales(_compat_f, _prev_srl)
+                                    _srl_parsed = _inv_parse_seriales_motor_texto(str(_f_srl))
+                                    _compat_f = _inv_compat_merge_seriales(_compat_f, _srl_parsed)
+                                    if _srl_parsed and int(_ns) != len(_srl_parsed):
+                                        st.warning(
+                                            f"Hay **{len(_srl_parsed)}** serie(s) cargadas y **stock {_ns}** unidades: "
+                                            "conviene que coincidan si controlás cada unidad."
+                                        )
                                     _cid_f = (
                                         _nombre_a_id_cat.get(str(_fsel_cat).strip())
                                         if str(_fsel_cat or "").strip()
@@ -5669,16 +5658,17 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                     format="%d",
                     key="inv_alta_smin",
                 )
-                _alta_motor_cat = _inv_categoria_sugiere_seriales_motor(str(cname or ""))
-                _alta_srl = ""
-                if _alta_motor_cat:
-                    st.markdown("**Seriales (motores)**")
-                    st.caption("Un número de serie por cada unidad en **stock** (alinear con patch_023 en Supabase).")
-                    _alta_srl = st.text_area(
-                        "Números de serie — uno por línea o separados por coma",
-                        height=100,
-                        key="inv_alta_seriales",
-                    )
+                st.markdown("**Números de serie (opcional)**")
+                st.caption(
+                    "Un valor por cada unidad en **stock** (ej. motor, pieza serializada). "
+                    "Vacío = sin tracking por serie. Con **patch_023**, al vender se validan y registran en la factura."
+                )
+                _alta_srl = st.text_area(
+                    "Seriales — uno por línea o separados por coma",
+                    height=100,
+                    key="inv_alta_seriales",
+                    placeholder="Ej. SN-ABC123 (una línea por unidad si cargás varias)",
+                )
                 costo = st.number_input("Costo USD", min_value=0.0, value=0.0, format="%.2f", key="inv_alta_costo")
                 pv = st.number_input(
                     "Precio venta USD (precio_v_usd)",
@@ -5699,13 +5689,12 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                         _pick_mv = list(st.session_state.get("inv_alta_marcas_pick") or [])
                         _merged_mv = _inv_merge_marcas_catalogo_texto(_pick_mv, marcas_auto)
                         _compat_ins = _inv_build_compat_dict(_merged_mv, anos_auto)
-                        if _alta_motor_cat:
-                            _srl_alta = _inv_parse_seriales_motor_texto(str(_alta_srl))
-                            _compat_ins = _inv_compat_merge_seriales(_compat_ins, _srl_alta)
-                            if _srl_alta and int(stock) != len(_srl_alta):
-                                st.warning(
-                                    f"Seriales: **{len(_srl_alta)}** vs stock **{int(stock)}** — revisá que coincidan."
-                                )
+                        _srl_alta = _inv_parse_seriales_motor_texto(str(_alta_srl))
+                        _compat_ins = _inv_compat_merge_seriales(_compat_ins, _srl_alta)
+                        if _srl_alta and int(stock) != len(_srl_alta):
+                            st.warning(
+                                f"Seriales: **{len(_srl_alta)}** vs stock **{int(stock)}** — revisá que coincidan."
+                            )
                         if cod_auto:
                             if not cname:
                                 st.error("Para código automático elegí una **categoría**.")
@@ -6433,7 +6422,9 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
     try:
         prods = (
             sb.table("productos")
-            .select("id,descripcion,precio_v_usd,stock_actual,es_compuesto,categoria_id,categorias(nombre)")
+            .select(
+                "id,descripcion,precio_v_usd,stock_actual,es_compuesto,categoria_id,compatibilidad,categorias(nombre)"
+            )
             .eq("activo", True)
             .order("descripcion")
             .execute()
@@ -6442,7 +6433,7 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
         try:
             prods = (
                 sb.table("productos")
-                .select("id,descripcion,precio_v_usd,stock_actual,es_compuesto")
+                .select("id,descripcion,precio_v_usd,stock_actual,es_compuesto,compatibilidad")
                 .eq("activo", True)
                 .order("descripcion")
                 .execute()
@@ -6466,7 +6457,11 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
         return ""
 
     def _venta_pide_seriales_motor(p: dict[str, Any]) -> bool:
-        return _inv_categoria_sugiere_seriales_motor(_venta_cat_nombre(p))
+        if _inv_categoria_sugiere_seriales_motor(_venta_cat_nombre(p)):
+            return True
+        if _inv_compat_seriales_motor_list(_inv_compat_as_dict(p.get("compatibilidad"))):
+            return True
+        return False
 
     def _venta_validar_seriales_motor_lineas(lines: list[dict[str, Any]]) -> str | None:
         for ln in lines:
@@ -6478,11 +6473,11 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             srl = [str(s).strip() for s in (ln.get("seriales") or []) if str(s).strip()]
             if len(srl) != n:
                 return (
-                    f"**Motores:** en cada línea hacen falta tantos seriales como unidades. "
-                    f"Producto «{str(p.get('descripcion') or '')[:48]}»: necesitás **{n}** número(s) de serie."
+                    f"**Seriales:** en esta línea hacen falta tantos números como unidades vendidas. "
+                    f"Producto «{str(p.get('descripcion') or '')[:48]}»: necesitás **{n}** valor(es)."
                 )
             if len(set(srl)) != len(srl):
-                return "**Motores:** no repetir el mismo serial en una misma línea de venta."
+                return "**Seriales:** no repetir el mismo número en una misma línea de venta."
         return None
 
     if not plist:
@@ -6578,8 +6573,8 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             _p_sel = next((x for x in plist if str(x.get("id")) == str(pid)), None)
             if _p_sel and _venta_pide_seriales_motor(_p_sel):
                 st.caption(
-                    f"**Motores (línea {i + 1}):** indicá **{int(qty)}** número(s) de serie — deben estar cargados en **Inventario** "
-                    "para este producto (misma cantidad que unidades vendidas)."
+                    f"**Seriales (línea {i + 1}):** cargá **{int(qty)}** número(s) — deben existir en **Inventario** "
+                    "para este producto (los mismos que guardaste al crear/editar el producto)."
                 )
                 _srl_v = st.text_area(
                     f"Seriales línea {i + 1}",
