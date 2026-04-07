@@ -727,6 +727,30 @@ def _rpc_resp_uuid(resp: Any) -> str | None:
     return None
 
 
+def _rpc_resp_int(resp: Any) -> int | None:
+    """Extrae entero devuelto por RPC `RETURNS INTEGER` (PostgREST / supabase-py)."""
+    data = getattr(resp, "data", None)
+    if data is None:
+        return None
+    if isinstance(data, bool):
+        return int(data)
+    if isinstance(data, int):
+        return data
+    if isinstance(data, float):
+        return int(data)
+    if isinstance(data, str) and data.strip().lstrip("-").isdigit():
+        return int(data.strip())
+    if isinstance(data, list) and data:
+        x = data[0]
+        if isinstance(x, bool):
+            return int(x)
+        if isinstance(x, int):
+            return x
+        if isinstance(x, float):
+            return int(x)
+    return None
+
+
 def _venta_firma_registro(cliente: str, est_total: float, new_lines: list[dict[str, Any]]) -> str:
     """Firma del intento de venta para detectar doble envío inmediato."""
     try:
@@ -4335,7 +4359,8 @@ def render_dashboard_resumen_cuentas_flujo_y_detalle(
     st.caption(
         "Suma de **movimientos de caja** entre **Desde** y **Hasta**. "
         "**Entró:** cobros de ventas, abonos, **ingreso por bitácora** (USD/USDT destino), etc. "
-        "**Salió:** compras al contado, **gastos operativos**, **egreso VES por bitácora**, pagos CXP, traspasos, etc."
+        "**Salió:** compras al contado, **gastos operativos**, **egreso VES por bitácora**, pagos CXP, traspasos, etc. "
+        "**No** mostramos **ingresos − egresos** en una sola cifra: en cambios y traspasos el mismo valor figura como egreso en una cuenta e ingreso en otra; el neto global **no** refleja resultado real — usá **saldos por cuenta** y el detalle de abajo."
     )
     sum_in = sum_out = 0.0
     try:
@@ -4351,13 +4376,11 @@ def render_dashboard_resumen_cuentas_flujo_y_detalle(
         sum_out = sum(float(r.get("monto_usd") or 0) for r in rows_m if r.get("tipo") == "Egreso")
     except Exception:
         pass
-    fx1, fx2, fx3 = st.columns(3)
+    fx1, fx2 = st.columns(2)
     with fx1:
         _dash_mercado_card("Ingresos a caja", f"US$ {_round_money_2(sum_in):,.2f}", foot="Total movimientos tipo Ingreso")
     with fx2:
         _dash_mercado_card("Egresos de caja", f"US$ {_round_money_2(sum_out):,.2f}", foot="Total movimientos tipo Egreso")
-    with fx3:
-        _dash_mercado_card("Neto movimientos", f"US$ {_round_money_2(sum_in - sum_out):,.2f}", foot="Ingresos − egresos (período)")
 
     st.markdown("##### Qué se gastó (gastos operativos por categoría)")
     st.caption(
@@ -4444,7 +4467,6 @@ def _pdf_resumen_ejecutivo_bytes(
     compras_periodo_usd: float,
     gastos_op_periodo_usd: float,
     total_salidas_usd: float,
-    ventas_menos_salidas_usd: float,
     bitacora_rows: list[dict[str, Any]],
 ) -> bytes:
     """PDF imprimible del resumen ejecutivo (A4, márgenes ~18 mm)."""
@@ -4628,7 +4650,6 @@ def _pdf_resumen_ejecutivo_bytes(
         ["Compras a proveedores (USD)", f"{compras_periodo_usd:,.2f}"],
         ["Gastos operativos categorizados (USD)", f"{gastos_op_periodo_usd:,.2f}"],
         ["Total salidas (compras + gastos op.)", f"{total_salidas_usd:,.2f}"],
-        ["Ventas − salidas (orientativo)", f"{ventas_menos_salidas_usd:,.2f}"],
     ]
     story.append(_tbl([[xml_esc(a), b] for a, b in kpi_data], ["Concepto", "USD"], [tw * 0.62, tw * 0.38]))
     story.append(Spacer(1, 4 * mm))
@@ -4706,7 +4727,8 @@ def _pdf_resumen_ejecutivo_bytes(
     story.append(
         Paragraph(
             xml_esc(
-                "Incluye cobros, pagos y, si aplica, el par egreso VES + ingreso USD/USDT generado al guardar la bitácora con movimientos."
+                "Incluye cobros, pagos y, si aplica, el par egreso VES + ingreso USD/USDT generado al guardar la bitácora con movimientos. "
+                "No se incluye una fila de neto global (ingresos − egresos): en traspasos y bitácora el mismo valor sale de una caja y entra en otra."
             ),
             meta,
         )
@@ -4715,7 +4737,6 @@ def _pdf_resumen_ejecutivo_bytes(
     mov_rows = [
         ["Ingresos a caja", f"{_round_money_2(sum_in):,.2f}"],
         ["Egresos de caja", f"{_round_money_2(sum_out):,.2f}"],
-        ["Neto (ingresos − egresos)", f"{_round_money_2(sum_in - sum_out):,.2f}"],
     ]
     story.append(_tbl([[xml_esc(a), b] for a, b in mov_rows], ["Concepto", "USD equiv."], [tw * 0.55, tw * 0.45]))
     story.append(Spacer(1, 4 * mm))
@@ -5333,7 +5354,6 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
         n_gastos_op_movs = 0
 
     total_salidas_op_usd = compras_period_usd + gastos_op_period_usd
-    ventas_menos_salidas_usd = ventas_usd - total_salidas_op_usd
 
     st.caption(
         "**Cómo recorrer el dashboard:** 1) Elegí **Desde / Hasta** arriba. 2) Pestaña **Resumen** → mercado en vivo, KPIs, **tarjetas por cuenta / ingresos‑egresos / gastos por categoría / compras por proveedor**, totales de compras‑gastos, bitácora y gráficos. "
@@ -5365,7 +5385,6 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
                 compras_periodo_usd=compras_period_usd,
                 gastos_op_periodo_usd=gastos_op_period_usd,
                 total_salidas_usd=total_salidas_op_usd,
-                ventas_menos_salidas_usd=ventas_menos_salidas_usd,
                 bitacora_rows=list(rows_cambios_bitacora or []),
             )
             _ts_res = datetime.now(ZoneInfo("America/Caracas")).strftime("%Y%m%d_%H%M")
@@ -5420,9 +5439,9 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
         st.caption(
             "**Gastos operativos** = egresos de caja con **categoría** (módulo **Gastos operativos**; requiere **`patch_025`** en Supabase). "
             "Si no aplicaste el patch o no categorizás, aquí puede figurar **0** aunque haya otros egresos. "
-            "**Ventas − salidas** es solo orientativo (no reemplaza un estado de resultados ni incluye todo cobro/pago)."
+            "**Ventas** y **salidas** se muestran por separado; no se restan en un solo número (mezclan conceptos distintos y otros cobros/egresos no entran acá)."
         )
-        s1, s2, s3, s4 = st.columns(4)
+        s1, s2, s3 = st.columns(3)
         with s1:
             _dash_kpi_card(
                 "Compras a proveedores (USD)",
@@ -5443,13 +5462,6 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
                 f"US$ {total_salidas_op_usd:,.2f}",
                 None,
                 "Suma de las dos tarjetas previas",
-            )
-        with s4:
-            _dash_kpi_card(
-                "Ventas − salidas (orientativo)",
-                f"US$ {ventas_menos_salidas_usd:,.2f}",
-                None,
-                "No incluye otros ingresos ni egresos",
             )
 
         st.markdown("##### Seguimiento: Bs → USD / USDT (bitácora de tesorería)")
@@ -10278,6 +10290,7 @@ def panel_anular_venta_compra_mantenimiento(sb: Client, erp_uid: str) -> None:
     st.warning(
         "Usá esto solo si registraste **mal** una venta o compra. "
         "Se revierten los **movimientos de caja** ligados al documento, se ajusta el **stock** (y el **costo** en compras) y se elimina el registro. "
+        "Si **borraste la venta a mano**, el cobro puede haber quedado en caja sin venta: en ese caso usá **Movimientos de caja huérfanos de venta** (más abajo). "
         "Hace falta ejecutar en Supabase **`supabase/patch_020_anular_venta_compra.sql`**."
     )
     t_an1, t_an2 = st.tabs(["Anular venta", "Anular compra"])
@@ -10357,6 +10370,82 @@ def panel_anular_venta_compra_mantenimiento(sb: Client, erp_uid: str) -> None:
                         st.rerun()
                     except Exception as e:
                         st.error(str(e))
+
+
+def _concepto_es_cobro_venta_huerfano(concepto: object) -> bool:
+    c = str(concepto or "").strip()
+    return c.startswith("Venta #") or c.startswith("Abono / seña — venta crédito #")
+
+
+def panel_revertir_movimientos_venta_huerfanos_mantenimiento(sb: Client, erp_uid: str) -> None:
+    """Cobros en caja sin venta (p. ej. venta borrada a mano): revierte saldo y borra el movimiento."""
+    st.markdown("#### Movimientos de caja huérfanos de venta")
+    st.warning(
+        "Si **borraste una venta** sin usar **Anular venta**, los **cobros en caja** pueden quedar con la venta en blanco "
+        "pero el **saldo de la caja sigue como si el cobro existiera**. Elegí esos movimientos y revertí: se registra el "
+        "movimiento opuesto en caja y se elimina el huérfano. En Supabase ejecutá **`supabase/patch_026_revertir_mov_caja_venta_huerfana.sql`**."
+    )
+    st.caption(
+        "Para anular una venta con stock y documento coherentes usá **Anular venta** (arriba), no borres la fila de `ventas` a mano."
+    )
+    try:
+        mh = (
+            sb.table("movimientos_caja")
+            .select("id,created_at,tipo,monto_usd,moneda,concepto,caja_id")
+            .is_("venta_id", "null")
+            .is_("compra_id", "null")
+            .order("created_at", desc=True)
+            .limit(500)
+            .execute()
+        )
+        rows_all = mh.data or []
+    except Exception as e:
+        st.error(str(e))
+        rows_all = []
+    rows = [r for r in rows_all if _concepto_es_cobro_venta_huerfano(r.get("concepto"))]
+    if not rows:
+        st.info("No hay movimientos con concepto de **Venta #…** o **Abono crédito** sin venta/compra asociada (últimos 500 revisados).")
+        return
+    cajas_map: dict[str, str] = {}
+    try:
+        cr = sb.table("cajas_bancos").select("id,nombre").execute()
+        for c in cr.data or []:
+            cajas_map[str(c["id"])] = str(c.get("nombre") or "")[:40]
+    except Exception:
+        pass
+    labels: list[str] = []
+    label_to_id: dict[str, str] = {}
+    for r in rows:
+        cid = str(r.get("caja_id") or "")
+        cn = cajas_map.get(cid, cid[:8] + "…")
+        ts = str(r.get("created_at") or "")[:19]
+        lab = (
+            f"{ts} · {r.get('tipo')} · US$ {r.get('monto_usd')} · {str(r.get('moneda') or '')} · {cn} · "
+            f"{str(r.get('concepto') or '')[:48]} · id {str(r.get('id'))[:8]}…"
+        )
+        labels.append(lab)
+        label_to_id[lab] = str(r["id"])
+    pick = st.multiselect("Movimientos a revertir (huérfanos de venta)", options=labels, key="mnt_huerf_mov_sel")
+    conf = st.text_input("Escribí **REVERTIR_HUERFANOS** para confirmar", key="mnt_huerf_mov_conf")
+    if st.button("Revertir movimientos seleccionados", key="mnt_huerf_mov_btn"):
+        if not pick:
+            st.error("Seleccioná al menos un movimiento.")
+        elif conf.strip() != "REVERTIR_HUERFANOS":
+            st.error("Confirmación incorrecta.")
+        else:
+            ids = [label_to_id[L] for L in pick]
+            try:
+                rpc = sb.rpc(
+                    "revertir_movimientos_caja_venta_huerfanos_erp",
+                    {"p_usuario_id": erp_uid, "p_movimiento_ids": ids},
+                ).execute()
+                n = _rpc_resp_int(rpc)
+                st.success(
+                    f"Listo: se revirtieron **{n if n is not None else len(ids)}** movimiento(s). Revisá saldos en Cajas y bancos."
+                )
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
 
 
 def module_mantenimiento(sb: Client, erp_uid: str) -> None:
@@ -10440,6 +10529,9 @@ def module_mantenimiento(sb: Client, erp_uid: str) -> None:
 
     st.divider()
     panel_anular_venta_compra_mantenimiento(sb, erp_uid)
+
+    st.divider()
+    panel_revertir_movimientos_venta_huerfanos_mantenimiento(sb, erp_uid)
 
     st.divider()
     st.markdown("#### Depuración (peligroso)")
