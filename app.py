@@ -4300,26 +4300,10 @@ def _dashboard_resumen_cobros_por_moneda(sb: Client, *, d_a: date, r_fut: str) -
     )
 
 
-def _dashboard_seccion_cambios_tesoreria(
-    sb: Client,
-    *,
-    t: dict[str, Any] | None,
-    d_a: date,
-    d_b: date,
-    r_fut: str,
-) -> None:
-    """Bitácora Bs→USD: precio pactado con el cambista + comparación opcional vs BCV/mercado."""
-    erp_uid = str(st.session_state.get("erp_uid") or "").strip()
-    st.markdown('<div class="dash-bento">', unsafe_allow_html=True)
-    st.markdown("##### Seguimiento: cambios de bolívares a moneda más estable")
-    st.caption(
-        "Esto **no mueve saldos**. Registrás el **precio al que te vendieron el dólar** (Bs/USD de ese cambista). "
-        "Si querés ver ganancia/pérdida vs **otra tasa** (BCV, paralelo, otro comprador), cargala en *Comparar con*; si no, dejala en **0**. "
-        "Los movimientos reales van en **Cajas**."
-    )
-
+def _cambios_tesoreria_en_rango(sb: Client, d_a: date, r_fut: str) -> list[dict[str, Any]]:
+    """Filas de `cambios_tesoreria` (bitácora Bs→USD/USDT) en [d_a 00:00, r_fut]."""
     try:
-        cambios_q = (
+        q = (
             sb.table("cambios_tesoreria")
             .select("*")
             .gte("fecha", f"{d_a.isoformat()}T00:00:00")
@@ -4327,19 +4311,60 @@ def _dashboard_seccion_cambios_tesoreria(
             .order("fecha", desc=True)
             .execute()
         )
-    except Exception as ex:
-        st.info(
-            f"Ejecutá en Supabase **`supabase/patch_018_cambios_tesoreria.sql`** y luego **`supabase/patch_019_cambios_tesoreria_tasa_compra.sql`**. Detalle: {ex}"
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
+        return q.data or []
+    except Exception:
+        return []
+
+
+def _dashboard_seccion_cambios_tesoreria(
+    sb: Client,
+    *,
+    t: dict[str, Any] | None,
+    d_a: date,
+    d_b: date,
+    r_fut: str,
+    rows_raw: list[dict[str, Any]] | None = None,
+) -> None:
+    """Bitácora Bs→USD/USDT: precio pactado + comparación opcional vs BCV/mercado."""
+    erp_uid = str(st.session_state.get("erp_uid") or "").strip()
+    st.markdown('<div class="dash-bento">', unsafe_allow_html=True)
+    st.markdown("##### Bitácora: Bs → USD / USDT (seguimiento, no mueve saldos)")
+    st.caption(
+        "Registrás **cuántos Bs** usaste y **qué equivalente en USD** obtuviste al pactar con el cambista (o plataforma). "
+        "Si el destino es una **caja USDT**, el mismo monto se interpreta como **equivalente** a esos USDT en USD del sistema. "
+        "La **comparación** con otra tasa (BCV/mercado) es opcional. Los **saldos reales** siguen en **Cajas**."
+    )
+
+    if rows_raw is not None:
+        raw_rows = list(rows_raw)
+    else:
+        try:
+            cambios_q = (
+                sb.table("cambios_tesoreria")
+                .select("*")
+                .gte("fecha", f"{d_a.isoformat()}T00:00:00")
+                .lte("fecha", r_fut)
+                .order("fecha", desc=True)
+                .execute()
+            )
+            raw_rows = cambios_q.data or []
+        except Exception as ex:
+            st.info(
+                f"Ejecutá en Supabase **`supabase/patch_018_cambios_tesoreria.sql`** y luego **`supabase/patch_019_cambios_tesoreria_tasa_compra.sql`**. Detalle: {ex}"
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+            return
 
     rows_caj = _cajas_fetch_rows(sb, solo_activas=False)
     id_to_et = {str(r["id"]): _caja_etiqueta_lista(r) for r in rows_caj}
     ves_ids = [str(c["id"]) for c in rows_caj if str(c.get("moneda_cuenta") or "").strip().upper() == "VES"]
     stab_ids = [str(c["id"]) for c in rows_caj if str(c.get("moneda_cuenta") or "").strip().upper() in ("USD", "USDT")]
 
-    raw_rows = cambios_q.data or []
+    id_to_moneda = {str(c["id"]): str(c.get("moneda_cuenta") or "").strip().upper() or "—" for c in rows_caj}
+    t_usdt_ref = float(_nf(t.get("tasa_usdt")) or 1.0) if t else 1.0
+    if t_usdt_ref <= 0:
+        t_usdt_ref = 1.0
+
     recs: list[dict[str, Any]] = []
     diffs_comp: list[float] = []
     for r in raw_rows:
@@ -4355,13 +4380,17 @@ def _dashboard_seccion_cambios_tesoreria(
             diffs_comp.append(float(diff_usd))
         oid = r.get("caja_origen_id")
         did = r.get("caja_destino_id")
+        _md = id_to_moneda.get(str(did), "—") if did else "—"
+        _usdt_ref_dia = m_usd * t_usdt_ref
         recs.append(
             {
                 "Fecha": r.get("fecha"),
                 "Origen": id_to_et.get(str(oid), "—") if oid else "—",
                 "Destino": id_to_et.get(str(did), "—") if did else "—",
-                "Bs": m_ves,
-                "USD obtenido": m_usd,
+                "Moneda dest.": _md,
+                "Bs usados": m_ves,
+                "Equiv. USD (pactado)": m_usd,
+                "≈ USDT (ref. día)": round(_usdt_ref_dia, 4),
                 "Precio compra (Bs/USD)": round(t_compra, 6) if t_compra else None,
                 "Comparar con (Bs/USD)": round(t_comp, 6) if t_comp else None,
                 "USD a esa comparación": round(usd_a_comp, 4) if usd_a_comp is not None else None,
@@ -4370,20 +4399,41 @@ def _dashboard_seccion_cambios_tesoreria(
             }
         )
 
-    m1, m2, m3 = st.columns(3)
+    tot_bs_cambios = sum(float(r.get("Bs usados") or 0) for r in recs)
+    tot_usd_pact = sum(float(r.get("Equiv. USD (pactado)") or 0) for r in recs)
+    tot_usdt_ref = sum(float(r.get("≈ USDT (ref. día)") or 0) for r in recs)
+
+    m1, m2, m3, m4 = st.columns(4)
     with m1:
-        st.metric("Cambios registrados (período)", f"{len(recs)}")
+        st.metric("Operaciones en bitácora", f"{len(recs)}")
     with m2:
+        st.metric("Bs pasados a cambio (suma)", f"{tot_bs_cambios:,.2f}")
+    with m3:
+        st.metric("Equiv. USD obtenido (suma pactada)", f"{tot_usd_pact:,.4f}")
+    with m4:
+        st.metric(
+            "≈ USDT ref. día (suma)",
+            f"{tot_usdt_ref:,.4f}",
+            help="Equiv. USD × tasa USDT/USD del día operativo (seguimiento; no es saldo on-chain).",
+        )
+
+    m5, m6, m7 = st.columns(3)
+    with m5:
         tot_diff = sum(diffs_comp) if diffs_comp else None
         st.metric(
             "Suma diff vs comparación (USD)",
             f"{tot_diff:+,.4f}" if tot_diff is not None else "—",
             help="Solo suma filas donde cargaste *Comparar con*. Positivo = mejor que esa tasa.",
         )
-    with m3:
+    with m6:
         st.metric(
-            "Equiv. USD en cuentas VES (ahora)",
+            "Saldo equiv. VES en cajas (ahora)",
             f"US$ {sum(float(c.get('saldo_actual_usd') or 0) for c in rows_caj if c.get('activo') and str(c.get('moneda_cuenta') or '').strip().upper() == 'VES'):,.2f}",
+            help="Lo que aún figura en cuentas en bolívares (no confundir con lo ya cambiado en bitácora).",
+        )
+    with m7:
+        st.caption(
+            "**Seguimiento:** los Bs de cada fila ya figuran como **convertidos** en tu registro; el **destino** indica si fue a **USD** o **USDT**."
         )
 
     if recs:
@@ -4394,8 +4444,9 @@ def _dashboard_seccion_cambios_tesoreria(
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Bs": st.column_config.NumberColumn(format="%.2f"),
-                "USD obtenido": st.column_config.NumberColumn(format="%.4f"),
+                "Bs usados": st.column_config.NumberColumn(format="%.2f"),
+                "Equiv. USD (pactado)": st.column_config.NumberColumn(format="%.4f"),
+                "≈ USDT (ref. día)": st.column_config.NumberColumn(format="%.4f"),
                 "Precio compra (Bs/USD)": st.column_config.NumberColumn(format="%.4f"),
                 "Comparar con (Bs/USD)": st.column_config.NumberColumn(format="%.4f"),
                 "USD a esa comparación": st.column_config.NumberColumn(format="%.4f"),
@@ -4436,8 +4487,14 @@ def _dashboard_seccion_cambios_tesoreria(
 
             so = st.selectbox("Caja origen (VES)", options=opt_o, format_func=_fmt_caja, key="dash_ct_orig")
             sd = st.selectbox("Caja destino (USD/USDT)", options=opt_d, format_func=_fmt_caja, key="dash_ct_dest")
-            m_ves_in = st.number_input("Monto en bolívares (Bs)", min_value=0.0001, format="%.4f", key="dash_ct_mves")
-            m_usd_in = st.number_input("USD obtenidos en el cambio", min_value=0.0001, format="%.4f", key="dash_ct_musd")
+            m_ves_in = st.number_input("Monto en bolívares (Bs) que usaste en el cambio", min_value=0.0001, format="%.4f", key="dash_ct_mves")
+            m_usd_in = st.number_input(
+                "Equivalente obtenido (USD de referencia en el sistema)",
+                min_value=0.0001,
+                format="%.4f",
+                key="dash_ct_musd",
+                help="Si compraste **USDT**, cargá el equivalente en **USD** que uses para valorar (o el monto en USDT si lo tratás 1:1 con USD en esta bitácora).",
+            )
             implied = (float(m_ves_in) / float(m_usd_in)) if float(m_usd_in) > 1e-12 else 0.0
             if implied > 0:
                 st.caption(f"Precio **implícito** Bs/USD según montos: **{implied:,.4f}** (podés usarlo abajo si es el pactado).")
@@ -4550,6 +4607,8 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
 
     r_fut = f"{d_b.isoformat()}T23:59:59"
 
+    rows_cambios_bitacora = _cambios_tesoreria_en_rango(sb, d_a, r_fut)
+
     # --- KPIs datos ---
     v_cur = (
         sb.table("ventas")
@@ -4636,8 +4695,8 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
         liquidez = 0.0
 
     st.caption(
-        "**Cómo recorrer el dashboard:** 1) Elegí **Desde / Hasta** arriba. 2) Pestaña **Resumen** → números clave y gráficos de liquidez y compras. "
-        "3) **Inventario** → semáforo y valor (el **Buscar** de arriba filtra la tabla). 4) **Caja** → flujo, cobros por moneda, tasas y últimos movimientos."
+        "**Cómo recorrer el dashboard:** 1) Elegí **Desde / Hasta** arriba. 2) Pestaña **Resumen** → números clave, **bitácora Bs→USD/USDT** y gráficos de liquidez y compras. "
+        "3) **Inventario** → semáforo y valor (el **Buscar** de arriba filtra la tabla). 4) **Caja** → flujo, cobros por moneda, detalle de bitácora, tasas y últimos movimientos."
     )
     tab_d_res, tab_d_inv, tab_d_caja = st.tabs(
         [
@@ -4676,6 +4735,35 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
                 f"US$ {liquidez:,.2f}",
                 None,
                 "Saldos en cajas / bancos / wallets",
+            )
+
+        st.markdown("##### Seguimiento: Bs → USD / USDT (bitácora de tesorería)")
+        if rows_cambios_bitacora:
+            _sum_bs = sum(float(r.get("monto_ves") or 0) for r in rows_cambios_bitacora)
+            _sum_usd = sum(float(r.get("monto_usd_obtenido") or 0) for r in rows_cambios_bitacora)
+            _t_ut_d = float(_nf(t.get("tasa_usdt")) or 1.0) if t else 1.0
+            if _t_ut_d <= 0:
+                _t_ut_d = 1.0
+            _sum_usdt_ref = _sum_usd * _t_ut_d
+            st.success(
+                f"En este período registraste **{len(rows_cambios_bitacora)}** cambio(s): **{_sum_bs:,.2f} Bs** "
+                f"pasados a moneda estable (equiv. **US$ {_sum_usd:,.4f}** al pactado; **≈ {_sum_usdt_ref:,.4f} USDT** ref. "
+                f"con tasa USDT/USD **{_t_ut_d:,.6f}** del día). "
+                f"Detalle y tabla en **Caja, cobros y tasas**."
+            )
+            b1, b2, b3, b4 = st.columns(4)
+            with b1:
+                st.metric("Operaciones (bitácora)", len(rows_cambios_bitacora))
+            with b2:
+                st.metric("Bs en cambios (suma)", f"{_sum_bs:,.2f}")
+            with b3:
+                st.metric("Equiv. USD pactado (suma)", f"{_sum_usd:,.4f}")
+            with b4:
+                st.metric("≈ USDT ref. día (suma)", f"{_sum_usdt_ref:,.4f}")
+        else:
+            st.info(
+                "No hay **registros de bitácora** (Bs → USD/USDT) en el rango **Desde/Hasta**. "
+                "Si compraste USDT con Bs, cargalo en **Caja, cobros y tasas → Registrar cambio (bitácora)**."
             )
 
         row2a, row2b = st.columns([1.15, 1])
@@ -4943,7 +5031,9 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
             _plotly_apply_dash_theme(fig_ie, title="Ingresos y egresos por día")
             st.plotly_chart(fig_ie, use_container_width=True)
 
-        _dashboard_seccion_cambios_tesoreria(sb, t=t, d_a=d_a, d_b=d_b, r_fut=r_fut)
+        _dashboard_seccion_cambios_tesoreria(
+            sb, t=t, d_a=d_a, d_b=d_b, r_fut=r_fut, rows_raw=rows_cambios_bitacora
+        )
 
         st.markdown("##### Resumen: qué entró en Bs, USD y USDT (y en qué cuenta)")
         _dashboard_resumen_cobros_por_moneda(sb, d_a=d_a, r_fut=r_fut)
