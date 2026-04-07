@@ -4229,14 +4229,66 @@ def render_dashboard_mercado_live_tarjetas(t: dict[str, Any] | None) -> None:
             _dash_mercado_card("USDT por 1 USD (guardado en BD)", f"{tusdt:,.6f}", foot="Misma fila de tasas del día")
 
 
-def render_dashboard_resumen_cuentas_flujo_y_detalle(sb: Client, d_a: date, r_fut: str) -> None:
-    """Tarjetas: saldos por cuenta, ingresos/egresos del período, gastos por categoría, compras por proveedor."""
+def _bitacora_filas_con_cajas(
+    sb: Client, rows: list[dict[str, Any]], t: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    """Filas legibles: salida de Bs desde cuenta VES → entrada de valor en cuenta USD/USDT."""
+    if not rows:
+        return []
+    cj = {str(c["id"]): c for c in _cajas_fetch_rows(sb, solo_activas=False)}
+    t_ut = float(_nf(t.get("tasa_usdt")) or 0) if t else 0.0
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        oid = r.get("caja_origen_id")
+        did = r.get("caja_destino_id")
+        co = cj.get(str(oid)) if oid else None
+        cd = cj.get(str(did)) if did else None
+        origen = _caja_etiqueta_lista(co) if co else "—"
+        destino = _caja_etiqueta_lista(cd) if cd else "—"
+        mon_d = str((cd or {}).get("moneda_cuenta") or "").strip().upper() or "—"
+        m_usd = float(r.get("monto_usd_obtenido") or 0)
+        m_bs = float(r.get("monto_ves") or 0)
+        if mon_d == "USDT" and t_ut > 0:
+            detalle = f"≈ {_round_money_2(m_usd * t_ut):,.4f} USDT (tasa día {t_ut:,.6f} USDT/USD)"
+        elif mon_d == "USDT":
+            detalle = "USDT — cargá tasa USDT/USD en Tasas para estimar cantidad"
+        elif mon_d == "USD":
+            detalle = "Valor en cuenta USD (Zelle u otra si esa es la caja)"
+        else:
+            detalle = f"Cuenta destino ({mon_d})"
+        out.append(
+            {
+                "Fecha": str(r.get("fecha") or "")[:19].replace("T", " "),
+                "Salió de (bolívares)": origen,
+                "Llegó a (destino)": destino,
+                "Moneda destino": mon_d,
+                "Bs usados": _round_money_2(m_bs),
+                "USD equivalente": _round_money_2(m_usd),
+                "Qué representa": detalle,
+                "Nota": (str(r.get("nota") or ""))[:120],
+            }
+        )
+    return out
+
+
+def render_dashboard_resumen_cuentas_flujo_y_detalle(
+    sb: Client,
+    d_a: date,
+    r_fut: str,
+    *,
+    bitacora_rows: list[dict[str, Any]] | None = None,
+    t: dict[str, Any] | None = None,
+) -> None:
+    """Tarjetas: saldos por cuenta, bitácora origen→destino, ingresos/egresos, gastos, compras."""
     dsl = f"{d_a.isoformat()}T00:00:00"
+    _br = list(bitacora_rows or [])
 
     st.markdown("##### Dónde está el dinero (cuentas activas · saldo hoy)")
     st.caption(
-        "Equivalente **USD** que muestra el sistema por cada cuenta (**caja / banco / wallet**). "
-        "Ordenado de mayor a menor. El **tipo** de liquidez (caja fuerte, banco, crypto…) ayuda a ver **de dónde sale** el recurso."
+        "Equivalente **USD** por cuenta (**caja / banco / wallet**), ordenado de mayor a menor. "
+        "Si en el período registraste **bitácora con movimientos de caja** (sin «solo bitácora»), los **Bs** **salieron** del **origen VES** "
+        "y el **equivalente** quedó en la **cuenta destino** (**USD** o **USDT**). "
+        "Lo que sigue figurando en **VES** es saldo que **no** moviste en esa operación (u otras entradas posteriores)."
     )
     cajas = _cajas_fetch_rows(sb, solo_activas=True)
     with_saldo = [c for c in cajas if float(c.get("saldo_actual_usd") or 0) >= 0.005]
@@ -4266,11 +4318,24 @@ def render_dashboard_resumen_cuentas_flujo_y_detalle(sb: Client, d_a: date, r_fu
                             foot=f"{mon} · {buck}",
                         )
 
+    st.markdown("##### Cambios Bs → USD / USDT (bitácora del período)")
+    st.caption(
+        "Cada fila enlaza **de qué cuenta salieron los bolívares** y **en qué cuenta quedó** el valor en moneda estable. "
+        "Con **patch_024** y al guardar **sin** «solo bitácora», el sistema genera **egreso en VES** e **ingreso en la caja destino**; "
+        "los saldos de arriba ya deberían reflejarlo. Si solo anotaste bitácora, los saldos **no** cambian."
+    )
+    if not _br:
+        st.info("No hay registros de **bitácora** en el período **Desde/Hasta**.")
+    else:
+        _bf = _bitacora_filas_con_cajas(sb, _br, t)
+        if _bf:
+            st.dataframe(pd.DataFrame(_bf), use_container_width=True, hide_index=True)
+
     st.markdown("##### Qué entró y qué salió de cajas (en el período)")
     st.caption(
         "Suma de **movimientos de caja** entre **Desde** y **Hasta**. "
-        "**Entró:** cobros de ventas, abonos, traspasos de entrada, etc. "
-        "**Salió:** compras al contado, **gastos operativos**, pagos a proveedores (CXP), traspasos de salida, etc."
+        "**Entró:** cobros de ventas, abonos, **ingreso por bitácora** (USD/USDT destino), etc. "
+        "**Salió:** compras al contado, **gastos operativos**, **egreso VES por bitácora**, pagos CXP, traspasos, etc."
     )
     sum_in = sum_out = 0.0
     try:
@@ -4590,9 +4655,63 @@ def _pdf_resumen_ejecutivo_bytes(
                 [tw * 0.36, tw * 0.1, tw * 0.3, tw * 0.24],
             )
         )
+    story.append(Spacer(1, 2 * mm))
+    story.append(
+        Paragraph(
+            xml_esc(
+                "Saldos VES: es lo que sigue en bolívares en esa cuenta. Si guardaste la bitácora con movimientos de caja, "
+                "los Bs de la tabla siguiente ya egresaron del origen y el equivalente ingresó en la cuenta destino (USD o USDT)."
+            ),
+            meta,
+        )
+    )
+    story.append(Spacer(1, 2 * mm))
+    story.append(Paragraph(xml_esc("Bitácora: salida de bolívares e ingreso en moneda estable"), h_style))
+    bf_pdf = _bitacora_filas_con_cajas(sb, list(bitacora_rows or []), t)
+    if not bf_pdf:
+        story.append(Paragraph(xml_esc("Sin operaciones de bitácora en el período."), meta))
+    else:
+        rows_bt_pdf: list[list[str]] = []
+        for r in bf_pdf:
+            det = str(r.get("Qué representa") or "")[:40]
+            rows_bt_pdf.append(
+                [
+                    xml_esc(str(r.get("Fecha") or "")),
+                    xml_esc(str(r.get("Salió de (bolívares)") or "")[:32]),
+                    xml_esc(str(r.get("Llegó a (destino)") or "")[:32]),
+                    xml_esc(str(r.get("Moneda destino") or "")),
+                    f"{float(r['Bs usados']):,.2f}",
+                    f"{float(r['USD equivalente']):,.2f}",
+                    xml_esc(det),
+                ]
+            )
+        story.append(
+            _tbl(
+                rows_bt_pdf,
+                ["Fecha", "Origen VES", "Destino", "Mon.", "Bs", "USD eq.", "Detalle"],
+                [tw * 0.1, tw * 0.19, tw * 0.19, tw * 0.07, tw * 0.11, tw * 0.11, tw * 0.23],
+            )
+        )
+        story.append(
+            Paragraph(
+                xml_esc(
+                    f"Totales bitácora (período): {len(bf_pdf)} operación(es) · Bs usados: {sum_bs_bt:,.2f} · USD equiv. pactado: {_round_money_2(sum_usd_bt):,.2f}"
+                ),
+                meta,
+            )
+        )
     story.append(Spacer(1, 4 * mm))
 
     story.append(Paragraph(xml_esc("Movimientos de caja en el período"), h_style))
+    story.append(
+        Paragraph(
+            xml_esc(
+                "Incluye cobros, pagos y, si aplica, el par egreso VES + ingreso USD/USDT generado al guardar la bitácora con movimientos."
+            ),
+            meta,
+        )
+    )
+    story.append(Spacer(1, 1 * mm))
     mov_rows = [
         ["Ingresos a caja", f"{_round_money_2(sum_in):,.2f}"],
         ["Egresos de caja", f"{_round_money_2(sum_out):,.2f}"],
@@ -4614,16 +4733,6 @@ def _pdf_resumen_ejecutivo_bytes(
     else:
         story.append(_tbl(rows_prov, ["Proveedor", "USD"], [tw * 0.62, tw * 0.38]))
     story.append(Spacer(1, 4 * mm))
-
-    story.append(Paragraph(xml_esc("Bitácora Bs → moneda estable (período)"), h_style))
-    story.append(
-        Paragraph(
-            xml_esc(
-                f"Operaciones: {len(bitacora_rows)} · Bs usados (suma): {sum_bs_bt:,.2f} · Equiv. USD pactado (suma): {_round_money_2(sum_usd_bt):,.2f}"
-            ),
-            meta,
-        )
-    )
 
     foot = deepcopy(styles["Normal"])
     foot.fontSize = 7.5
@@ -5302,7 +5411,9 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
             )
 
         st.divider()
-        render_dashboard_resumen_cuentas_flujo_y_detalle(sb, d_a, r_fut)
+        render_dashboard_resumen_cuentas_flujo_y_detalle(
+            sb, d_a, r_fut, bitacora_rows=rows_cambios_bitacora, t=t
+        )
         st.divider()
 
         st.markdown("##### Compras, gastos operativos y flujo (mismo período)")
