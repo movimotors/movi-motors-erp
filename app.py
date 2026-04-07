@@ -6553,6 +6553,15 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
         "La **suma en dólares equivalente** de todas las filas debe coincidir con el total de la venta (ver el resumen abajo del formulario)."
     )
 
+    doc_tasa = st.radio(
+        "Tasa Bs/USD para esta venta (equivalente en bolívares y registro en BD):",
+        options=DOC_TASA_BS_OPTS,
+        index=_infer_tasa_bs_oper_index(t),
+        horizontal=True,
+        key="venta_doc_tasa_bs",
+        help="Se aplica al cálculo en VES y al registro de la venta. Este selector está fuera del formulario para que el cálculo se actualice al instante.",
+    )
+
     with st.form(f"f_venta_{int(st.session_state.get('venta_form_nonce', 0))}"):
         cliente = st.text_input("Cliente", key="venta_cli", autocomplete="off")
         forma = st.selectbox(
@@ -6572,15 +6581,6 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             "Notas (opcional)",
             key="venta_notas",
             help="Podés escribir por ejemplo: Apartado, entrega en taller, teléfono del cliente, etc.",
-        )
-
-        doc_tasa = st.radio(
-            "Tasa Bs/USD para esta venta (equivalente en bolívares y registro en BD):",
-            options=DOC_TASA_BS_OPTS,
-            index=_infer_tasa_bs_oper_index(t),
-            horizontal=True,
-            key="venta_doc_tasa_bs",
-            help="Sirve para convertir VES en equivalente USD al cuadrar cobros y para el registro de la venta.",
         )
 
         st.caption("Líneas (montos en USD)")
