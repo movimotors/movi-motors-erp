@@ -6741,20 +6741,44 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             row_line: dict[str, Any] = {"producto_id": pid, "cantidad": int(qty), "precio_unitario_usd": float(pu)}
             _p_sel = next((x for x in plist if str(x.get("id")) == str(pid)), None)
             if _p_sel and _venta_pide_seriales_motor(_p_sel):
-                st.caption(
-                    f"**Seriales (línea {i + 1}):** cargá **{int(qty)}** número(s) — deben existir en **Inventario** "
-                    "para este producto (los mismos que guardaste al crear/editar el producto)."
-                )
-                _srl_v = st.text_area(
-                    f"Seriales línea {i + 1}",
-                    height=70,
-                    key=f"vsrl_{i}",
-                    placeholder="Uno por línea o separados por coma",
-                    label_visibility="collapsed",
-                )
-                _srl_list = _inv_parse_seriales_motor_texto(str(_srl_v))
-                if _srl_list:
-                    row_line["seriales"] = _srl_list
+                _pool_s = _inv_compat_seriales_motor_list(_inv_compat_as_dict(_p_sel.get("compatibilidad")))
+                _nq = int(qty)
+                if _pool_s and len(_pool_s) >= _nq:
+                    st.caption(
+                        f"**Seriales (línea {i + 1}):** elegí **exactamente {_nq}** de la lista (cargados en **Inventario**)."
+                    )
+                    _sel_ser = st.multiselect(
+                        f"Seriales en stock — línea {i + 1}",
+                        options=_pool_s,
+                        default=[],
+                        key=f"vsrl_ms_{i}_{pid}",
+                        max_selections=_nq,
+                        help=f"Seleccioná {_nq} número(s) distintos. Solo aparecen los que están en la ficha del producto.",
+                    )
+                    if len(_sel_ser) == _nq and len(set(_sel_ser)) == len(_sel_ser):
+                        row_line["seriales"] = list(_sel_ser)
+                    elif _sel_ser and len(_sel_ser) != _nq:
+                        st.caption(f"Elegí **{_nq}** seriales (marcados: {len(_sel_ser)}).")
+                elif _pool_s and len(_pool_s) < _nq:
+                    st.error(
+                        f"**Seriales (línea {i + 1}):** en inventario hay **{len(_pool_s)}** serial(es) cargado(s) y la cantidad es **{_nq}**. "
+                        "Bajá la cantidad o cargá más seriales en **Inventario**."
+                    )
+                else:
+                    st.warning(
+                        f"**Seriales (línea {i + 1}):** no hay seriales cargados en la ficha del producto. "
+                        "Cargalos en **Inventario → editar producto** o escribí abajo (solo si no podés usar la lista)."
+                    )
+                    _srl_v = st.text_area(
+                        f"Seriales línea {i + 1} (texto libre)",
+                        height=70,
+                        key=f"vsrl_{i}",
+                        placeholder="Uno por línea o separados por coma",
+                        label_visibility="collapsed",
+                    )
+                    _srl_list = _inv_parse_seriales_motor_texto(str(_srl_v))
+                    if _srl_list:
+                        row_line["seriales"] = _srl_list
             new_lines.append(row_line)
 
         est_total = round(sum(float(l["cantidad"]) * float(l["precio_unitario_usd"]) for l in new_lines), 2)
