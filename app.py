@@ -4643,7 +4643,9 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
         d_a = st.date_input("Desde", value=date.today() - timedelta(days=30), key="dash_d0")
         d_b = st.date_input("Hasta", value=date.today(), key="dash_d1")
     with h3:
-        st.text_input("Buscar", placeholder="Producto, código…", key="dash_global_search", label_visibility="visible")
+        q_search = st.text_input(
+            "Buscar", placeholder="Producto, código…", key="dash_global_search", label_visibility="visible"
+        )
 
     if d_b < d_a:
         st.error("La fecha *Hasta* debe ser ≥ *Desde*.")
