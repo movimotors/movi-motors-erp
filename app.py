@@ -4901,6 +4901,7 @@ def _dashboard_seccion_cambios_tesoreria(
     d_b: date,
     r_fut: str,
     rows_raw: list[dict[str, Any]] | None = None,
+    key_suffix: str = "",
 ) -> None:
     """Bitácora Bs→USD/USDT: precio pactado + comparación opcional vs BCV/mercado."""
     erp_uid = str(st.session_state.get("erp_uid") or "").strip()
@@ -5054,8 +5055,13 @@ def _dashboard_seccion_cambios_tesoreria(
         return
 
     _open_cambio = bool(st.session_state.pop("dash_open_cambio_tesoreria", False))
+    _ks = (key_suffix or "").strip()
+    if _ks:
+        _ks = "_" + _ks
     with st.expander("Registrar cambio (bitácora)", expanded=_open_cambio):
-        with st.form(f"f_cambio_tesoreria_dash_{int(st.session_state.get('dash_cambio_teso_form_nonce', 0))}"):
+        with st.form(
+            f"f_cambio_tesoreria_dash{_ks}_{int(st.session_state.get('dash_cambio_teso_form_nonce', 0))}"
+        ):
             opt_none = "__none__"
             opt_o = [opt_none] + ves_ids
             opt_d = [opt_none] + stab_ids
@@ -5065,8 +5071,8 @@ def _dashboard_seccion_cambios_tesoreria(
                     return "Sin especificar"
                 return id_to_et.get(cid, cid)
 
-            so = st.selectbox("Caja origen (VES)", options=opt_o, format_func=_fmt_caja, key="dash_ct_orig")
-            sd = st.selectbox("Caja destino (USD/USDT)", options=opt_d, format_func=_fmt_caja, key="dash_ct_dest")
+            so = st.selectbox("Caja origen (VES)", options=opt_o, format_func=_fmt_caja, key=f"dash_ct_orig{_ks}")
+            sd = st.selectbox("Caja destino (USD/USDT)", options=opt_d, format_func=_fmt_caja, key=f"dash_ct_dest{_ks}")
 
             _row_o = next((c for c in rows_caj if str(c.get("id")) == str(so)), None) if so != opt_none else None
             _saldo_o_usd = float(_nf((_row_o or {}).get("saldo_actual_usd")) or 0.0)
@@ -5078,22 +5084,22 @@ def _dashboard_seccion_cambios_tesoreria(
                 )
 
                 # Prefill: sugerir convertir el 100% del saldo disponible.
-                if "dash_ct_musd" not in st.session_state:
-                    st.session_state["dash_ct_musd"] = max(0.0001, float(_saldo_o_usd))
-                if "dash_ct_mves" not in st.session_state:
-                    st.session_state["dash_ct_mves"] = max(0.0001, float(_saldo_o_bs_est))
+                if f"dash_ct_musd{_ks}" not in st.session_state:
+                    st.session_state[f"dash_ct_musd{_ks}"] = max(0.0001, float(_saldo_o_usd))
+                if f"dash_ct_mves{_ks}" not in st.session_state:
+                    st.session_state[f"dash_ct_mves{_ks}"] = max(0.0001, float(_saldo_o_bs_est))
 
             m_ves_in = st.number_input(
                 "Monto en bolívares (Bs) que usaste en el cambio",
                 min_value=0.0001,
                 format="%.4f",
-                key="dash_ct_mves",
+                key=f"dash_ct_mves{_ks}",
             )
             m_usd_in = st.number_input(
                 "Equivalente obtenido (USD de referencia en el sistema)",
                 min_value=0.0001,
                 format="%.4f",
-                key="dash_ct_musd",
+                key=f"dash_ct_musd{_ks}",
                 help="Si compraste **USDT**, cargá el equivalente en **USD** que uses para valorar (o el monto en USDT si lo tratás 1:1 con USD en esta bitácora).",
             )
             implied = (float(m_ves_in) / float(m_usd_in)) if float(m_usd_in) > 1e-12 else 0.0
@@ -5104,7 +5110,7 @@ def _dashboard_seccion_cambios_tesoreria(
                 min_value=0.00000001,
                 value=float(implied) if implied > 0 else 1.0,
                 format="%.6f",
-                key="dash_ct_tcompra",
+                key=f"dash_ct_tcompra{_ks}",
                 help="Lo que acordaste con ese cambista: cuántos Bs te cobraron por cada dólar.",
             )
             t_comp_in = st.number_input(
@@ -5112,7 +5118,7 @@ def _dashboard_seccion_cambios_tesoreria(
                 min_value=0.0,
                 value=0.0,
                 format="%.6f",
-                key="dash_ct_tcomp",
+                key=f"dash_ct_tcomp{_ks}",
                 help="Ej.: BCV u otra cotización. Si es 0, no se calcula diff vs ‘mercado’.",
             )
             if float(t_comp_in) <= 0 and def_tasa > 0:
@@ -5120,10 +5126,10 @@ def _dashboard_seccion_cambios_tesoreria(
             solo_bitacora = st.checkbox(
                 "Solo anotar en bitácora (no mover saldos entre cajas)",
                 value=False,
-                key="dash_ct_solo_bit",
+                key=f"dash_ct_solo_bit{_ks}",
                 help="Si lo **desmarcás**, los bolívares **salen** del saldo de la cuenta **VES** y el equivalente **entra** en la cuenta destino (USD / USDT / efectivo dólar).",
             )
-            nota_in = st.text_input("Nota (opcional)", key="dash_ct_nota")
+            nota_in = st.text_input("Nota (opcional)", key=f"dash_ct_nota{_ks}")
             if st.form_submit_button("Guardar registro"):
                 try:
                     if float(m_usd_in) > 1e-12:
@@ -5185,14 +5191,14 @@ def _dashboard_seccion_cambios_tesoreria(
                         }
                         _movi_bump_form_nonce("dash_cambio_teso_form_nonce")
                         _movi_ss_pop_keys(
-                            "dash_ct_orig",
-                            "dash_ct_dest",
-                            "dash_ct_mves",
-                            "dash_ct_musd",
-                            "dash_ct_tcompra",
-                            "dash_ct_tcomp",
-                            "dash_ct_nota",
-                            "dash_ct_solo_bit",
+                            f"dash_ct_orig{_ks}",
+                            f"dash_ct_dest{_ks}",
+                            f"dash_ct_mves{_ks}",
+                            f"dash_ct_musd{_ks}",
+                            f"dash_ct_tcompra{_ks}",
+                            f"dash_ct_tcomp{_ks}",
+                            f"dash_ct_nota{_ks}",
+                            f"dash_ct_solo_bit{_ks}",
                         )
                         st.rerun()
                 except Exception as ex:
@@ -5278,10 +5284,14 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
                         _nf(t.get("paralelo_bs_por_usd")) or 0
                     ) or 1.0
                 if _ves_top is not None:
-                    st.session_state["dash_ct_orig"] = str(_ves_top.get("id"))
-                    st.session_state["dash_ct_musd"] = float(_ves_top.get("saldo_actual_usd") or 0.0)
+                    # Prefill para ambas instancias del formulario (Resumen y Caja).
+                    for _ks in ("_res", "_caja"):
+                        st.session_state[f"dash_ct_orig{_ks}"] = str(_ves_top.get("id"))
+                        st.session_state[f"dash_ct_musd{_ks}"] = float(_ves_top.get("saldo_actual_usd") or 0.0)
+                        st.session_state[f"dash_ct_mves{_ks}"] = float(_ves_top.get("saldo_actual_usd") or 0.0) * float(
+                            _tasa_pref
+                        )
                     # Nota: no conocemos Bs exactos; sugerimos Bs ref. usando la tasa del panel.
-                    st.session_state["dash_ct_mves"] = float(_ves_top.get("saldo_actual_usd") or 0.0) * float(_tasa_pref)
                 st.session_state["dash_open_cambio_tesoreria"] = True
                 st.session_state["dash_cta_ack"] = (st.session_state.get("dash_cta_ack") or 0) + 1
                 st.rerun()
@@ -5462,7 +5472,7 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
             "Usá **Registrar cambio ahora** en el aviso de VES para abrir el formulario prellenado."
         )
         _dashboard_seccion_cambios_tesoreria(
-            sb, t=t, d_a=d_a, d_b=d_b, r_fut=r_fut, rows_raw=rows_cambios_bitacora
+            sb, t=t, d_a=d_a, d_b=d_b, r_fut=r_fut, rows_raw=rows_cambios_bitacora, key_suffix="res"
         )
         st.divider()
         k1, k2, k3, k4 = st.columns(4)
@@ -5865,7 +5875,7 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
             st.plotly_chart(fig_ie, use_container_width=True)
 
         _dashboard_seccion_cambios_tesoreria(
-            sb, t=t, d_a=d_a, d_b=d_b, r_fut=r_fut, rows_raw=rows_cambios_bitacora
+            sb, t=t, d_a=d_a, d_b=d_b, r_fut=r_fut, rows_raw=rows_cambios_bitacora, key_suffix="caja"
         )
 
         st.markdown("##### Resumen: qué entró en Bs, USD y USDT (y en qué cuenta)")
