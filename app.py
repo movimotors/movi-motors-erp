@@ -5452,6 +5452,15 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
         except Exception as ex_pdf:
             st.caption(f"No se pudo preparar el PDF del resumen ({ex_pdf}). ¿Tenés **reportlab** instalado?")
         st.divider()
+        st.markdown("##### Caja y cambios (bitácora)")
+        st.caption(
+            "Vista gerencial: saldos por cuenta y registro de cambios VES→USD/USDT. "
+            "Usá **Registrar cambio ahora** en el aviso de VES para abrir el formulario prellenado."
+        )
+        _dashboard_seccion_cambios_tesoreria(
+            sb, t=t, d_a=d_a, d_b=d_b, r_fut=r_fut, rows_raw=rows_cambios_bitacora
+        )
+        st.divider()
         k1, k2, k3, k4 = st.columns(4)
         with k1:
             _dash_kpi_card(
