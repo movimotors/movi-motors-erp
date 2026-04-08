@@ -4090,6 +4090,44 @@ def _round_money_2(x: Any) -> float:
         return 0.0
 
 
+def _caja_saldo_cuenta_y_equiv(
+    moneda_cuenta: str | None,
+    saldo_actual_usd: Any,
+    t: dict[str, Any] | None,
+) -> tuple[str, str]:
+    """Texto de saldo en la moneda de la cuenta + texto de equiv. USD interno (`saldo_actual_usd`)."""
+    mon = (moneda_cuenta or "USD").strip().upper() or "USD"
+    su = _round_money_2(_nf(saldo_actual_usd) or 0)
+    if mon == "VES":
+        t_bs = float(_nf((t or {}).get("tasa_bs")) or 0) if t else 0.0
+        if t_bs <= 0:
+            return (
+                "Bs — (cargá **tasa Bs** en Tasas)",
+                f"equiv. USD {_round_money_2(su):,.2f}",
+            )
+        bs = su * t_bs
+        return (
+            f"Bs {_round_money_2(bs):,.2f}",
+            f"US$ {_round_money_2(su):,.2f} equiv.",
+        )
+    if mon == "USDT":
+        t_ut = float(_nf((t or {}).get("tasa_usdt")) or 0) if t else 0.0
+        if t_ut <= 0:
+            return (
+                "USDT — (cargá **tasa USDT** en Tasas)",
+                f"equiv. USD {_round_money_2(su):,.2f}",
+            )
+        ut = su * t_ut
+        return (
+            f"USDT {round(ut, 4):,.4f}",
+            f"US$ {_round_money_2(su):,.2f} equiv.",
+        )
+    return (
+        f"US$ {_round_money_2(su):,.2f}",
+        f"US$ {_round_money_2(su):,.2f} (ref. sistema)",
+    )
+
+
 def _cajas_fetch_rows(sb: Client, *, solo_activas: bool) -> list[dict[str, Any]]:
     q = (
         sb.table("cajas_bancos")
@@ -8721,11 +8759,21 @@ def module_cajas(sb: Client, erp_uid: str) -> None:
     st.subheader("Cajas y bancos")
     st.caption(
         "Cada fila es una **cuenta concreta**: banco o entidad (Banesco, Bancamiga…), alias interno, moneda de la cuenta (VES/USD/USDT), número y titular. "
+        "**Saldo en cuenta** en **Bs** en cuentas VES, **USD** o **USDT** según la moneda; el valor interno en BD sigue siendo equiv. USD para el motor. "
         "Los **gastos operativos** (alquiler, servicios, nómina…) podés registrarlos en el módulo **Gastos operativos**."
     )
     rows = sb.table("cajas_bancos").select("*").order("nombre").execute()
     if rows.data:
         df_c = pd.DataFrame(rows.data)
+        _t_cajas = latest_tasas(sb) or {}
+        _sc: list[str] = []
+        _eq: list[str] = []
+        for _, _r in df_c.iterrows():
+            _a, _b = _caja_saldo_cuenta_y_equiv(_r.get("moneda_cuenta"), _r.get("saldo_actual_usd"), _t_cajas)
+            _sc.append(_a)
+            _eq.append(_b)
+        df_c["Saldo en cuenta"] = _sc
+        df_c["Equiv. USD (sistema)"] = _eq
         pref = [
             "entidad",
             "nombre",
@@ -8733,10 +8781,13 @@ def module_cajas(sb: Client, erp_uid: str) -> None:
             "moneda_cuenta",
             "numero_cuenta",
             "titular",
-            "saldo_actual_usd",
+            "Saldo en cuenta",
+            "Equiv. USD (sistema)",
             "activo",
         ]
-        cols_show = [c for c in pref if c in df_c.columns] + [c for c in df_c.columns if c not in pref]
+        cols_show = [c for c in pref if c in df_c.columns] + [
+            c for c in df_c.columns if c not in pref and c != "saldo_actual_usd"
+        ]
         st.dataframe(df_c[cols_show], use_container_width=True, hide_index=True)
 
     with st.expander("Nueva caja / cuenta"):
