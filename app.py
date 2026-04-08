@@ -5246,6 +5246,9 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
                 "desmarcá «solo bitácora», elegí origen y destino, y guardá de nuevo."
             )
 
+    if st.session_state.get("dash_open_cambio_tesoreria"):
+        st.info("Abriendo formulario de cambio (bitácora)…")
+
     _caj_ves_alert = _cajas_fetch_rows(sb, solo_activas=True)
     sum_ves_equiv_usd = sum(
         float(c.get("saldo_actual_usd") or 0)
@@ -5268,18 +5271,19 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
         )
         c1, c2 = st.columns([1.4, 2.6])
         with c1:
-            if st.button("Registrar cambio ahora", use_container_width=True):
+            if st.button("Registrar cambio ahora", use_container_width=True, key="dash_cta_registrar_cambio"):
+                _tasa_pref = 1.0
+                if t:
+                    _tasa_pref = float(_nf(t.get("bcv_bs_por_usd")) or 0) or float(_nf(t.get("tasa_bs")) or 0) or float(
+                        _nf(t.get("paralelo_bs_por_usd")) or 0
+                    ) or 1.0
                 if _ves_top is not None:
                     st.session_state["dash_ct_orig"] = str(_ves_top.get("id"))
                     st.session_state["dash_ct_musd"] = float(_ves_top.get("saldo_actual_usd") or 0.0)
                     # Nota: no conocemos Bs exactos; sugerimos Bs ref. usando la tasa del panel.
-                    st.session_state["dash_ct_mves"] = float(_ves_top.get("saldo_actual_usd") or 0.0) * float(
-                        float(_nf(t.get("bcv_bs_por_usd")) or 0)
-                        or float(_nf(t.get("tasa_bs")) or 0)
-                        or float(_nf(t.get("paralelo_bs_por_usd")) or 0)
-                        or 1.0
-                    )
+                    st.session_state["dash_ct_mves"] = float(_ves_top.get("saldo_actual_usd") or 0.0) * float(_tasa_pref)
                 st.session_state["dash_open_cambio_tesoreria"] = True
+                st.session_state["dash_cta_ack"] = (st.session_state.get("dash_cta_ack") or 0) + 1
                 st.rerun()
         with c2:
             st.caption(
