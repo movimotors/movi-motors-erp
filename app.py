@@ -4310,7 +4310,7 @@ def render_dashboard_resumen_cuentas_flujo_y_detalle(
     st.markdown("##### Dónde está el dinero (cuentas activas · saldo hoy)")
     st.caption(
         "Equivalente **USD** por cuenta (**caja / banco / wallet**), ordenado de mayor a menor. "
-        "Si en el período registraste **bitácora con movimientos de caja** (sin «solo bitácora»), los **Bs** **salieron** del **origen VES** "
+        "Si en el período registraste **bitácora con movimientos de caja** (con **Aplicar movimientos en caja**), los **Bs** **salieron** del **origen VES** "
         "y el **equivalente** quedó en la **cuenta destino** (**USD** o **USDT**). "
         "Lo que sigue figurando en **VES** es saldo que **no** moviste en esa operación (u otras entradas posteriores)."
     )
@@ -4345,7 +4345,7 @@ def render_dashboard_resumen_cuentas_flujo_y_detalle(
     st.markdown("##### Cambios Bs → USD / USDT (bitácora del período)")
     st.caption(
         "Cada fila enlaza **de qué cuenta salieron los bolívares** y **en qué cuenta quedó** el valor en moneda estable. "
-        "Con **patch_024** y al guardar **sin** «solo bitácora», el sistema genera **egreso en VES** e **ingreso en la caja destino**; "
+        "Con **patch_024** y al guardar con **Aplicar movimientos en caja**, el sistema genera **egreso en VES** e **ingreso en la caja destino**; "
         "los saldos de arriba ya deberían reflejarlo. Si solo anotaste bitácora, los saldos **no** cambian."
     )
     if not _br:
@@ -4909,7 +4909,7 @@ def _dashboard_seccion_cambios_tesoreria(
     st.markdown("##### Bitácora: Bs → USD / USDT")
     st.caption(
         "Registrás **cuántos Bs** usaste en el cambio y **qué equivalente en USD** tomás como referencia en el sistema. "
-        "Si **no** marcás «solo bitácora», el ERP registra **egreso de bolívares** en la cuenta **VES** origen e **ingreso** del equivalente en la cuenta destino: "
+        "Si **marcás** «Aplicar movimientos en caja», el ERP registra **egreso de bolívares** en la cuenta **VES** origen e **ingreso** del equivalente en la cuenta destino: "
         "esos Bs **dejan de figurar** en bolívares y el valor pasa a **USD**, **USDT** o **efectivo en dólares** según la caja destino (**Zelle** suele ser una caja en **USD**). "
         "La comparación con otra tasa (BCV/mercado) sigue siendo opcional."
     )
@@ -5123,11 +5123,12 @@ def _dashboard_seccion_cambios_tesoreria(
             )
             if float(t_comp_in) <= 0 and def_tasa > 0:
                 st.caption(f"Sugerido para comparar (BCV/ref. guardada): **{def_tasa:,.4f}** — copiá si querés medir vs eso.")
-            solo_bitacora = st.checkbox(
-                "Solo anotar en bitácora (no mover saldos entre cajas)",
-                value=False,
-                key=f"dash_ct_solo_bit{_ks}",
-                help="Si lo **desmarcás**, los bolívares **salen** del saldo de la cuenta **VES** y el equivalente **entra** en la cuenta destino (USD / USDT / efectivo dólar).",
+            aplicar_mov = st.checkbox(
+                "Aplicar movimientos en caja (egreso Bs en origen + ingreso en cuenta destino)",
+                value=True,
+                key=f"dash_ct_aplicar_mov{_ks}",
+                help="**Marcado (recomendado):** se registran egreso en la cuenta **VES** e ingreso en **USD/USDT** según la caja destino, y se actualizan saldos. "
+                "**Desmarcado:** solo queda la anotación en la bitácora (sin movimientos de caja). Si ya tenías registros «solo anotación», ejecutá de nuevo con esta opción marcada y cajas origen/destino.",
             )
             nota_in = st.text_input("Nota (opcional)", key=f"dash_ct_nota{_ks}")
             if st.form_submit_button("Guardar registro"):
@@ -5139,7 +5140,6 @@ def _dashboard_seccion_cambios_tesoreria(
                                 f"El precio compra ({t_compra_in:,.4f}) no cuadra del todo con Bs/USD ingresados "
                                 f"(implicaría ~{usd_impl:,.4f} USD). Revisá montos o la tasa pactada."
                             )
-                    aplicar_mov = not bool(solo_bitacora)
                     if aplicar_mov and (so == opt_none or sd == opt_none):
                         st.error("Para mover dinero entre cuentas elegí **caja origen (VES)** y **caja destino (USD/USDT)**.")
                     elif aplicar_mov and _row_o is not None and float(m_usd_in) - _saldo_o_usd > 0.00001:
@@ -5181,7 +5181,29 @@ def _dashboard_seccion_cambios_tesoreria(
                                     st.error("Falta **tasa USDT/USD** (cargá tasas del día en **Tasas**).")
                                     st.stop()
                                 payload_rpc["p_tasa_usdt"] = _t_ut
-                        sb.rpc("registrar_cambio_tesoreria_erp", payload_rpc).execute()
+                        _resp_ct = sb.rpc("registrar_cambio_tesoreria_erp", payload_rpc).execute()
+                        _cambio_id = _rpc_resp_uuid(_resp_ct)
+                        if aplicar_mov and _cambio_id:
+                            try:
+                                _mv_chk = (
+                                    sb.table("movimientos_caja")
+                                    .select("id")
+                                    .eq("referencia", str(_cambio_id).strip())
+                                    .execute()
+                                )
+                                _n_mv = len(_mv_chk.data or [])
+                                if _n_mv < 2:
+                                    st.error(
+                                        "La bitácora se guardó, pero **no se crearon los movimientos de caja** (se esperan egreso VES + ingreso en destino). "
+                                        "En Supabase SQL Editor ejecutá **`supabase/patch_024_cambio_tesoreria_movimientos.sql`** (redefine la función `registrar_cambio_tesoreria_erp` para insertar en `movimientos_caja`). "
+                                        "Luego podés registrar un nuevo cambio con esta opción marcada."
+                                    )
+                                    st.stop()
+                            except Exception as ex_mv:
+                                st.warning(
+                                    f"No se pudo comprobar movimientos de caja automáticamente ({ex_mv}). "
+                                    "Revisá **Caja** o ejecutá **patch_024** si los saldos no se actualizan."
+                                )
                         st.session_state["dash_bitacora_flash"] = {
                             "aplicar_mov": bool(aplicar_mov),
                             "monto_bs": float(m_ves_in),
@@ -5198,7 +5220,7 @@ def _dashboard_seccion_cambios_tesoreria(
                             f"dash_ct_tcompra{_ks}",
                             f"dash_ct_tcomp{_ks}",
                             f"dash_ct_nota{_ks}",
-                            f"dash_ct_solo_bit{_ks}",
+                            f"dash_ct_aplicar_mov{_ks}",
                         )
                         st.rerun()
                 except Exception as ex:
@@ -5248,8 +5270,8 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
         else:
             st.info(
                 "**Bitácora guardada solo como anotación:** no se movieron saldos entre cajas. "
-                "Cuando quieras que los Bs **salgan** de la cuenta en bolívares y el valor **entre** a USD/USDT/efectivo dólar, "
-                "desmarcá «solo bitácora», elegí origen y destino, y guardá de nuevo."
+                "Para que los Bs **salgan** de la cuenta VES y el equivalente **entre** a USD/USDT/efectivo dólar, "
+                "marcá **Aplicar movimientos en caja**, elegí origen y destino, y guardá de nuevo."
             )
 
     if st.session_state.get("dash_open_cambio_tesoreria"):
@@ -5261,7 +5283,9 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
         for c in _caj_ves_alert
         if str(c.get("moneda_cuenta") or "").strip().upper() == "VES"
     )
-    if sum_ves_equiv_usd >= 0.01:
+    # Aviso solo si el remanente VES (equiv. USD) supera este monto (evita ruido por centavos / ~US$ 1).
+    _ves_remanente_alerta_min_usd = 20.0
+    if sum_ves_equiv_usd > _ves_remanente_alerta_min_usd:
         _ves_cajas = [
             c
             for c in _caj_ves_alert

@@ -262,7 +262,8 @@ CREATE INDEX IF NOT EXISTS idx_mov_caja_caja ON public.movimientos_caja (caja_id
 CREATE INDEX IF NOT EXISTS idx_mov_caja_created ON public.movimientos_caja (created_at DESC);
 
 -- -----------------------------------------------------------------------------
--- Cambios Bs → USD/Zelle (bitácora tesorería; no mueve saldos por sí sola)
+-- Cambios Bs → USD/USDT (bitácora tesorería). Los movimientos de caja los genera
+-- registrar_cambio_tesoreria_erp cuando p_aplicar_movimientos = TRUE (ver patch_024).
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.cambios_tesoreria (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -869,7 +870,9 @@ REVOKE ALL ON FUNCTION public.registrar_movimiento_caja_erp(UUID, UUID, TEXT, NU
 GRANT EXECUTE ON FUNCTION public.registrar_movimiento_caja_erp(UUID, UUID, TEXT, NUMERIC, TEXT, TEXT, TEXT, TEXT) TO service_role;
 
 -- -----------------------------------------------------------------------------
--- RPC: registrar cambio Bs → estable (tasa pactada + comparación opcional vs BCV/mercado)
+-- RPC: registrar cambio Bs → estable (tasa pactada + comparación opcional vs BCV/mercado).
+-- Con p_aplicar_movimientos = TRUE inserta egreso VES + ingreso destino en movimientos_caja.
+-- (Misma lógica que supabase/patch_024_cambio_tesoreria_movimientos.sql)
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.registrar_cambio_tesoreria_erp(
   p_usuario_id UUID,
@@ -880,7 +883,9 @@ CREATE OR REPLACE FUNCTION public.registrar_cambio_tesoreria_erp(
   p_tasa_compra_bs_por_usd NUMERIC,
   p_tasa_comparacion_bs_por_usd NUMERIC DEFAULT NULL,
   p_nota TEXT DEFAULT NULL,
-  p_fecha TIMESTAMPTZ DEFAULT NULL
+  p_fecha TIMESTAMPTZ DEFAULT NULL,
+  p_tasa_usdt NUMERIC DEFAULT NULL,
+  p_aplicar_movimientos BOOLEAN DEFAULT TRUE
 )
 RETURNS UUID
 LANGUAGE plpgsql
@@ -889,6 +894,11 @@ SET search_path = public
 AS $$
 DECLARE
   v_id UUID;
+  v_mo TEXT;
+  v_md TEXT;
+  v_musd NUMERIC(16, 2);
+  v_monto_dest_nativo NUMERIC(18, 4);
+  v_saldo_origen_usd NUMERIC(16, 2);
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM public.erp_users WHERE id = p_usuario_id AND activo = TRUE) THEN
     RAISE EXCEPTION 'Usuario ERP inválido o inactivo';
@@ -907,11 +917,55 @@ BEGIN
     RAISE EXCEPTION 'Tasa de comparación Bs/USD inválida (debe ser NULL o > 0)';
   END IF;
 
-  IF p_caja_origen_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.cajas_bancos WHERE id = p_caja_origen_id) THEN
-    RAISE EXCEPTION 'Caja origen no existe';
-  END IF;
-  IF p_caja_destino_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.cajas_bancos WHERE id = p_caja_destino_id) THEN
-    RAISE EXCEPTION 'Caja destino no existe';
+  v_musd := ROUND(p_monto_usd_obtenido, 2);
+
+  IF p_aplicar_movimientos THEN
+    IF p_caja_origen_id IS NULL OR p_caja_destino_id IS NULL THEN
+      RAISE EXCEPTION 'Para mover saldos: indicá caja origen (VES) y caja destino (USD o USDT)';
+    END IF;
+    IF p_caja_origen_id = p_caja_destino_id THEN
+      RAISE EXCEPTION 'Caja origen y destino deben ser distintas';
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM public.cajas_bancos WHERE id = p_caja_origen_id AND activo = TRUE) THEN
+      RAISE EXCEPTION 'Caja origen no existe o está inactiva';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM public.cajas_bancos WHERE id = p_caja_destino_id AND activo = TRUE) THEN
+      RAISE EXCEPTION 'Caja destino no existe o está inactiva';
+    END IF;
+
+    SELECT upper(trim(moneda_cuenta)) INTO v_mo FROM public.cajas_bancos WHERE id = p_caja_origen_id;
+    SELECT upper(trim(moneda_cuenta)) INTO v_md FROM public.cajas_bancos WHERE id = p_caja_destino_id;
+
+    IF v_mo IS NULL OR v_md IS NULL THEN
+      RAISE EXCEPTION 'No se pudo leer la moneda de las cajas';
+    END IF;
+    IF v_mo <> 'VES' THEN
+      RAISE EXCEPTION 'La caja origen debe ser en bolívares (VES)';
+    END IF;
+    IF v_md NOT IN ('USD', 'USDT') THEN
+      RAISE EXCEPTION 'La caja destino debe ser en USD o USDT';
+    END IF;
+
+    SELECT ROUND(COALESCE(saldo_actual_usd, 0), 2)
+      INTO v_saldo_origen_usd
+      FROM public.cajas_bancos
+     WHERE id = p_caja_origen_id
+     FOR UPDATE;
+
+    IF COALESCE(v_saldo_origen_usd, 0) + 0.00001 < v_musd THEN
+      RAISE EXCEPTION 'Saldo insuficiente en caja origen (USD equiv.): disponible %; requerido %',
+        v_saldo_origen_usd, v_musd;
+    END IF;
+
+    IF v_md = 'USDT' THEN
+      IF p_tasa_usdt IS NULL OR p_tasa_usdt <= 0 THEN
+        RAISE EXCEPTION 'Indicá tasa_usdt (USDT por 1 USD) para ingresar en caja USDT';
+      END IF;
+      v_monto_dest_nativo := ROUND(v_musd * p_tasa_usdt, 4);
+    ELSE
+      v_monto_dest_nativo := v_musd;
+    END IF;
   END IF;
 
   INSERT INTO public.cambios_tesoreria (
@@ -937,12 +991,52 @@ BEGIN
   )
   RETURNING id INTO v_id;
 
+  IF p_aplicar_movimientos THEN
+    INSERT INTO public.movimientos_caja (
+      caja_id, tipo, monto_usd, moneda, monto_moneda,
+      concepto, referencia, nota_operacion, venta_id, compra_id, usuario_id
+    ) VALUES (
+      p_caja_origen_id,
+      'Egreso',
+      v_musd,
+      'VES',
+      ROUND(p_monto_ves, 4),
+      'Salida Bs por cambio de moneda (bitácora)',
+      v_id::TEXT,
+      NULLIF(TRIM(p_nota), ''),
+      NULL,
+      NULL,
+      p_usuario_id
+    );
+
+    INSERT INTO public.movimientos_caja (
+      caja_id, tipo, monto_usd, moneda, monto_moneda,
+      concepto, referencia, nota_operacion, venta_id, compra_id, usuario_id
+    ) VALUES (
+      p_caja_destino_id,
+      'Ingreso',
+      v_musd,
+      v_md,
+      v_monto_dest_nativo,
+      'Entrada por cambio Bs → ' || v_md || ' (bitácora)',
+      v_id::TEXT,
+      NULLIF(TRIM(p_nota), ''),
+      NULL,
+      NULL,
+      p_usuario_id
+    );
+  END IF;
+
   RETURN v_id;
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.registrar_cambio_tesoreria_erp(UUID, UUID, UUID, NUMERIC, NUMERIC, NUMERIC, NUMERIC, TEXT, TIMESTAMPTZ) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.registrar_cambio_tesoreria_erp(UUID, UUID, UUID, NUMERIC, NUMERIC, NUMERIC, NUMERIC, TEXT, TIMESTAMPTZ) TO service_role;
+REVOKE ALL ON FUNCTION public.registrar_cambio_tesoreria_erp(
+  UUID, UUID, UUID, NUMERIC, NUMERIC, NUMERIC, NUMERIC, TEXT, TIMESTAMPTZ, NUMERIC, BOOLEAN
+) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.registrar_cambio_tesoreria_erp(
+  UUID, UUID, UUID, NUMERIC, NUMERIC, NUMERIC, NUMERIC, TEXT, TIMESTAMPTZ, NUMERIC, BOOLEAN
+) TO service_role;
 
 -- -----------------------------------------------------------------------------
 -- -----------------------------------------------------------------------------
