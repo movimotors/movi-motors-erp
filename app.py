@@ -5053,7 +5053,8 @@ def _dashboard_seccion_cambios_tesoreria(
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    with st.expander("Registrar cambio (bitácora)", expanded=False):
+    _open_cambio = bool(st.session_state.pop("dash_open_cambio_tesoreria", False))
+    with st.expander("Registrar cambio (bitácora)", expanded=_open_cambio):
         with st.form(f"f_cambio_tesoreria_dash_{int(st.session_state.get('dash_cambio_teso_form_nonce', 0))}"):
             opt_none = "__none__"
             opt_o = [opt_none] + ves_ids
@@ -5066,7 +5067,28 @@ def _dashboard_seccion_cambios_tesoreria(
 
             so = st.selectbox("Caja origen (VES)", options=opt_o, format_func=_fmt_caja, key="dash_ct_orig")
             sd = st.selectbox("Caja destino (USD/USDT)", options=opt_d, format_func=_fmt_caja, key="dash_ct_dest")
-            m_ves_in = st.number_input("Monto en bolívares (Bs) que usaste en el cambio", min_value=0.0001, format="%.4f", key="dash_ct_mves")
+
+            _row_o = next((c for c in rows_caj if str(c.get("id")) == str(so)), None) if so != opt_none else None
+            _saldo_o_usd = float(_nf((_row_o or {}).get("saldo_actual_usd")) or 0.0)
+            _saldo_o_bs_est = _saldo_o_usd * float(def_tasa)
+            if _row_o is not None:
+                st.caption(
+                    f"Saldo disponible en origen: **US$ {_round_money_2(_saldo_o_usd):,.2f}** "
+                    f"(≈ **{_round_money_2(_saldo_o_bs_est):,.2f} Bs** usando {def_tasa:,.4f} Bs/USD como referencia)."
+                )
+
+                # Prefill: sugerir convertir el 100% del saldo disponible.
+                if "dash_ct_musd" not in st.session_state:
+                    st.session_state["dash_ct_musd"] = max(0.0001, float(_saldo_o_usd))
+                if "dash_ct_mves" not in st.session_state:
+                    st.session_state["dash_ct_mves"] = max(0.0001, float(_saldo_o_bs_est))
+
+            m_ves_in = st.number_input(
+                "Monto en bolívares (Bs) que usaste en el cambio",
+                min_value=0.0001,
+                format="%.4f",
+                key="dash_ct_mves",
+            )
             m_usd_in = st.number_input(
                 "Equivalente obtenido (USD de referencia en el sistema)",
                 min_value=0.0001,
@@ -5114,6 +5136,11 @@ def _dashboard_seccion_cambios_tesoreria(
                     aplicar_mov = not bool(solo_bitacora)
                     if aplicar_mov and (so == opt_none or sd == opt_none):
                         st.error("Para mover dinero entre cuentas elegí **caja origen (VES)** y **caja destino (USD/USDT)**.")
+                    elif aplicar_mov and _row_o is not None and float(m_usd_in) - _saldo_o_usd > 0.00001:
+                        st.error(
+                            "Saldo insuficiente en la caja origen: el **equivalente USD** a egresar supera el saldo disponible. "
+                            f"Disponible: **US$ {_round_money_2(_saldo_o_usd):,.2f}** · Intentás egresar: **US$ {_round_money_2(float(m_usd_in)) :,.2f}**."
+                        )
                     else:
                         payload_rpc: dict[str, Any] = {
                             "p_usuario_id": erp_uid,
@@ -5226,12 +5253,38 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
         if str(c.get("moneda_cuenta") or "").strip().upper() == "VES"
     )
     if sum_ves_equiv_usd >= 0.01:
+        _ves_cajas = [
+            c
+            for c in _caj_ves_alert
+            if str(c.get("moneda_cuenta") or "").strip().upper() == "VES" and float(c.get("saldo_actual_usd") or 0) > 0.00001
+        ]
+        _ves_cajas.sort(key=lambda x: -float(x.get("saldo_actual_usd") or 0))
+        _ves_top = _ves_cajas[0] if _ves_cajas else None
+
         st.warning(
             f"**Todavía hay equivalente en cuentas en bolívares (VES):** suman ~**US$ {sum_ves_equiv_usd:,.2f}** en el sistema — es lo que **aún está** en caja/banco en Bs. "
             "Si **registraste un cambio con movimientos de caja**, lo que cambiaste **ya salió** de ahí: el valor pasó a la cuenta destino en **USD**, **USDT** o **efectivo en dólares** "
-            "(**Zelle** suele registrarse en una caja en **USD**). Este aviso solo refleja **lo que sigue** en VES, no lo ya convertido. "
-            "Podés llevar el resto a moneda más estable y **registrar** el cambio en **Caja, cobros y tasas** para seguir la tasa vs BCV/mercado."
+            "(**Zelle** suele registrarse en una caja en **USD**). Este aviso solo refleja **lo que sigue** en VES, no lo ya convertido."
         )
+        c1, c2 = st.columns([1.4, 2.6])
+        with c1:
+            if st.button("Registrar cambio ahora", use_container_width=True):
+                if _ves_top is not None:
+                    st.session_state["dash_ct_orig"] = str(_ves_top.get("id"))
+                    st.session_state["dash_ct_musd"] = float(_ves_top.get("saldo_actual_usd") or 0.0)
+                    # Nota: no conocemos Bs exactos; sugerimos Bs ref. usando la tasa del panel.
+                    st.session_state["dash_ct_mves"] = float(_ves_top.get("saldo_actual_usd") or 0.0) * float(
+                        float(_nf(t.get("bcv_bs_por_usd")) or 0)
+                        or float(_nf(t.get("tasa_bs")) or 0)
+                        or float(_nf(t.get("paralelo_bs_por_usd")) or 0)
+                        or 1.0
+                    )
+                st.session_state["dash_open_cambio_tesoreria"] = True
+                st.rerun()
+        with c2:
+            st.caption(
+                "Recomendación operativa: convertí el remanente en VES a una cuenta estable (USD/USDT/Zelle) y registralo en la bitácora para que los saldos del panel reflejen la realidad."
+            )
 
     n_days = max(1, (d_b - d_a).days + 1)
     d_prev_b = d_a - timedelta(days=1)

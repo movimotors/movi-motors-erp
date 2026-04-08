@@ -28,6 +28,7 @@ DECLARE
   v_md TEXT;
   v_musd NUMERIC(16, 2);
   v_monto_dest_nativo NUMERIC(18, 4);
+  v_saldo_origen_usd NUMERIC(16, 2);
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM public.erp_users WHERE id = p_usuario_id AND activo = TRUE) THEN
     RAISE EXCEPTION 'Usuario ERP inválido o inactivo';
@@ -74,6 +75,19 @@ BEGIN
     END IF;
     IF v_md NOT IN ('USD', 'USDT') THEN
       RAISE EXCEPTION 'La caja destino debe ser en USD o USDT';
+    END IF;
+
+    -- No permitir saldos negativos: el egreso se hace por el equivalente USD.
+    -- Lock de fila para evitar condiciones de carrera si se registran movimientos simultáneos.
+    SELECT ROUND(COALESCE(saldo_actual_usd, 0), 2)
+      INTO v_saldo_origen_usd
+      FROM public.cajas_bancos
+     WHERE id = p_caja_origen_id
+     FOR UPDATE;
+
+    IF COALESCE(v_saldo_origen_usd, 0) + 0.00001 < v_musd THEN
+      RAISE EXCEPTION 'Saldo insuficiente en caja origen (USD equiv.): disponible %; requerido %',
+        v_saldo_origen_usd, v_musd;
     END IF;
 
     IF v_md = 'USDT' THEN
