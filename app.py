@@ -2969,6 +2969,181 @@ def _pdf_inventario_bytes(
     return buf.getvalue()
 
 
+def _pdf_toma_inventario_fisico_bytes(df: pd.DataFrame, *, subtitulo_filtros: str) -> bytes:
+    """PDF para conteo físico: código, categoría, descripción, stock sistema y columna vacía para anotar."""
+    from copy import deepcopy
+    from xml.sax.saxutils import escape as xml_esc
+
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.lib.utils import ImageReader
+    from reportlab.platypus import Image as RLImage
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    buf = BytesIO()
+    page = A4
+    lm = 14 * mm
+    rm = 14 * mm
+    tm = 12 * mm
+    bm = 14 * mm
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=page,
+        leftMargin=lm,
+        rightMargin=rm,
+        topMargin=tm,
+        bottomMargin=bm,
+    )
+    styles = getSampleStyleSheet()
+    story: list[Any] = []
+    tw = float(page[0] - lm - rm)
+
+    if BRAND_LOGO_PATH.is_file():
+        try:
+            ir = ImageReader(str(BRAND_LOGO_PATH))
+            iw, ih = ir.getSize()
+            if iw > 0 and ih > 0:
+                target_w = 40 * mm
+                target_h = target_w * (float(ih) / float(iw))
+                max_h = 20 * mm
+                if target_h > max_h:
+                    target_h = max_h
+                    target_w = target_h * (float(iw) / float(ih))
+                lg = RLImage(str(BRAND_LOGO_PATH), width=target_w, height=target_h)
+                lg.hAlign = "CENTER"
+                story.append(lg)
+                story.append(Spacer(1, 2 * mm))
+        except Exception:
+            pass
+
+    tz = ZoneInfo("America/Caracas")
+    fecha = datetime.now(tz).strftime("%d/%m/%Y %H:%M")
+    tit = deepcopy(styles["Title"])
+    tit.fontSize = 14
+    tit.leading = 17
+    tit.textColor = colors.HexColor("#2a1f45")
+    tit.alignment = TA_CENTER
+    story.append(Paragraph(xml_esc("Toma de inventario físico"), tit))
+    meta = deepcopy(styles["Normal"])
+    meta.fontSize = 8.5
+    meta.alignment = TA_CENTER
+    story.append(
+        Paragraph(
+            xml_esc(f"Movi Motor's Importadora · Generado: {fecha} (America/Caracas)"),
+            meta,
+        )
+    )
+    work = _inv_rep_prepare_work_df(df.copy())
+    n_items = len(work)
+    story.append(
+        Paragraph(
+            xml_esc(f"Ítems: {n_items} — Anotar el conteo real en la última columna."),
+            meta,
+        )
+    )
+    if subtitulo_filtros.strip():
+        sf = deepcopy(styles["BodyText"])
+        sf.fontSize = 8
+        sf.alignment = TA_CENTER
+        story.append(Paragraph(xml_esc(subtitulo_filtros), sf))
+    story.append(Spacer(1, 3 * mm))
+
+    cell_l = ParagraphStyle(
+        name="tfCellL",
+        fontName="Helvetica",
+        fontSize=7,
+        leading=8.5,
+        alignment=TA_LEFT,
+        spaceAfter=0,
+        spaceBefore=0,
+    )
+    cell_r = ParagraphStyle(
+        name="tfCellR",
+        fontName="Helvetica",
+        fontSize=7,
+        leading=8.5,
+        alignment=TA_RIGHT,
+        spaceAfter=0,
+        spaceBefore=0,
+    )
+    hdr_ps = ParagraphStyle(
+        name="tfHdr",
+        fontName="Helvetica-Bold",
+        fontSize=7.5,
+        leading=9,
+        alignment=TA_CENTER,
+        textColor=colors.whitesmoke,
+        spaceAfter=0,
+        spaceBefore=0,
+    )
+
+    def Pcell(txt: str | None, ps: ParagraphStyle) -> Paragraph:
+        return Paragraph(xml_esc("" if txt is None else str(txt)), ps)
+
+    hdr_labels = ["Código", "Categoría", "Descripción", "Stock sist.", "Conteo físico"]
+    hdr_row = [Pcell(h, hdr_ps) for h in hdr_labels]
+
+    # Anchos: descripción flexible
+    w_code = 22 * mm
+    w_cat = 26 * mm
+    w_stk = 16 * mm
+    w_fis = 28 * mm
+    w_desc = max(35 * mm, tw - w_code - w_cat - w_stk - w_fis)
+    col_ws = [w_code, w_cat, w_desc, w_stk, w_fis]
+
+    data: list[list[Any]] = [hdr_row]
+    if work.empty:
+        story.append(Paragraph(xml_esc("No hay productos con los filtros actuales."), meta))
+        doc.build(story)
+        return buf.getvalue()
+
+    for _, r in work.iterrows():
+        cod = _export_cell_txt(r.get("codigo"))
+        cat = _inv_cat_display(r.get("categoria"))
+        des = _export_cell_txt(r.get("descripcion"))
+        try:
+            stv = f"{_inv_stock_int(r.get('stock_actual')):d}"
+        except (TypeError, ValueError):
+            stv = ""
+        data.append(
+            [
+                Pcell(cod, cell_l),
+                Pcell(cat, cell_l),
+                Pcell(des, cell_l),
+                Pcell(stv, cell_r),
+                Pcell("\u00a0", cell_l),
+            ]
+        )
+
+    tbl = Table(data, colWidths=col_ws, repeatRows=1)
+    tbl.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2a1f45")),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 7),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#fafafa")]),
+                ("LEFTPADDING", (0, 0), (-1, -1), 3),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ("ALIGN", (3, 1), (3, -1), "RIGHT"),
+                ("ALIGN", (4, 1), (4, -1), "LEFT"),
+                ("TOPPADDING", (4, 1), (4, -1), 6),
+                ("BOTTOMPADDING", (4, 1), (4, -1), 10),
+            ]
+        )
+    )
+    story.append(tbl)
+    doc.build(story)
+    return buf.getvalue()
+
+
 def _backup_file_timestamp() -> str:
     return datetime.now(ZoneInfo("America/Caracas")).strftime("%Y%m%d_%H%M%S")
 
@@ -9192,6 +9367,25 @@ def panel_reportes_inventario_export(sb: Client, t: dict[str, Any] | None) -> No
         mime="text/html",
         key="rep_inv_dl_html",
     )
+    st.divider()
+    st.markdown("##### Toma de inventario físico")
+    st.caption(
+        "PDF con **código**, **categoría**, **descripción**, **stock del sistema** y columna **Conteo físico** en blanco "
+        "para completar al imprimir. Usa los **mismos filtros y orden** que el listado de arriba."
+    )
+    try:
+        _pdf_tf_b = _pdf_toma_inventario_fisico_bytes(_df_out, subtitulo_filtros=_sub_f)
+    except ImportError:
+        st.caption("Instalá **reportlab** para PDF.")
+    else:
+        st.download_button(
+            label=f"PDF — toma_fisica_{_ts_p}.pdf",
+            data=_pdf_tf_b,
+            file_name=f"toma_fisica_inventario_{_ts_p}.pdf",
+            mime="application/pdf",
+            key="rep_inv_dl_pdf_toma_fisica",
+            use_container_width=True,
+        )
     st.caption("Vista previa (Ctrl+P desde el recuadro o abrí el HTML descargado).")
     components.html(_html_inv, height=560, scrolling=True)
 
