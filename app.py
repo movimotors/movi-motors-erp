@@ -3913,6 +3913,38 @@ def render_sidebar_welcome(*, nombre: str, username: str, rol: str) -> None:
     )
 
 
+def render_sidebar_calculadora() -> None:
+    """Calculadora aritmética en la barra lateral (A y B, operación, resultado)."""
+    with st.expander("Calculadora", expanded=False, key="sidebar_exp_calculadora"):
+        _ca, _cb = st.columns(2)
+        with _ca:
+            _va = st.number_input("A", value=0.0, format="%.6g", key="movi_calc_a")
+        with _cb:
+            _vb = st.number_input("B", value=0.0, format="%.6g", key="movi_calc_b")
+        _op = st.selectbox(
+            "Operación",
+            ["Suma (+)", "Resta (−)", "Multiplicación (×)", "División (÷)"],
+            key="movi_calc_op",
+        )
+        _res: float | None = None
+        try:
+            if _op.startswith("Suma"):
+                _res = float(_va) + float(_vb)
+            elif _op.startswith("Resta"):
+                _res = float(_va) - float(_vb)
+            elif _op.startswith("Multi"):
+                _res = float(_va) * float(_vb)
+            else:
+                if abs(float(_vb)) < 1e-15:
+                    st.caption("No se puede dividir por cero.")
+                else:
+                    _res = float(_va) / float(_vb)
+        except (TypeError, ValueError, OverflowError):
+            st.caption("Valores no válidos.")
+        if _res is not None:
+            st.markdown(f"**Resultado:** `{_res:,.8g}`")
+
+
 def render_tasas_tiempo_real(*, key_suffix: str, t_guardado: dict[str, Any] | None) -> dict[str, Any]:
     """Muestra tasas públicas en vivo (caché ~2 min) y opción de forzar refresco."""
     st.markdown("##### Tasas en tiempo real (internet)")
@@ -4126,6 +4158,16 @@ def _caja_saldo_cuenta_y_equiv(
         f"US$ {_round_money_2(su):,.2f}",
         f"US$ {_round_money_2(su):,.2f} (ref. sistema)",
     )
+
+
+def _modulo_titulo_info(titulo: str, *, ayuda_md: str, key: str) -> None:
+    """Título del módulo y texto de ayuda en un expander (menos ruido visual hasta que lo abras)."""
+    _mt1, _mt2 = st.columns([5.2, 1.05], gap="small")
+    with _mt1:
+        st.subheader(titulo)
+    with _mt2:
+        with st.expander("Información", expanded=False, key=f"modinfo_exp_{key}"):
+            st.markdown(ayuda_md)
 
 
 def _cajas_fetch_rows(sb: Client, *, solo_activas: bool) -> list[dict[str, Any]]:
@@ -5484,11 +5526,12 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
 
     total_salidas_op_usd = compras_period_usd + gastos_op_period_usd
 
-    st.caption(
-        "**Cómo recorrer el dashboard:** 1) Elegí **Desde / Hasta** arriba. 2) Pestaña **Resumen** → mercado en vivo, KPIs, **tarjetas por cuenta / ingresos‑egresos / gastos por categoría / compras por proveedor**, totales de compras‑gastos, bitácora y gráficos. "
-        "3) **Inventario** → semáforo y valor (el **Buscar** de arriba filtra la tabla). 4) **Caja** → flujo, cobros por moneda, bitácora, tasas y últimos movimientos. "
-        "**Usuarios** del ERP están en **Mantenimiento** (superusuario)."
-    )
+    with st.expander("Información del panel", expanded=False, key="modinfo_exp_dashboard"):
+        st.markdown(
+            "**Cómo recorrer el dashboard:** 1) Elegí **Desde / Hasta** arriba. 2) Pestaña **Resumen** → mercado en vivo, KPIs, **tarjetas por cuenta / ingresos‑egresos / gastos por categoría / compras por proveedor**, totales de compras‑gastos, bitácora y gráficos. "
+            "3) **Inventario** → semáforo y valor (el **Buscar** de arriba filtra la tabla). 4) **Caja** → flujo, cobros por moneda, bitácora, tasas y últimos movimientos. "
+            "**Usuarios** del ERP están en **Mantenimiento** (superusuario)."
+        )
     tab_d_res, tab_d_inv, tab_d_caja = st.tabs(
         [
             "Resumen ejecutivo",
@@ -6060,26 +6103,29 @@ def module_tasas(sb: Client, *, embedded: bool = False) -> None:
     (se usa desde el Dashboard, donde ya existe el expander de tasas en vivo).
     """
     if not embedded:
-        st.subheader("Tasas del día")
-        st.caption(
-            "Guardás **BCV oficial** (referencia legal), **ref. Bs/USD mercado** (la que usás desde **Binance P2P** u otra fuente, campo 2), "
-            "**EUR** (vía *USD por 1 EUR*), **USDT×VES (P2P Binance)** y **USDT por USD**. "
-            "En **Operativo** elegís si ventas/compras usan **BCV** o **esa ref. P2P/mercado** para `tasa_bs`. "
-            "**Auto-sync web:** actualiza la ref. mercado Bs/USD; **no cambia el BCV** que cargaste; "
-            "`tasa_bs` sigue en BCV si venías operando con BCV."
-            f" Dispara si esa ref. web se mueve ≥ **{AUTO_TASA_ABS_MIN_BS}** Bs/USD"
-            + (f" o **≥{AUTO_TASA_SYNC_REL_MIN*100:.1f} %**" if AUTO_TASA_SYNC_REL_MIN > 0 else "")
-            + "."
-        )
-        st.info(
-            "Si al guardar ves error de columna inexistente, ejecuta en Supabase el archivo "
-            "`supabase/patch_005_tasas_dashboard.sql`."
+        _modulo_titulo_info(
+            "Tasas del día",
+            key="tasas",
+            ayuda_md=(
+                "Guardás **BCV oficial** (referencia legal), **ref. Bs/USD mercado** (la que usás desde **Binance P2P** u otra fuente, campo 2), "
+                "**EUR** (vía *USD por 1 EUR*), **USDT×VES (P2P Binance)** y **USDT por USD**. "
+                "En **Operativo** elegís si ventas/compras usan **BCV** o **esa ref. P2P/mercado** para `tasa_bs`. "
+                "**Auto-sync web:** actualiza la ref. mercado Bs/USD; **no cambia el BCV** que cargaste; "
+                "`tasa_bs` sigue en BCV si venías operando con BCV. "
+                f"Dispara si esa ref. web se mueve ≥ **{AUTO_TASA_ABS_MIN_BS}** Bs/USD"
+                + (f" o **≥{AUTO_TASA_SYNC_REL_MIN*100:.1f} %**" if AUTO_TASA_SYNC_REL_MIN > 0 else "")
+                + ".\n\n"
+                "Si al guardar ves error de columna inexistente, ejecutá en Supabase el archivo "
+                "`supabase/patch_005_tasas_dashboard.sql`."
+            ),
         )
     else:
-        st.caption(
-            f"Elegís **BCV** o **ref. P2P/mercado (campo 2)** para `tasa_bs`. Auto-sync (~cada {int(AUTO_TASA_SYNC_MIN_SECONDS)}s, "
-            f"≥{AUTO_TASA_ABS_MIN_BS} Bs/USD) actualiza esa ref.; **no pisa BCV**; respeta si operabas con BCV."
-        )
+        with st.expander("Información (tasas en este panel)", expanded=False, key="modinfo_exp_tasas_embed"):
+            st.markdown(
+                f"Elegís **BCV** o **ref. P2P/mercado (campo 2)** para `tasa_bs`. Auto-sync (~cada {int(AUTO_TASA_SYNC_MIN_SECONDS)}s, "
+                f"≥{AUTO_TASA_ABS_MIN_BS} Bs/USD) actualiza esa ref.; **no pisa BCV**; respeta si operabas con BCV.\n\n"
+                "¿Error de columna al guardar? Ejecutá en Supabase `supabase/patch_005_tasas_dashboard.sql`."
+            )
 
     lt = latest_tasas(sb) or {}
     _applied_live = st.session_state.pop("_live_apply", None)
@@ -6121,11 +6167,6 @@ def module_tasas(sb: Client, *, embedded: bool = False) -> None:
             render_tabla_tasas_ui(build_tasas_tabla_detalle(lt))
     else:
         st.warning("Aún no hay tasas en base de datos. Completa el formulario y guarda.")
-
-    if embedded:
-        st.info(
-            "¿Error de columna al guardar? Ejecuta en Supabase `supabase/patch_005_tasas_dashboard.sql`."
-        )
 
     par_def = (
         float(_applied_live["ves_bs_por_usd"])
@@ -6235,7 +6276,16 @@ def module_tasas(sb: Client, *, embedded: bool = False) -> None:
 
 
 def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
-    st.subheader("Inventario")
+    _modulo_titulo_info(
+        "Inventario",
+        key="inventario",
+        ayuda_md=(
+            f"**Categorías:** en la base hay las categorías disponibles; respaldos y listados en PDF/Excel están en **Mantenimiento** y **Reportes**.\n\n"
+            "**Buscar y modificar:** el **stock** baja con las **ventas** y sube con las **compras** (y cargas nuevas). "
+            "Buscá por código, **OEM**, descripción, **marca del repuesto** o **marcas de carro**. "
+            "La **tabla masiva** quedó **al final** del módulo (después de alta y CSV)."
+        ),
+    )
     if not t:
         st.warning("Registre tasas en **Dashboard** (expander *Cargar / editar tasas en base de datos*) para ver equivalentes.")
 
@@ -6263,17 +6313,9 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
     else:
         df["categoria"] = pd.Series(dtype=object)
 
-    st.caption(
-        f"**{len(cats_list)}** categoría(s) en la base. "
-        "Respaldo solo inventario y listados en PDF/Excel: **Mantenimiento** y **Reportes**."
-    )
+    st.caption(f"**{len(cats_list)}** categoría(s) en la base.")
 
     st.markdown("##### Buscar y modificar productos")
-    st.caption(
-        "El **stock** baja con las **ventas** y sube con las **compras** (y cargas nuevas). "
-        "Buscá por código, **OEM**, descripción, **marca del repuesto** o **marcas de carro**. "
-        "La **tabla masiva** quedó **al final** del módulo (después de alta y CSV)."
-    )
     _fc1, _fc2 = st.columns([2, 1])
     with _fc1:
         _inv_q = st.text_input(
@@ -7536,7 +7578,14 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
 
 
 def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
-    st.subheader("Ventas y CXC")
+    _modulo_titulo_info(
+        "Ventas y CXC",
+        key="ventas",
+        ayuda_md=(
+            "Flujo: **cliente y condición** → **productos** (el stock baja al registrar) → **totales** → **cobros**. "
+            "Montos en **USD** (1:1)."
+        ),
+    )
     if not t:
         st.stop()
 
@@ -7564,10 +7613,6 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
         st.divider()
 
     t_usdt = float(t["tasa_usdt"])
-    st.caption(
-        "Flujo: **cliente y condición** → **productos** (el stock baja al registrar) → **totales** → **cobros**. "
-        "Montos en **USD** (1:1)."
-    )
 
     try:
         prods = (
@@ -8420,15 +8465,20 @@ def _compra_parse_lineas_csv(
 
 
 def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
-    st.subheader("Compras y CXP")
+    _modulo_titulo_info(
+        "Compras y CXP",
+        key="compras",
+        ayuda_md=(
+            "Podés cargar **varias líneas** (botón abajo o **CSV**). Montos en **USD** (1:1). "
+            "Para equivalente en **bolívares**, elegí **BCV** o **P2P Binance**.\n\n"
+            "**Líneas de la compra:** **Añadir línea** agrega una fila más. Para facturas con muchos ítems, usá **importar CSV** "
+            "(exportá desde Excel con las columnas indicadas en el expander de importación)."
+        ),
+    )
     if not t:
         st.stop()
 
     t_usdt = float(t["tasa_usdt"])
-    st.caption(
-        "Podés cargar **varias líneas** (botón abajo o **CSV**). Montos en **USD** (1:1). "
-        "Para equivalente en **bolívares**, elegí **BCV** o **P2P Binance**."
-    )
 
     prods = (
         sb.table("productos")
@@ -8477,10 +8527,6 @@ def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
     )
 
     st.markdown("#### Líneas de la compra")
-    st.caption(
-        "**Añadir línea** agrega una fila más. Para facturas con muchos ítems, usá **importar CSV** "
-        "(exportá desde Excel con las columnas indicadas)."
-    )
     _ba, _bb, _bc = st.columns([1, 1, 2])
     with _ba:
         if st.button("➕ Añadir línea", key="compra_btn_add_line"):
@@ -8622,11 +8668,14 @@ def _movi_fetch_egresos_caja_recientes(sb: Client, *, limit: int = 50) -> tuple[
 
 
 def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
-    st.subheader("Gastos operativos")
-    st.caption(
-        "Salidas de efectivo que **no** son compra de mercancía para inventario (eso va en **Compras / CXP**). "
-        "Cada registro es un **egreso** en la caja elegida; el saldo equiv. USD baja igual que en **Cajas → movimiento manual**. "
-        "Para guardar la **categoría** en base de datos, ejecutá en Supabase **`supabase/patch_025_gastos_operativos.sql`**."
+    _modulo_titulo_info(
+        "Gastos operativos",
+        key="gastos_op",
+        ayuda_md=(
+            "Salidas de efectivo que **no** son compra de mercancía para inventario (eso va en **Compras / CXP**). "
+            "Cada registro es un **egreso** en la caja elegida; el saldo equiv. USD baja igual que en **Cajas → movimiento manual**. "
+            "Para guardar la **categoría** en base de datos, ejecutá en Supabase **`supabase/patch_025_gastos_operativos.sql`**."
+        ),
     )
 
     caja_rows = _cajas_fetch_rows(sb, solo_activas=True)
@@ -8756,11 +8805,14 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
 
 
 def module_cajas(sb: Client, erp_uid: str) -> None:
-    st.subheader("Cajas y bancos")
-    st.caption(
-        "Cada fila es una **cuenta concreta**: banco o entidad (Banesco, Bancamiga…), alias interno, moneda de la cuenta (VES/USD/USDT), número y titular. "
-        "**Saldo en cuenta** en **Bs** en cuentas VES, **USD** o **USDT** según la moneda; el valor interno en BD sigue siendo equiv. USD para el motor. "
-        "Los **gastos operativos** (alquiler, servicios, nómina…) podés registrarlos en el módulo **Gastos operativos**."
+    _modulo_titulo_info(
+        "Cajas y bancos",
+        key="cajas",
+        ayuda_md=(
+            "Cada fila es una **cuenta concreta**: banco o entidad (Banesco, Bancamiga…), alias interno, moneda de la cuenta (VES/USD/USDT), número y titular. "
+            "**Saldo en cuenta** en **Bs** en cuentas VES, **USD** o **USDT** según la moneda; el valor interno en BD sigue siendo equiv. USD para el motor. "
+            "Los **gastos operativos** (alquiler, servicios, nómina…) podés registrarlos en el módulo **Gastos operativos**."
+        ),
     )
     rows = sb.table("cajas_bancos").select("*").order("nombre").execute()
     if rows.data:
@@ -9626,33 +9678,40 @@ def module_reportes(sb: Client, erp_uid: str, t: dict[str, Any] | None, rol: str
         st.error("Tu rol no tiene acceso a reportes ni al catálogo.")
         return
 
-    st.subheader("Reportes")
     have_t = bool(t) if can_fin else True
     t_bs = float(t["tasa_bs"]) if t else 0.0
     t_usdt = float(t["tasa_usdt"]) if t else 0.0
 
     if can_fin:
-        st.info(
+        _rep_info_parts = [
             "**Cómo usar reportes:** 1) Elegí la **pestaña** del tema. 2) Ajustá **fechas** y filtros en esa pestaña. "
             "3) Revisá la **tabla o gráfico** principal. 4) Si necesitás profundizar, abrí **Más detalle** al final de la pestaña. "
-            "5) **Descargá** Excel o CSV para otra PC o WhatsApp."
-        )
-        st.caption(
-            "Los totales en **USD** son los del sistema; las columnas en **bolívares** son referencia según la tasa del día (cuando esté cargada)."
-        )
+            "5) **Descargá** Excel o CSV para otra PC o WhatsApp.",
+            "Los totales en **USD** son los del sistema; las columnas en **bolívares** son referencia según la tasa del día (cuando esté cargada).",
+        ]
+        if have_t:
+            _rep_info_parts.append(
+                f"Referencia: 1 USD equivale a **Bs** {int(round(t_bs)):,d} · **USDT** {int(round(t_usdt)):,d}"
+            )
+        if can_cat:
+            _rep_info_parts.append(
+                "**Catálogo y etiquetas:** página HTML para imprimir listados y fichas. "
+                "La subida de fotos a la nube es opcional y se puede apagar en `secrets` → `[catalogo]` → `storage_fotos`."
+            )
+        _modulo_titulo_info("Reportes", key="reportes", ayuda_md="\n\n".join(_rep_info_parts))
         if not have_t:
             st.warning(
                 "Aún no hay **tasas del día** cargadas en el Dashboard: los reportes en bolívares no se muestran hasta que las registres. "
                 "La pestaña **Catálogo y etiquetas** funciona igual."
             )
-        else:
-            st.caption(
-                f"Referencia: 1 USD equivale a **Bs** {int(round(t_bs)):,d} · **USDT** {int(round(t_usdt)):,d}"
-            )
     else:
-        st.caption(
-            "**Catálogo y etiquetas:** página HTML para imprimir listados y fichas. "
-            "La subida de fotos a la nube es opcional y se puede apagar en `secrets` → `[catalogo]` → `storage_fotos`."
+        _modulo_titulo_info(
+            "Reportes",
+            key="reportes_cat",
+            ayuda_md=(
+                "**Catálogo y etiquetas:** página HTML para imprimir listados y fichas. "
+                "La subida de fotos a la nube es opcional y se puede apagar en `secrets` → `[catalogo]` → `storage_fotos`."
+            ),
         )
 
     if can_fin:
@@ -10229,10 +10288,20 @@ def module_reportes(sb: Client, erp_uid: str, t: dict[str, Any] | None, rol: str
 
 def module_usuarios(sb: Client, *, embedded_in_mantenimiento: bool = False) -> None:
     if embedded_in_mantenimiento:
-        st.markdown("### Usuarios del sistema")
+        _uu1, _uu2 = st.columns([4.5, 1.05], gap="small")
+        with _uu1:
+            st.markdown("### Usuarios del sistema")
+        with _uu2:
+            with st.expander("Información", expanded=False, key="modinfo_exp_usuarios_emb"):
+                st.markdown(
+                    "Solo el **superusuario** puede crear cuentas y definir la contraseña inicial de cada persona."
+                )
     else:
-        st.subheader("Usuarios del sistema")
-    st.caption("Solo el superusuario puede crear cuentas y definir la contraseña inicial de cada persona.")
+        _modulo_titulo_info(
+            "Usuarios del sistema",
+            key="usuarios",
+            ayuda_md="Solo el **superusuario** puede crear cuentas y definir la contraseña inicial de cada persona.",
+        )
 
     r = (
         sb.table("erp_users")
@@ -10600,7 +10669,14 @@ def panel_revertir_movimientos_venta_huerfanos_mantenimiento(sb: Client, erp_uid
 
 
 def module_mantenimiento(sb: Client, erp_uid: str) -> None:
-    st.subheader("Mantenimiento")
+    _modulo_titulo_info(
+        "Mantenimiento",
+        key="mantenimiento",
+        ayuda_md=(
+            "**Usuarios:** alta y roles (superusuario). **Respaldo:** JSON completo o solo inventario; restauración y herramientas de anulación. "
+            "Revisá cada sección antes de operaciones destructivas."
+        ),
+    )
     module_usuarios(sb, embedded_in_mantenimiento=True)
     st.divider()
     st.markdown("#### Respaldo de seguridad")
@@ -10757,6 +10833,7 @@ def main() -> None:
             st.rerun()
         st.caption("Cotizaciones **en vivo**: **Dashboard → Resumen ejecutivo** (tarjetas arriba del todo).")
         render_cambiar_mi_password(sb, erp_uid)
+        render_sidebar_calculadora()
         opts: list[str] = []
         if role_can(rol, "dashboard"):
             opts.append("Dashboard")
