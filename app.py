@@ -4729,7 +4729,7 @@ def _pdf_resumen_ejecutivo_bytes(
     from xml.sax.saxutils import escape as xml_esc
 
     from reportlab.lib import colors
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
@@ -4876,6 +4876,23 @@ def _pdf_resumen_ejecutivo_bytes(
     story.append(Spacer(1, 3 * mm))
 
     h_style = ParagraphStyle(name="rh", parent=styles["Heading2"], fontSize=11, textColor=colors.HexColor("#1a1f2e"), spaceAfter=4)
+    # Celdas con texto largo en PDF: usar Paragraph para que haga wrap (evita solapamiento entre columnas).
+    cell_bit_l = ParagraphStyle(
+        name="cbit_l",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=7,
+        leading=9,
+        alignment=TA_LEFT,
+    )
+    cell_bit_r = ParagraphStyle(
+        name="cbit_r",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=7,
+        leading=9,
+        alignment=TA_RIGHT,
+    )
 
     def _tbl(data: list[list[str]], hdr: list[str], wcols: list[float]) -> Table:
         h_esc = [[xml_esc(x) for x in hdr]]
@@ -4947,27 +4964,39 @@ def _pdf_resumen_ejecutivo_bytes(
     if not bf_pdf:
         story.append(Paragraph(xml_esc("Sin operaciones de bitácora en el período."), meta))
     else:
-        rows_bt_pdf: list[list[str]] = []
+        wcols_bt = [tw * 0.09, tw * 0.21, tw * 0.21, tw * 0.07, tw * 0.11, tw * 0.11, tw * 0.20]
+        hdr_bt = ["Fecha", "Origen VES", "Destino", "Mon.", "Bs", "USD eq.", "Detalle"]
+        rows_bt_pdf: list[list[Any]] = [[xml_esc(x) for x in hdr_bt]]
         for r in bf_pdf:
-            det = str(r.get("Qué representa") or "")[:40]
+            det = str(r.get("Qué representa") or "")
             rows_bt_pdf.append(
                 [
-                    xml_esc(str(r.get("Fecha") or "")),
-                    xml_esc(str(r.get("Salió de (bolívares)") or "")[:32]),
-                    xml_esc(str(r.get("Llegó a (destino)") or "")[:32]),
-                    xml_esc(str(r.get("Moneda destino") or "")),
-                    f"{float(r['Bs usados']):,.2f}",
-                    f"{float(r['USD equivalente']):,.2f}",
-                    xml_esc(det),
+                    Paragraph(xml_esc(str(r.get("Fecha") or "")), cell_bit_l),
+                    Paragraph(xml_esc(str(r.get("Salió de (bolívares)") or "")), cell_bit_l),
+                    Paragraph(xml_esc(str(r.get("Llegó a (destino)") or "")), cell_bit_l),
+                    Paragraph(xml_esc(str(r.get("Moneda destino") or "")), cell_bit_l),
+                    Paragraph(xml_esc(f"{float(r['Bs usados']):,.2f}"), cell_bit_r),
+                    Paragraph(xml_esc(f"{float(r['USD equivalente']):,.2f}"), cell_bit_r),
+                    Paragraph(xml_esc(det), cell_bit_l),
                 ]
             )
-        story.append(
-            _tbl(
-                rows_bt_pdf,
-                ["Fecha", "Origen VES", "Destino", "Mon.", "Bs", "USD eq.", "Detalle"],
-                [tw * 0.1, tw * 0.19, tw * 0.19, tw * 0.07, tw * 0.11, tw * 0.11, tw * 0.23],
-            )
-        )
+        t_bt = Table(rows_bt_pdf, colWidths=wcols_bt, repeatRows=1)
+        stl_bt: list[tuple[Any, ...]] = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8eaf0")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#1a1f2e")),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 8),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cfd4dc")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 3),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]
+        if len(rows_bt_pdf) > 1:
+            stl_bt.append(("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8f9fb")]))
+        t_bt.setStyle(TableStyle(stl_bt))
+        story.append(t_bt)
         story.append(
             Paragraph(
                 xml_esc(
