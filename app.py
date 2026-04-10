@@ -4554,30 +4554,15 @@ def _caja_map_por_id(sb: Client) -> dict[str, dict[str, Any]]:
     return {str(c["id"]): c for c in _cajas_fetch_rows(sb, solo_activas=False)}
 
 
-def _inferencia_tasas_flujo_caja(t: dict[str, Any] | None) -> tuple[float | None, float | None]:
-    """Bs/USD y USDT/USD del día operativo para estimar montos nativos si el movimiento no trajo monto_moneda."""
-    if not t:
-        return None, None
-    try:
-        tb = float(_tasa_bs_para_documento(t, usar_bcv=False))
-    except (ValueError, TypeError):
-        tb = float(_nf(t.get("tasa_bs")) or 0)
-    if tb <= 0:
-        tb = None
-    tu = float(_nf(t.get("tasa_usdt")) or 0)
-    if tu <= 0:
-        tu = None
-    return tb, tu
-
-
 def _movimiento_caja_flow_bucket_amount(
-    r: dict[str, Any],
-    caja_by_id: dict[str, dict[str, Any]],
-    *,
-    tasa_bs_inferencia: float | None = None,
-    tasa_usdt_inferencia: float | None = None,
+    r: dict[str, Any], caja_by_id: dict[str, dict[str, Any]]
 ) -> tuple[str, float]:
-    """Clave de visualización (VES|USD|USDT|USD_equiv) y monto a sumar (nativo o equiv. USD legado)."""
+    """Clave de visualización (VES|USD|USDT|USD_equiv) y monto a sumar.
+
+    Solo usa **moneda nativa** si viene en la fila (`monto_moneda` + `moneda` / cuenta).
+    Si no hay nativo guardado, muestra **Equiv. USD** = `monto_usd` tal como está en BD
+    (sin multiplicar por tasas del día en el panel).
+    """
     cid = str(r.get("caja_id") or "")
     cj = caja_by_id.get(cid) or {}
     cmon_raw = str(cj.get("moneda_cuenta") or "").strip().upper()
@@ -4595,24 +4580,14 @@ def _movimiento_caja_flow_bucket_amount(
             if disp not in ("VES", "USD", "USDT"):
                 disp = "USD"
             return disp, mmf
-    if cmon == "VES" and musd > 0 and tasa_bs_inferencia and tasa_bs_inferencia > 0:
-        return "VES", musd * float(tasa_bs_inferencia)
-    if cmon == "USDT" and musd > 0 and tasa_usdt_inferencia and tasa_usdt_inferencia > 0:
-        return "USDT", musd * float(tasa_usdt_inferencia)
     return "USD_equiv", musd
 
 
 def _flow_ingreso_egreso_por_moneda(
-    sb: Client,
-    dsl: str,
-    r_fut: str,
-    caja_by_id: dict[str, dict[str, Any]],
-    *,
-    t: dict[str, Any] | None = None,
+    sb: Client, dsl: str, r_fut: str, caja_by_id: dict[str, dict[str, Any]]
 ) -> tuple[dict[str, float], dict[str, float]]:
     ing: dict[str, float] = defaultdict(float)
     egr: dict[str, float] = defaultdict(float)
-    tb, tu = _inferencia_tasas_flujo_caja(t)
     try:
         m_all = (
             sb.table("movimientos_caja")
@@ -4622,9 +4597,7 @@ def _flow_ingreso_egreso_por_moneda(
             .execute()
         )
         for r in m_all.data or []:
-            k, amt = _movimiento_caja_flow_bucket_amount(
-                r, caja_by_id, tasa_bs_inferencia=tb, tasa_usdt_inferencia=tu
-            )
+            k, amt = _movimiento_caja_flow_bucket_amount(r, caja_by_id)
             if r.get("tipo") == "Ingreso":
                 ing[k] += amt
             elif r.get("tipo") == "Egreso":
@@ -4635,15 +4608,9 @@ def _flow_ingreso_egreso_por_moneda(
 
 
 def _gastos_op_por_categoria_multimoneda(
-    sb: Client,
-    dsl: str,
-    r_fut: str,
-    caja_by_id: dict[str, dict[str, Any]],
-    *,
-    t: dict[str, Any] | None = None,
+    sb: Client, dsl: str, r_fut: str, caja_by_id: dict[str, dict[str, Any]]
 ) -> dict[str, dict[str, float]]:
     out: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
-    tb, tu = _inferencia_tasas_flujo_caja(t)
     try:
         mr = (
             sb.table("movimientos_caja")
@@ -4657,9 +4624,7 @@ def _gastos_op_por_categoria_multimoneda(
             cg = row.get("categoria_gasto")
             if cg is None or not str(cg).strip():
                 continue
-            k, amt = _movimiento_caja_flow_bucket_amount(
-                row, caja_by_id, tasa_bs_inferencia=tb, tasa_usdt_inferencia=tu
-            )
+            k, amt = _movimiento_caja_flow_bucket_amount(row, caja_by_id)
             out[str(cg).strip()][k] += amt
     except Exception:
         return {}
@@ -4793,9 +4758,8 @@ def render_dashboard_resumen_cuentas_flujo_y_detalle(
     st.markdown("##### Qué entró y qué salió de cajas (en el período)")
     st.caption(
         "Suma de **movimientos de caja** entre **Desde** y **Hasta**. "
-        "Cuando el movimiento guarda **moneda nativa** (Bs, US$, USDT), se muestra así. "
-        "Si falta en BD pero la **cuenta** es **VES** o **USDT**, el **Bs** o **USDT** se **estima** con las **tasas del día** cargadas en el ERP (no sustituye guardar `monto_moneda` con **patch_028**). "
-        "Si la cuenta es **USD** o no hay tasa, queda **Equiv. USD**. "
+        "Cuando el movimiento guarda **moneda nativa** (`monto_moneda` + moneda en fila o cuenta), se muestra en **Bs / US$ / USDT**. "
+        "Si **no** hay nativo en BD, solo se muestra el **equiv. USD** ya guardado en `monto_usd` al registrar (**el panel no recalcula** Bs ni USDT con tasas del día). "
         "**Entró:** cobros, **ingreso por bitácora** (USD/USDT destino), etc. "
         "**Salió:** compras al contado, **gastos operativos**, **egreso VES por bitácora**, pagos CXP, traspasos, etc. "
         "**No** mostramos **ingresos − egresos** en una sola cifra: en cambios y traspasos el mismo valor figura como egreso en una cuenta e ingreso en otra."
@@ -4814,7 +4778,7 @@ def render_dashboard_resumen_cuentas_flujo_y_detalle(
         sum_out = sum(float(r.get("monto_usd") or 0) for r in rows_m if r.get("tipo") == "Egreso")
     except Exception:
         pass
-    ing_m, egr_m = _flow_ingreso_egreso_por_moneda(sb, dsl, r_fut, _cmap_dash, t=t)
+    ing_m, egr_m = _flow_ingreso_egreso_por_moneda(sb, dsl, r_fut, _cmap_dash)
     fx1, fx2 = st.columns(2)
     with fx1:
         st.markdown("**Ingresos a caja**")
@@ -4828,11 +4792,11 @@ def render_dashboard_resumen_cuentas_flujo_y_detalle(
     st.markdown("##### Qué se gastó (gastos operativos por categoría)")
     st.caption(
         "Solo egresos cargados en **Gastos operativos** con **categoría** (`categoria_gasto`; **`patch_025`**). "
-        "Con **`patch_028`** los nuevos registros guardan **moneda nativa**. "
-        "Los que quedaron sin `monto_moneda` pero salieron de cuenta **VES**/**USDT** muestran **Bs**/**USDT** **estimados** con la tasa del día (revisá que la caja tenga **moneda de cuenta** bien definida). "
+        "Con **`patch_028`** los nuevos registros pueden guardar **moneda nativa** en BD. "
+        "Sin `monto_moneda`, verás solo **equiv. USD** (`monto_usd`); **no** inferimos Bs desde tasas en este panel. "
         "Otros egresos (p. ej. compras al contado) no aparecen acá."
     )
-    by_cat_mm = _gastos_op_por_categoria_multimoneda(sb, dsl, r_fut, _cmap_dash, t=t)
+    by_cat_mm = _gastos_op_por_categoria_multimoneda(sb, dsl, r_fut, _cmap_dash)
     by_cat_usd_sort: dict[str, float] = {}
     try:
         mr_s = (
@@ -4957,8 +4921,8 @@ def _pdf_resumen_ejecutivo_bytes(
         )
 
     cmap_pdf = _caja_map_por_id(sb)
-    ing_m_pdf, egr_m_pdf = _flow_ingreso_egreso_por_moneda(sb, dsl, r_fut, cmap_pdf, t=t)
-    by_cat_mm_pdf = _gastos_op_por_categoria_multimoneda(sb, dsl, r_fut, cmap_pdf, t=t)
+    ing_m_pdf, egr_m_pdf = _flow_ingreso_egreso_por_moneda(sb, dsl, r_fut, cmap_pdf)
+    by_cat_mm_pdf = _gastos_op_por_categoria_multimoneda(sb, dsl, r_fut, cmap_pdf)
 
     sum_in = sum_out = 0.0
     try:
@@ -5947,7 +5911,7 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
     total_salidas_op_usd = compras_period_usd + gastos_op_period_usd
 
     _cmap_kpi = _caja_map_por_id(sb)
-    go_mm_kpi = _gastos_op_por_categoria_multimoneda(sb, dsl_mov, r_fut, _cmap_kpi, t=t)
+    go_mm_kpi = _gastos_op_por_categoria_multimoneda(sb, dsl_mov, r_fut, _cmap_kpi)
     go_ag_kpi = _gastos_op_totales_por_moneda(go_mm_kpi)
     go_kpi_main, go_kpi_foot = _fmt_multimon_bucket_line(go_ag_kpi, legacy_suffix="registros viejos")
     _go_kpi_sub_bits: list[str] = []
@@ -6073,12 +6037,15 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
                 go_kpi_sub,
             )
         with s3:
+            _total_kpi_val = (
+                f"Compras (docs): US$ {compras_period_usd:,.2f} · Gastos op.: {go_kpi_main}"
+            )
             _dash_kpi_card(
-                "Total salidas (compras + gastos op.)",
-                f"US$ {total_salidas_op_usd:,.2f}",
+                "Compras + gastos op. (periodo)",
+                _total_kpi_val,
                 None,
-                "Compras en USD (documentos) + equiv. USD de gastos categorizados (Σ monto_usd). "
-                "Para Bs / USDT nativos ver la tarjeta Gastos operativos.",
+                "Sin unificar monedas: compras en **USD** de documentos; gastos en la **moneda nativa** del movimiento si está en BD, "
+                "si no en **equiv. USD** ya guardado al registrar. Este bloque **no** aplica tasas del día.",
             )
 
         st.markdown("##### Seguimiento: Bs → USD / USDT (bitácora de tesorería)")
