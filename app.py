@@ -4650,21 +4650,40 @@ def _markdown_lineas_flujo_caja(d: dict[str, float]) -> str:
     return "\n".join(lines) if lines else "*Sin movimientos.*"
 
 
-def _tarjeta_gasto_cat_multimon(cat: str, sub: dict[str, float]) -> None:
+def _gastos_op_totales_por_moneda(by_cat_mm: dict[str, dict[str, float]]) -> dict[str, float]:
+    acc: dict[str, float] = defaultdict(float)
+    for sub in by_cat_mm.values():
+        for bk, v in sub.items():
+            acc[str(bk)] += float(v or 0)
+    return dict(acc)
+
+
+def _fmt_multimon_bucket_line(
+    d: dict[str, float], *, legacy_suffix: str = "registros viejos"
+) -> tuple[str, str | None]:
+    """Misma lógica que las tarjetas por categoría: nativos VES/USD/USDT + pie de USD_equiv."""
     parts_vis: list[str] = []
     for bk in ("VES", "USD", "USDT"):
-        v = float(sub.get(bk) or 0)
+        v = float(d.get(bk) or 0)
         if abs(v) >= 0.005:
             parts_vis.append(f"{_fmt_dash_bucket_label(bk)} {_round_money_2(v):,.2f}")
-    ueq = float(sub.get("USD_equiv") or 0)
-    foot: str | None = None
+    ueq = float(d.get("USD_equiv") or 0)
     if parts_vis:
-        main = " · ".join(parts_vis)
-        if abs(ueq) >= 0.005:
-            foot = f"Más equiv. USD (registros viejos): US$ {_round_money_2(ueq):,.2f}"
-    else:
-        main = f"US$ {_round_money_2(ueq):,.2f}" if abs(ueq) >= 0.005 else "—"
-        foot = "Solo equivalente en sistema (sin moneda nativa guardada)" if abs(ueq) >= 0.005 else None
+        foot = (
+            f"Más equiv. USD ({legacy_suffix}): US$ {_round_money_2(ueq):,.2f}"
+            if abs(ueq) >= 0.005
+            else None
+        )
+        return " · ".join(parts_vis), foot
+    main = f"US$ {_round_money_2(ueq):,.2f}" if abs(ueq) >= 0.005 else "—"
+    foot = (
+        "Solo equivalente en sistema (sin moneda nativa guardada)" if abs(ueq) >= 0.005 else None
+    )
+    return main, foot
+
+
+def _tarjeta_gasto_cat_multimon(cat: str, sub: dict[str, float]) -> None:
+    main, foot = _fmt_multimon_bucket_line(sub, legacy_suffix="registros viejos")
     lab = cat if len(cat) <= 44 else cat[:41] + "…"
     _dash_mercado_card(lab, main, foot=foot or "Gasto operativo")
 
@@ -5883,6 +5902,21 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
 
     total_salidas_op_usd = compras_period_usd + gastos_op_period_usd
 
+    _cmap_kpi = _caja_map_por_id(sb)
+    go_mm_kpi = _gastos_op_por_categoria_multimoneda(sb, dsl_mov, r_fut, _cmap_kpi)
+    go_ag_kpi = _gastos_op_totales_por_moneda(go_mm_kpi)
+    go_kpi_main, go_kpi_foot = _fmt_multimon_bucket_line(go_ag_kpi, legacy_suffix="registros viejos")
+    _go_kpi_sub_bits: list[str] = []
+    if go_kpi_foot:
+        _go_kpi_sub_bits.append(go_kpi_foot)
+    if n_gastos_op_movs:
+        _go_kpi_sub_bits.append(f"{n_gastos_op_movs} mov. con categoría")
+    else:
+        _go_kpi_sub_bits.append("Registrá en Gastos operativos")
+    if gastos_op_period_usd >= 0.005:
+        _go_kpi_sub_bits.append(f"Equiv. motor (Σ monto_usd): US$ {gastos_op_period_usd:,.2f}")
+    go_kpi_sub = " · ".join(_go_kpi_sub_bits) if _go_kpi_sub_bits else None
+
     with st.expander("Información del panel", expanded=False, key="modinfo_exp_dashboard"):
         st.markdown(
             "**Cómo recorrer el dashboard:** 1) Elegí **Desde / Hasta** arriba. 2) Pestaña **Resumen** → mercado en vivo, KPIs, **tarjetas por cuenta / ingresos‑egresos / gastos por categoría / compras por proveedor**, totales de compras‑gastos, bitácora y gráficos. "
@@ -5989,17 +6023,18 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
             )
         with s2:
             _dash_kpi_card(
-                "Gastos operativos (USD)",
-                f"US$ {gastos_op_period_usd:,.2f}",
+                "Gastos operativos",
+                go_kpi_main,
                 None,
-                (f"{n_gastos_op_movs} mov. con categoría" if n_gastos_op_movs else "Registrá en Gastos operativos"),
+                go_kpi_sub,
             )
         with s3:
             _dash_kpi_card(
                 "Total salidas (compras + gastos op.)",
                 f"US$ {total_salidas_op_usd:,.2f}",
                 None,
-                "Suma de las dos tarjetas previas",
+                "Compras en USD (documentos) + equiv. USD de gastos categorizados (Σ monto_usd). "
+                "Para Bs / USDT nativos ver la tarjeta Gastos operativos.",
             )
 
         st.markdown("##### Seguimiento: Bs → USD / USDT (bitácora de tesorería)")
