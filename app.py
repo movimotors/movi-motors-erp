@@ -18,7 +18,7 @@ que pulses **Cerrar sesión** o venza la vigencia (p. ej. 90 días).
 from __future__ import annotations
 
 import base64
-from collections import Counter
+from collections import Counter, defaultdict
 import gzip
 import hashlib
 import hmac
@@ -4550,6 +4550,125 @@ def _bitacora_filas_con_cajas(
     return out
 
 
+def _caja_map_por_id(sb: Client) -> dict[str, dict[str, Any]]:
+    return {str(c["id"]): c for c in _cajas_fetch_rows(sb, solo_activas=False)}
+
+
+def _movimiento_caja_flow_bucket_amount(
+    r: dict[str, Any], caja_by_id: dict[str, dict[str, Any]]
+) -> tuple[str, float]:
+    """Clave de visualización (VES|USD|USDT|USD_equiv) y monto a sumar (nativo o equiv. USD legado)."""
+    cid = str(r.get("caja_id") or "")
+    cj = caja_by_id.get(cid) or {}
+    cmon = str(cj.get("moneda_cuenta") or "").strip().upper()
+    rmon = str(r.get("moneda") or "").strip().upper()
+    mm = r.get("monto_moneda")
+    musd = float(r.get("monto_usd") or 0)
+    if mm is not None and str(mm).strip() != "":
+        try:
+            mmf = float(mm)
+        except (TypeError, ValueError):
+            mmf = 0.0
+        if mmf > 0:
+            disp = rmon or cmon or "USD"
+            if disp not in ("VES", "USD", "USDT"):
+                disp = "USD"
+            return disp, mmf
+    return "USD_equiv", musd
+
+
+def _flow_ingreso_egreso_por_moneda(
+    sb: Client, dsl: str, r_fut: str, caja_by_id: dict[str, dict[str, Any]]
+) -> tuple[dict[str, float], dict[str, float]]:
+    ing: dict[str, float] = defaultdict(float)
+    egr: dict[str, float] = defaultdict(float)
+    try:
+        m_all = (
+            sb.table("movimientos_caja")
+            .select("tipo,monto_usd,moneda,monto_moneda,caja_id")
+            .gte("created_at", dsl)
+            .lte("created_at", r_fut)
+            .execute()
+        )
+        for r in m_all.data or []:
+            k, amt = _movimiento_caja_flow_bucket_amount(r, caja_by_id)
+            if r.get("tipo") == "Ingreso":
+                ing[k] += amt
+            elif r.get("tipo") == "Egreso":
+                egr[k] += amt
+    except Exception:
+        pass
+    return dict(ing), dict(egr)
+
+
+def _gastos_op_por_categoria_multimoneda(
+    sb: Client, dsl: str, r_fut: str, caja_by_id: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, float]]:
+    out: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    try:
+        mr = (
+            sb.table("movimientos_caja")
+            .select("monto_usd,categoria_gasto,moneda,monto_moneda,caja_id")
+            .gte("created_at", dsl)
+            .lte("created_at", r_fut)
+            .eq("tipo", "Egreso")
+            .execute()
+        )
+        for row in mr.data or []:
+            cg = row.get("categoria_gasto")
+            if cg is None or not str(cg).strip():
+                continue
+            k, amt = _movimiento_caja_flow_bucket_amount(row, caja_by_id)
+            out[str(cg).strip()][k] += amt
+    except Exception:
+        return {}
+    return {c: dict(v) for c, v in out.items()}
+
+
+def _fmt_dash_bucket_label(bk: str) -> str:
+    return {"VES": "Bs", "USD": "US$", "USDT": "USDT", "USD_equiv": "Equiv. USD (sin monto nativo)"}.get(
+        bk, bk
+    )
+
+
+def _markdown_lineas_flujo_caja(d: dict[str, float]) -> str:
+    if not d:
+        return "*Sin movimientos.*"
+    lines: list[str] = []
+    order = ("VES", "USD", "USDT", "USD_equiv")
+    for bk in order:
+        v = float(d.get(bk) or 0)
+        if abs(v) >= 0.005:
+            lab = _fmt_dash_bucket_label(bk)
+            lines.append(f"- **{lab}:** {_round_money_2(v):,.2f}")
+    for bk, v in sorted(d.items()):
+        if bk in order:
+            continue
+        vf = float(v or 0)
+        if abs(vf) >= 0.005:
+            lines.append(f"- **{bk}:** {_round_money_2(vf):,.2f}")
+    return "\n".join(lines) if lines else "*Sin movimientos.*"
+
+
+def _tarjeta_gasto_cat_multimon(cat: str, sub: dict[str, float]) -> None:
+    parts_vis: list[str] = []
+    for bk in ("VES", "USD", "USDT"):
+        v = float(sub.get(bk) or 0)
+        if abs(v) >= 0.005:
+            parts_vis.append(f"{_fmt_dash_bucket_label(bk)} {_round_money_2(v):,.2f}")
+    ueq = float(sub.get("USD_equiv") or 0)
+    foot: str | None = None
+    if parts_vis:
+        main = " · ".join(parts_vis)
+        if abs(ueq) >= 0.005:
+            foot = f"Más equiv. USD (registros viejos): US$ {_round_money_2(ueq):,.2f}"
+    else:
+        main = f"US$ {_round_money_2(ueq):,.2f}" if abs(ueq) >= 0.005 else "—"
+        foot = "Solo equivalente en sistema (sin moneda nativa guardada)" if abs(ueq) >= 0.005 else None
+    lab = cat if len(cat) <= 44 else cat[:41] + "…"
+    _dash_mercado_card(lab, main, foot=foot or "Gasto operativo")
+
+
 def render_dashboard_resumen_cuentas_flujo_y_detalle(
     sb: Client,
     d_a: date,
@@ -4561,6 +4680,7 @@ def render_dashboard_resumen_cuentas_flujo_y_detalle(
     """Tarjetas: saldos por cuenta, bitácora origen→destino, ingresos/egresos, gastos, compras."""
     dsl = f"{d_a.isoformat()}T00:00:00"
     _br = list(bitacora_rows or [])
+    _cmap_dash = _caja_map_por_id(sb)
 
     st.markdown("##### Dónde está el dinero (cuentas activas · saldo hoy)")
     st.caption(
@@ -4613,9 +4733,10 @@ def render_dashboard_resumen_cuentas_flujo_y_detalle(
     st.markdown("##### Qué entró y qué salió de cajas (en el período)")
     st.caption(
         "Suma de **movimientos de caja** entre **Desde** y **Hasta**. "
-        "**Entró:** cobros de ventas, abonos, **ingreso por bitácora** (USD/USDT destino), etc. "
+        "Cuando el movimiento guarda **moneda nativa** (Bs, US$, USDT), se muestra así; si es un registro viejo **solo** con equivalente en sistema, figura como **Equiv. USD**. "
+        "**Entró:** cobros, **ingreso por bitácora** (USD/USDT destino), etc. "
         "**Salió:** compras al contado, **gastos operativos**, **egreso VES por bitácora**, pagos CXP, traspasos, etc. "
-        "**No** mostramos **ingresos − egresos** en una sola cifra: en cambios y traspasos el mismo valor figura como egreso en una cuenta e ingreso en otra; el neto global **no** refleja resultado real — usá **saldos por cuenta** y el detalle de abajo."
+        "**No** mostramos **ingresos − egresos** en una sola cifra: en cambios y traspasos el mismo valor figura como egreso en una cuenta e ingreso en otra."
     )
     sum_in = sum_out = 0.0
     try:
@@ -4631,20 +4752,27 @@ def render_dashboard_resumen_cuentas_flujo_y_detalle(
         sum_out = sum(float(r.get("monto_usd") or 0) for r in rows_m if r.get("tipo") == "Egreso")
     except Exception:
         pass
+    ing_m, egr_m = _flow_ingreso_egreso_por_moneda(sb, dsl, r_fut, _cmap_dash)
     fx1, fx2 = st.columns(2)
     with fx1:
-        _dash_mercado_card("Ingresos a caja", f"US$ {_round_money_2(sum_in):,.2f}", foot="Total movimientos tipo Ingreso")
+        st.markdown("**Ingresos a caja**")
+        st.markdown(_markdown_lineas_flujo_caja(ing_m), unsafe_allow_html=False)
+        st.caption(f"Suma equiv. USD (motor de saldos): **US$ {_round_money_2(sum_in):,.2f}**")
     with fx2:
-        _dash_mercado_card("Egresos de caja", f"US$ {_round_money_2(sum_out):,.2f}", foot="Total movimientos tipo Egreso")
+        st.markdown("**Egresos de caja**")
+        st.markdown(_markdown_lineas_flujo_caja(egr_m), unsafe_allow_html=False)
+        st.caption(f"Suma equiv. USD (motor de saldos): **US$ {_round_money_2(sum_out):,.2f}**")
 
     st.markdown("##### Qué se gastó (gastos operativos por categoría)")
     st.caption(
-        "Solo egresos cargados en **Gastos operativos** con **categoría** (columna `categoria_gasto`; **`patch_025`** en Supabase). "
+        "Solo egresos cargados en **Gastos operativos** con **categoría** (`categoria_gasto`; **`patch_025`**). "
+        "Con **`patch_028`** los nuevos registros guardan **moneda nativa**; los viejos solo muestran equivalente USD. "
         "Otros egresos (p. ej. compras al contado) no aparecen acá."
     )
-    by_cat: dict[str, float] = {}
+    by_cat_mm = _gastos_op_por_categoria_multimoneda(sb, dsl, r_fut, _cmap_dash)
+    by_cat_usd_sort: dict[str, float] = {}
     try:
-        mr = (
+        mr_s = (
             sb.table("movimientos_caja")
             .select("monto_usd,categoria_gasto")
             .gte("created_at", dsl)
@@ -4652,29 +4780,28 @@ def render_dashboard_resumen_cuentas_flujo_y_detalle(
             .eq("tipo", "Egreso")
             .execute()
         )
-        for row in mr.data or []:
+        for row in mr_s.data or []:
             cg = row.get("categoria_gasto")
             if cg is not None and str(cg).strip():
                 k = str(cg).strip()
-                by_cat[k] = by_cat.get(k, 0.0) + float(row.get("monto_usd") or 0)
+                by_cat_usd_sort[k] = by_cat_usd_sort.get(k, 0.0) + float(row.get("monto_usd") or 0)
     except Exception:
-        by_cat = {}
-    if not by_cat:
+        by_cat_usd_sort = {}
+    if not by_cat_mm:
         st.info(
             "No hay **gastos operativos categorizados** en el período. "
             "Registrálos en **Gastos operativos** o ejecutá **`supabase/patch_025_gastos_operativos.sql`** si falta la columna."
         )
     else:
-        items = sorted(by_cat.items(), key=lambda x: -x[1])[:9]
+        items = sorted(by_cat_mm.items(), key=lambda x: -by_cat_usd_sort.get(x[0], 0.0))[:9]
         for i in range(0, len(items), 3):
             chunk = items[i : i + 3]
             cols = st.columns(3)
             for j in range(3):
                 with cols[j]:
                     if j < len(chunk):
-                        cat, amt = chunk[j]
-                        lab = cat if len(cat) <= 44 else cat[:41] + "…"
-                        _dash_mercado_card(lab, f"US$ {_round_money_2(amt):,.2f}", foot="Gasto operativo")
+                        cat, subd = chunk[j]
+                        _tarjeta_gasto_cat_multimon(cat, subd)
 
     st.markdown("##### Qué se compró (compras a proveedores en el período)")
     st.caption("Suma en **USD** de **compras** registradas en el rango, agrupada por **proveedor** (mercancía / inventario).")
@@ -4766,6 +4893,10 @@ def _pdf_resumen_ejecutivo_bytes(
             ]
         )
 
+    cmap_pdf = _caja_map_por_id(sb)
+    ing_m_pdf, egr_m_pdf = _flow_ingreso_egreso_por_moneda(sb, dsl, r_fut, cmap_pdf)
+    by_cat_mm_pdf = _gastos_op_por_categoria_multimoneda(sb, dsl, r_fut, cmap_pdf)
+
     sum_in = sum_out = 0.0
     try:
         m_all = (
@@ -4782,6 +4913,14 @@ def _pdf_resumen_ejecutivo_bytes(
                 sum_out += float(r.get("monto_usd") or 0)
     except Exception:
         pass
+
+    def _fmt_pdf_flow_lines(d: dict[str, float]) -> str:
+        parts: list[str] = []
+        for bk in ("VES", "USD", "USDT", "USD_equiv"):
+            v = float(d.get(bk) or 0)
+            if abs(v) >= 0.005:
+                parts.append(f"{_fmt_dash_bucket_label(bk)} {_round_money_2(v):,.2f}")
+        return " · ".join(parts) if parts else "—"
 
     by_cat: dict[str, float] = {}
     try:
@@ -4800,7 +4939,19 @@ def _pdf_resumen_ejecutivo_bytes(
                 by_cat[k] = by_cat.get(k, 0.0) + float(row.get("monto_usd") or 0)
     except Exception:
         pass
-    rows_gasto = [[xml_esc(a), f"{_round_money_2(v):,.2f}"] for a, v in sorted(by_cat.items(), key=lambda x: -x[1])[:20]]
+    rows_gasto: list[list[str]] = []
+    for cat, usdtot in sorted(by_cat.items(), key=lambda x: -x[1])[:20]:
+        sub = by_cat_mm_pdf.get(cat, {})
+        parts: list[str] = []
+        for bk in ("VES", "USD", "USDT"):
+            v = float(sub.get(bk) or 0)
+            if abs(v) >= 0.005:
+                parts.append(f"{_fmt_dash_bucket_label(bk)} {_round_money_2(v):,.2f}")
+        ueq = float(sub.get("USD_equiv") or 0)
+        if abs(ueq) >= 0.005:
+            parts.append(f"Equiv. USD {_round_money_2(ueq):,.2f}")
+        det = " · ".join(parts) if parts else f"US$ {_round_money_2(usdtot):,.2f}"
+        rows_gasto.append([xml_esc(cat), xml_esc(det)])
 
     by_prov: dict[str, float] = {}
     try:
@@ -5019,17 +5170,19 @@ def _pdf_resumen_ejecutivo_bytes(
     )
     story.append(Spacer(1, 1 * mm))
     mov_rows = [
-        ["Ingresos a caja", f"{_round_money_2(sum_in):,.2f}"],
-        ["Egresos de caja", f"{_round_money_2(sum_out):,.2f}"],
+        ["Ingresos (por moneda registrada)", _fmt_pdf_flow_lines(ing_m_pdf)],
+        ["Ingresos (suma equiv. USD motor)", f"{_round_money_2(sum_in):,.2f}"],
+        ["Egresos (por moneda registrada)", _fmt_pdf_flow_lines(egr_m_pdf)],
+        ["Egresos (suma equiv. USD motor)", f"{_round_money_2(sum_out):,.2f}"],
     ]
-    story.append(_tbl([[xml_esc(a), b] for a, b in mov_rows], ["Concepto", "USD equiv."], [tw * 0.55, tw * 0.45]))
+    story.append(_tbl([[xml_esc(a), b] for a, b in mov_rows], ["Concepto", "Detalle"], [tw * 0.42, tw * 0.58]))
     story.append(Spacer(1, 4 * mm))
 
     story.append(Paragraph(xml_esc("Gastos operativos por categoría"), h_style))
     if not rows_gasto:
         story.append(Paragraph(xml_esc("Sin gastos con categoría en el período (ver módulo Gastos operativos / patch 025)."), meta))
     else:
-        story.append(_tbl(rows_gasto, ["Categoría", "USD"], [tw * 0.62, tw * 0.38]))
+        story.append(_tbl(rows_gasto, ["Categoría", "Importes"], [tw * 0.38, tw * 0.62]))
     story.append(Spacer(1, 4 * mm))
 
     story.append(Paragraph(xml_esc("Compras por proveedor"), h_style))
@@ -8848,27 +9001,52 @@ def module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
 
 
 def _movi_fetch_egresos_caja_recientes(sb: Client, *, limit: int = 50) -> tuple[list[dict[str, Any]], bool]:
-    """Devuelve egresos recientes y si la tabla expone categoria_gasto (patch_025)."""
-    try:
-        r = (
-            sb.table("movimientos_caja")
-            .select("created_at,caja_id,monto_usd,concepto,referencia,categoria_gasto,nota_operacion")
-            .eq("tipo", "Egreso")
-            .order("created_at", desc=True)
-            .limit(limit)
-            .execute()
-        )
-        return list(r.data or []), True
-    except Exception:
-        r = (
-            sb.table("movimientos_caja")
-            .select("created_at,caja_id,monto_usd,concepto,referencia,nota_operacion")
-            .eq("tipo", "Egreso")
-            .order("created_at", desc=True)
-            .limit(limit)
-            .execute()
-        )
-        return list(r.data or []), False
+    """Egresos recientes; intenta id/venta_id/compra_id/moneda (patch_008/028) y categoria_gasto (patch_025)."""
+    attempts: list[tuple[str, bool]] = [
+        (
+            "created_at,caja_id,monto_usd,concepto,referencia,categoria_gasto,nota_operacion,moneda,monto_moneda,id,venta_id,compra_id",
+            True,
+        ),
+        (
+            "created_at,caja_id,monto_usd,concepto,referencia,categoria_gasto,nota_operacion,id,venta_id,compra_id",
+            True,
+        ),
+        ("created_at,caja_id,monto_usd,concepto,referencia,categoria_gasto,nota_operacion", True),
+        ("created_at,caja_id,monto_usd,concepto,referencia,nota_operacion", False),
+    ]
+    for sel, tiene_cat in attempts:
+        try:
+            r = (
+                sb.table("movimientos_caja")
+                .select(sel)
+                .eq("tipo", "Egreso")
+                .order("created_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            rows = list(r.data or [])
+            for row in rows:
+                for k in ("moneda", "monto_moneda", "id", "venta_id", "compra_id", "categoria_gasto"):
+                    row.setdefault(k, None)
+            return rows, tiene_cat
+        except Exception:
+            continue
+    return [], False
+
+
+def _gasto_op_fmt_monto_tabla(r: dict[str, Any], _cmap: dict[str, dict[str, Any]]) -> str:
+    mm = r.get("monto_moneda")
+    musd = float(r.get("monto_usd") or 0)
+    rmon = str(r.get("moneda") or "").strip().upper()
+    if mm is not None and str(mm).strip() != "":
+        try:
+            mv = float(mm)
+        except (TypeError, ValueError):
+            mv = None
+        if mv is not None and mv > 0:
+            lab = {"VES": "Bs", "USD": "US$", "USDT": "USDT"}.get(rmon, rmon or "?")
+            return f"{lab} {_round_money_2(mv):,.2f} (≈ US$ {_round_money_2(musd):,.2f})"
+    return f"US$ {_round_money_2(musd):,.2f}"
 
 
 def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
@@ -8877,8 +9055,9 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
         key="gastos_op",
         ayuda_md=(
             "Salidas de efectivo que **no** son compra de mercancía para inventario (eso va en **Compras / CXP**). "
-            "Cada registro es un **egreso** en la caja elegida; el saldo equiv. USD baja igual que en **Cajas → movimiento manual**. "
-            "Para guardar la **categoría** en base de datos, ejecutá en Supabase **`supabase/patch_025_gastos_operativos.sql`**."
+            "El **monto** se ingresa en la **moneda de la cuenta** (Bs, US$ o USDT); el sistema guarda también el **equivalente USD** para el saldo. "
+            "Podés **corregir** egresos **manuales** (sin venta/compra ligada) en el expander. "
+            "Ejecutá **`patch_025`** (categoría) y **`patch_028`** (moneda nativa + corrección) en Supabase cuando corresponda."
         ),
     )
 
@@ -8888,6 +9067,9 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
         st.warning("No hay cajas activas. Creá una en **Cajas y bancos**.")
         st.stop()
 
+    cmap_full = {str(c["id"]): c for c in _cajas_fetch_rows(sb, solo_activas=False)}
+    cmap_lab = {str(c["id"]): _caja_etiqueta_lista(c) for c in caja_rows}
+
     cat_opts = GASTO_OPERATIVO_CATEGORIAS + (GASTO_OPERATIVO_OTRO,)
 
     with st.form(f"f_gasto_op_{int(st.session_state.get('gasto_op_form_nonce', 0))}"):
@@ -8896,17 +9078,43 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
         if cat == GASTO_OPERATIVO_OTRO:
             cat_custom = st.text_input("Nombre de la categoría", key="gasto_op_cat_custom", placeholder="Ej.: Suscripción software")
         desc = st.text_input("Descripción / detalle", key="gasto_op_desc", placeholder="Ej.: Alquiler enero local principal")
-        monto = st.number_input("Monto (USD equivalente)", min_value=0.01, format="%.2f", key="gasto_op_monto")
-        if t:
-            try:
-                _tb_g = _tasa_bs_para_documento(t, usar_bcv=False)
-                st.caption(
-                    f"Referencia **P2P** (solo informativa): ~{float(monto) * float(_tb_g):,.2f} Bs "
-                    f"por US$ {float(monto):,.2f} @ {_tb_g:,.2f} Bs/USD."
-                )
-            except ValueError:
-                pass
         cid = st.selectbox("Caja de donde sale el dinero", options=caja_ids, format_func=caja_fmt, key="gasto_op_caja")
+        acc = cmap_full.get(str(cid), {}) or {}
+        mon_cuenta = str(acc.get("moneda_cuenta") or "USD").strip().upper()
+        monto_usd_calc = 0.01
+        p_mon: str | None = None
+        p_mm: float | None = None
+        if mon_cuenta == "VES":
+            m_bs = st.number_input("Monto en bolívares (Bs)", min_value=0.01, format="%.2f", key="gasto_op_m_bs")
+            try:
+                _tb0 = float(_tasa_bs_para_documento(t, usar_bcv=False)) if t else 0.0
+            except (ValueError, TypeError):
+                _tb0 = 0.0
+            tasa_bs = st.number_input(
+                "Tasa Bs por 1 USD (para equivalente en sistema)",
+                min_value=0.01,
+                value=float(_tb0) if _tb0 > 0 else 300.0,
+                format="%.4f",
+                key="gasto_op_tasa_bs",
+                help="Solo para convertir a USD interno; el gasto se muestra en Bs en reportes.",
+            )
+            monto_usd_calc = float(m_bs) / float(tasa_bs) if tasa_bs > 0 else 0.0
+            p_mon, p_mm = "VES", float(m_bs)
+            st.caption(f"Equiv. en sistema: **US$ {_round_money_2(monto_usd_calc):,.2f}** (Bs ÷ tasa).")
+        elif mon_cuenta == "USDT":
+            m_ut = st.number_input("Monto en USDT", min_value=0.0001, format="%.4f", key="gasto_op_m_ut")
+            t_ut = float(_nf(t.get("tasa_usdt")) or 1.0) if t else 1.0
+            if t_ut <= 0:
+                t_ut = 1.0
+            monto_usd_calc = float(m_ut) / t_ut
+            p_mon, p_mm = "USDT", float(m_ut)
+            st.caption(
+                f"Equiv. en sistema: **US$ {_round_money_2(monto_usd_calc):,.2f}** (USDT ÷ tasa USDT/USD **{t_ut:,.6f}** del día en BD)."
+            )
+        else:
+            m_us = st.number_input("Monto en USD", min_value=0.01, format="%.2f", key="gasto_op_m_usd")
+            monto_usd_calc = float(m_us)
+            p_mon, p_mm = "USD", float(m_us)
         ref = st.text_input("Referencia (Nº factura, recibo…)", key="gasto_op_ref")
         nota = st.text_input(
             "Nota de tesorería (opcional)",
@@ -8920,12 +9128,14 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
                 st.error("Completá el nombre de la categoría.")
             elif not (desc or "").strip():
                 st.error("La descripción es obligatoria.")
+            elif monto_usd_calc <= 0:
+                st.error("El equivalente USD calculado debe ser mayor que cero (revisá monto y tasa).")
             else:
                 payload: dict[str, Any] = {
                     "p_usuario_id": erp_uid,
                     "p_caja_id": str(cid),
                     "p_tipo": "Egreso",
-                    "p_monto_usd": float(monto),
+                    "p_monto_usd": float(monto_usd_calc),
                     "p_concepto": (desc or "").strip(),
                     "p_referencia": (ref or "").strip(),
                 }
@@ -8934,64 +9144,161 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
                 payload_cat = cat_final if cat_final else None
                 if payload_cat:
                     payload["p_categoria_gasto"] = payload_cat
-                try:
-                    sb.rpc("registrar_movimiento_caja_erp", payload).execute()
+                if p_mon and p_mm is not None and p_mm > 0:
+                    payload["p_moneda"] = p_mon
+                    payload["p_monto_moneda"] = float(p_mm)
+
+                def _try_reg(pl: dict[str, Any]) -> Exception | None:
+                    try:
+                        sb.rpc("registrar_movimiento_caja_erp", pl).execute()
+                        return None
+                    except Exception as ex:
+                        return ex
+
+                err = _try_reg(payload)
+                if err is not None:
+                    err_s = _error_msg_from_supabase_exc(err)
+                    low = err_s.lower()
+                    if "p_moneda" in low or "p_monto_moneda" in low or "42883" in low:
+                        payload.pop("p_moneda", None)
+                        payload.pop("p_monto_moneda", None)
+                        err = _try_reg(payload)
+                        if err is None:
+                            st.warning(
+                                "Gasto guardado **sin** moneda nativa en BD. Ejecutá **`supabase/patch_028_mov_caja_moneda_nativa_y_correccion.sql`**."
+                            )
+                    if err is not None:
+                        err_s = _error_msg_from_supabase_exc(err)
+                        low = err_s.lower()
+                        if payload_cat and any(
+                            x in low for x in ("categoria_gasto", "p_categoria", "could not find", "42883", "42725")
+                        ):
+                            payload.pop("p_categoria_gasto", None)
+                            payload["p_concepto"] = f"[{cat_final}] {(desc or '').strip()}"
+                            err = _try_reg(payload)
+                            if err is None:
+                                st.warning(
+                                    "Se guardó **sin** columna de categoría. Ejecutá **`patch_025`** en Supabase."
+                                )
+                        if err is not None:
+                            st.error(_error_msg_from_supabase_exc(err))
+                if err is None:
                     st.success("Gasto registrado.")
                     _movi_ss_pop_keys(
                         "gasto_op_cat",
                         "gasto_op_cat_custom",
                         "gasto_op_desc",
-                        "gasto_op_monto",
+                        "gasto_op_m_bs",
+                        "gasto_op_tasa_bs",
+                        "gasto_op_m_ut",
+                        "gasto_op_m_usd",
                         "gasto_op_caja",
                         "gasto_op_ref",
                         "gasto_op_nota",
                     )
                     _movi_bump_form_nonce("gasto_op_form_nonce")
                     st.rerun()
-                except Exception as e:
-                    err = _error_msg_from_supabase_exc(e)
-                    low = err.lower()
-                    if payload_cat and any(
-                        x in low for x in ("categoria_gasto", "p_categoria", "could not find", "42883", "42725")
-                    ):
-                        payload.pop("p_categoria_gasto", None)
-                        payload["p_concepto"] = f"[{cat_final}] {(desc or '').strip()}"
-                        try:
-                            sb.rpc("registrar_movimiento_caja_erp", payload).execute()
-                            st.warning(
-                                "Se guardó el gasto **sin** columna de categoría en BD. La categoría quedó al inicio del **concepto**. "
-                                "Ejecutá **`supabase/patch_025_gastos_operativos.sql`** en Supabase para clasificar en reportes."
-                            )
-                            _movi_ss_pop_keys(
-                                "gasto_op_cat",
-                                "gasto_op_cat_custom",
-                                "gasto_op_desc",
-                                "gasto_op_monto",
-                                "gasto_op_caja",
-                                "gasto_op_ref",
-                                "gasto_op_nota",
-                            )
-                            _movi_bump_form_nonce("gasto_op_form_nonce")
-                            st.rerun()
-                        except Exception as e2:
-                            st.error(_error_msg_from_supabase_exc(e2))
-                    else:
-                        st.error(err)
 
     rows_eg, tiene_cat = _movi_fetch_egresos_caja_recientes(sb, limit=50)
+    editable = [
+        r
+        for r in rows_eg
+        if not r.get("venta_id") and not r.get("compra_id") and r.get("id")
+    ]
+    with st.expander("✏️ Corregir un egreso manual (monto o texto)", expanded=False):
+        st.caption(
+            "Solo movimientos **sin** venta ni compra ligada. Ajustá el **equivalente USD** del saldo y, si aplica, el **monto en moneda de la cuenta**. "
+            "Requiere **`patch_028`**."
+        )
+        if not editable:
+            st.info("No hay egresos editables en los últimos registros, o falta columna **id** en la consulta.")
+        else:
+            id_opts = [str(r["id"]) for r in editable]
+
+            def _fmt_ed(mid: str) -> str:
+                rr = next(x for x in editable if str(x.get("id")) == mid)
+                ts = str(rr.get("created_at") or "")[:19].replace("T", " ")
+                co = (rr.get("concepto") or "")[:42]
+                return f"{ts} — {co}"
+
+            pick = st.selectbox("Elegí el movimiento", options=id_opts, format_func=_fmt_ed, key="gasto_op_edit_pick")
+            er = next(x for x in editable if str(x.get("id")) == pick)
+            ecaja = cmap_full.get(str(er.get("caja_id") or ""), {})
+            emon = str(ecaja.get("moneda_cuenta") or "USD").strip().upper()
+            with st.form("f_gasto_op_corregir"):
+                nu = st.number_input(
+                    "Nuevo equivalente USD (obligatorio para saldo)",
+                    min_value=0.01,
+                    value=float(_round_money_2(er.get("monto_usd") or 0.01)),
+                    format="%.2f",
+                    key="gasto_op_edit_usd",
+                )
+                st.caption(f"Cuenta: **{emon}** · {_caja_etiqueta_lista(ecaja) if ecaja else '—'}")
+                upd_nat = st.checkbox(
+                    "Actualizar también monto en moneda nativa",
+                    value=bool(er.get("monto_moneda")),
+                    key="gasto_op_edit_upd_nat",
+                )
+                p_mon_e: str | None = None
+                p_mm_e: float | None = None
+                if upd_nat:
+                    if emon == "VES":
+                        cur_bs = float(er.get("monto_moneda") or 0) or 0.01
+                        nv = st.number_input("Monto en Bs", min_value=0.01, value=max(0.01, cur_bs), format="%.2f")
+                        p_mon_e, p_mm_e = "VES", float(nv)
+                    elif emon == "USDT":
+                        cur_ut = float(er.get("monto_moneda") or 0) or 0.0001
+                        nv = st.number_input("Monto en USDT", min_value=0.0001, value=max(0.0001, cur_ut), format="%.4f")
+                        p_mon_e, p_mm_e = "USDT", float(nv)
+                    else:
+                        nv = st.number_input(
+                            "Monto en USD",
+                            min_value=0.01,
+                            value=max(0.01, float(er.get("monto_moneda") or nu)),
+                            format="%.2f",
+                        )
+                        p_mon_e, p_mm_e = "USD", float(nv)
+                nc = st.text_input("Concepto", value=str(er.get("concepto") or ""), key="gasto_op_edit_conc")
+                nr = st.text_input("Referencia", value=str(er.get("referencia") or ""), key="gasto_op_edit_ref")
+                ncat = st.text_input(
+                    "Categoría (vacío = quitar categoría)",
+                    value=str(er.get("categoria_gasto") or ""),
+                    key="gasto_op_edit_cat",
+                )
+                if st.form_submit_button("Guardar corrección"):
+                    pl_e: dict[str, Any] = {
+                        "p_usuario_id": erp_uid,
+                        "p_movimiento_id": pick,
+                        "p_monto_usd": float(nu),
+                        "p_concepto": (nc or "").strip(),
+                        "p_referencia": (nr or "").strip(),
+                        "p_categoria_gasto": (ncat or "").strip() or None,
+                        "p_actualizar_moneda_nativa": bool(upd_nat),
+                    }
+                    if upd_nat and p_mon_e and p_mm_e is not None:
+                        pl_e["p_moneda"] = p_mon_e
+                        pl_e["p_monto_moneda"] = float(p_mm_e)
+                    try:
+                        sb.rpc("corregir_movimiento_caja_manual_erp", pl_e).execute()
+                        st.success("Movimiento actualizado.")
+                        st.rerun()
+                    except Exception as ex:
+                        st.error(
+                            f"{_error_msg_from_supabase_exc(ex)} · Si falla el RPC, ejecutá **`patch_028`** en Supabase."
+                        )
+
     if not tiene_cat:
         st.caption(
             "Para ver la columna **Categoría** en la tabla de abajo, aplicá **`patch_025_gastos_operativos.sql`** en Supabase."
         )
     if rows_eg:
-        cmap = {str(c["id"]): _caja_etiqueta_lista(c) for c in _cajas_fetch_rows(sb, solo_activas=False)}
         disp: list[dict[str, Any]] = []
         for r in rows_eg:
             cid_s = str(r.get("caja_id") or "")
             row_d: dict[str, Any] = {
                 "Fecha": str(r.get("created_at") or "")[:19].replace("T", " "),
-                "Caja": cmap.get(cid_s, cid_s[:8] + "…"),
-                "USD": float(r.get("monto_usd") or 0),
+                "Caja": cmap_lab.get(cid_s, cid_s[:8] + "…"),
+                "Monto": _gasto_op_fmt_monto_tabla(r, cmap_full),
                 "Concepto": r.get("concepto") or "",
             }
             if tiene_cat:

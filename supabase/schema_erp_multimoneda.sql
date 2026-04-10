@@ -802,6 +802,7 @@ GRANT EXECUTE ON FUNCTION public.crear_compra_erp(UUID, TEXT, TEXT, UUID, NUMERI
 -- -----------------------------------------------------------------------------
 DROP FUNCTION IF EXISTS public.registrar_movimiento_caja_erp(UUID, UUID, TEXT, NUMERIC, TEXT, TEXT, TEXT);
 DROP FUNCTION IF EXISTS public.registrar_movimiento_caja_erp(UUID, UUID, TEXT, NUMERIC, TEXT, TEXT, TEXT, TEXT);
+DROP FUNCTION IF EXISTS public.registrar_movimiento_caja_erp(UUID, UUID, TEXT, NUMERIC, TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC);
 CREATE OR REPLACE FUNCTION public.registrar_movimiento_caja_erp(
   p_usuario_id UUID,
   p_caja_id UUID,
@@ -810,7 +811,9 @@ CREATE OR REPLACE FUNCTION public.registrar_movimiento_caja_erp(
   p_concepto TEXT,
   p_referencia TEXT,
   p_nota_operacion TEXT DEFAULT NULL,
-  p_categoria_gasto TEXT DEFAULT NULL
+  p_categoria_gasto TEXT DEFAULT NULL,
+  p_moneda TEXT DEFAULT NULL,
+  p_monto_moneda NUMERIC DEFAULT NULL
 )
 RETURNS UUID
 LANGUAGE plpgsql
@@ -820,6 +823,8 @@ AS $$
 DECLARE
   v_id UUID;
   v_cat TEXT;
+  v_mon TEXT;
+  v_mm NUMERIC;
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM public.erp_users WHERE id = p_usuario_id AND activo = TRUE) THEN
     RAISE EXCEPTION 'Usuario ERP inválido o inactivo';
@@ -846,12 +851,27 @@ BEGIN
     v_cat := NULL;
   END IF;
 
+  v_mon := NULLIF(UPPER(TRIM(p_moneda)), '');
+  v_mm := p_monto_moneda;
+  IF v_mon IS NOT NULL THEN
+    IF v_mm IS NULL OR v_mm <= 0 THEN
+      RAISE EXCEPTION 'Si indicás moneda nativa, el monto en esa moneda debe ser > 0';
+    END IF;
+    IF v_mon NOT IN ('VES', 'USD', 'USDT') THEN
+      RAISE EXCEPTION 'moneda inválida (use VES, USD o USDT)';
+    END IF;
+  ELSE
+    v_mm := NULL;
+  END IF;
+
   INSERT INTO public.movimientos_caja (
-    caja_id, tipo, monto_usd, concepto, referencia, nota_operacion, venta_id, compra_id, usuario_id, categoria_gasto
+    caja_id, tipo, monto_usd, moneda, monto_moneda, concepto, referencia, nota_operacion, venta_id, compra_id, usuario_id, categoria_gasto
   ) VALUES (
     p_caja_id,
     p_tipo,
     p_monto_usd,
+    v_mon,
+    v_mm,
     TRIM(p_concepto),
     NULLIF(TRIM(p_referencia), ''),
     NULLIF(TRIM(p_nota_operacion), ''),
@@ -866,8 +886,8 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.registrar_movimiento_caja_erp(UUID, UUID, TEXT, NUMERIC, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.registrar_movimiento_caja_erp(UUID, UUID, TEXT, NUMERIC, TEXT, TEXT, TEXT, TEXT) TO service_role;
+REVOKE ALL ON FUNCTION public.registrar_movimiento_caja_erp(UUID, UUID, TEXT, NUMERIC, TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.registrar_movimiento_caja_erp(UUID, UUID, TEXT, NUMERIC, TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC) TO service_role;
 
 -- -----------------------------------------------------------------------------
 -- RPC: registrar cambio Bs → estable (tasa pactada + comparación opcional vs BCV/mercado).
