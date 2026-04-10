@@ -4554,13 +4554,34 @@ def _caja_map_por_id(sb: Client) -> dict[str, dict[str, Any]]:
     return {str(c["id"]): c for c in _cajas_fetch_rows(sb, solo_activas=False)}
 
 
+def _inferencia_tasas_flujo_caja(t: dict[str, Any] | None) -> tuple[float | None, float | None]:
+    """Bs/USD y USDT/USD del día operativo para estimar montos nativos si el movimiento no trajo monto_moneda."""
+    if not t:
+        return None, None
+    try:
+        tb = float(_tasa_bs_para_documento(t, usar_bcv=False))
+    except (ValueError, TypeError):
+        tb = float(_nf(t.get("tasa_bs")) or 0)
+    if tb <= 0:
+        tb = None
+    tu = float(_nf(t.get("tasa_usdt")) or 0)
+    if tu <= 0:
+        tu = None
+    return tb, tu
+
+
 def _movimiento_caja_flow_bucket_amount(
-    r: dict[str, Any], caja_by_id: dict[str, dict[str, Any]]
+    r: dict[str, Any],
+    caja_by_id: dict[str, dict[str, Any]],
+    *,
+    tasa_bs_inferencia: float | None = None,
+    tasa_usdt_inferencia: float | None = None,
 ) -> tuple[str, float]:
     """Clave de visualización (VES|USD|USDT|USD_equiv) y monto a sumar (nativo o equiv. USD legado)."""
     cid = str(r.get("caja_id") or "")
     cj = caja_by_id.get(cid) or {}
-    cmon = str(cj.get("moneda_cuenta") or "").strip().upper()
+    cmon_raw = str(cj.get("moneda_cuenta") or "").strip().upper()
+    cmon = "VES" if cmon_raw in ("VES", "BS") else cmon_raw
     rmon = str(r.get("moneda") or "").strip().upper()
     mm = r.get("monto_moneda")
     musd = float(r.get("monto_usd") or 0)
@@ -4574,14 +4595,24 @@ def _movimiento_caja_flow_bucket_amount(
             if disp not in ("VES", "USD", "USDT"):
                 disp = "USD"
             return disp, mmf
+    if cmon == "VES" and musd > 0 and tasa_bs_inferencia and tasa_bs_inferencia > 0:
+        return "VES", musd * float(tasa_bs_inferencia)
+    if cmon == "USDT" and musd > 0 and tasa_usdt_inferencia and tasa_usdt_inferencia > 0:
+        return "USDT", musd * float(tasa_usdt_inferencia)
     return "USD_equiv", musd
 
 
 def _flow_ingreso_egreso_por_moneda(
-    sb: Client, dsl: str, r_fut: str, caja_by_id: dict[str, dict[str, Any]]
+    sb: Client,
+    dsl: str,
+    r_fut: str,
+    caja_by_id: dict[str, dict[str, Any]],
+    *,
+    t: dict[str, Any] | None = None,
 ) -> tuple[dict[str, float], dict[str, float]]:
     ing: dict[str, float] = defaultdict(float)
     egr: dict[str, float] = defaultdict(float)
+    tb, tu = _inferencia_tasas_flujo_caja(t)
     try:
         m_all = (
             sb.table("movimientos_caja")
@@ -4591,7 +4622,9 @@ def _flow_ingreso_egreso_por_moneda(
             .execute()
         )
         for r in m_all.data or []:
-            k, amt = _movimiento_caja_flow_bucket_amount(r, caja_by_id)
+            k, amt = _movimiento_caja_flow_bucket_amount(
+                r, caja_by_id, tasa_bs_inferencia=tb, tasa_usdt_inferencia=tu
+            )
             if r.get("tipo") == "Ingreso":
                 ing[k] += amt
             elif r.get("tipo") == "Egreso":
@@ -4602,9 +4635,15 @@ def _flow_ingreso_egreso_por_moneda(
 
 
 def _gastos_op_por_categoria_multimoneda(
-    sb: Client, dsl: str, r_fut: str, caja_by_id: dict[str, dict[str, Any]]
+    sb: Client,
+    dsl: str,
+    r_fut: str,
+    caja_by_id: dict[str, dict[str, Any]],
+    *,
+    t: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, float]]:
     out: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    tb, tu = _inferencia_tasas_flujo_caja(t)
     try:
         mr = (
             sb.table("movimientos_caja")
@@ -4618,7 +4657,9 @@ def _gastos_op_por_categoria_multimoneda(
             cg = row.get("categoria_gasto")
             if cg is None or not str(cg).strip():
                 continue
-            k, amt = _movimiento_caja_flow_bucket_amount(row, caja_by_id)
+            k, amt = _movimiento_caja_flow_bucket_amount(
+                row, caja_by_id, tasa_bs_inferencia=tb, tasa_usdt_inferencia=tu
+            )
             out[str(cg).strip()][k] += amt
     except Exception:
         return {}
@@ -4752,7 +4793,9 @@ def render_dashboard_resumen_cuentas_flujo_y_detalle(
     st.markdown("##### Qué entró y qué salió de cajas (en el período)")
     st.caption(
         "Suma de **movimientos de caja** entre **Desde** y **Hasta**. "
-        "Cuando el movimiento guarda **moneda nativa** (Bs, US$, USDT), se muestra así; si es un registro viejo **solo** con equivalente en sistema, figura como **Equiv. USD**. "
+        "Cuando el movimiento guarda **moneda nativa** (Bs, US$, USDT), se muestra así. "
+        "Si falta en BD pero la **cuenta** es **VES** o **USDT**, el **Bs** o **USDT** se **estima** con las **tasas del día** cargadas en el ERP (no sustituye guardar `monto_moneda` con **patch_028**). "
+        "Si la cuenta es **USD** o no hay tasa, queda **Equiv. USD**. "
         "**Entró:** cobros, **ingreso por bitácora** (USD/USDT destino), etc. "
         "**Salió:** compras al contado, **gastos operativos**, **egreso VES por bitácora**, pagos CXP, traspasos, etc. "
         "**No** mostramos **ingresos − egresos** en una sola cifra: en cambios y traspasos el mismo valor figura como egreso en una cuenta e ingreso en otra."
@@ -4771,7 +4814,7 @@ def render_dashboard_resumen_cuentas_flujo_y_detalle(
         sum_out = sum(float(r.get("monto_usd") or 0) for r in rows_m if r.get("tipo") == "Egreso")
     except Exception:
         pass
-    ing_m, egr_m = _flow_ingreso_egreso_por_moneda(sb, dsl, r_fut, _cmap_dash)
+    ing_m, egr_m = _flow_ingreso_egreso_por_moneda(sb, dsl, r_fut, _cmap_dash, t=t)
     fx1, fx2 = st.columns(2)
     with fx1:
         st.markdown("**Ingresos a caja**")
@@ -4785,10 +4828,11 @@ def render_dashboard_resumen_cuentas_flujo_y_detalle(
     st.markdown("##### Qué se gastó (gastos operativos por categoría)")
     st.caption(
         "Solo egresos cargados en **Gastos operativos** con **categoría** (`categoria_gasto`; **`patch_025`**). "
-        "Con **`patch_028`** los nuevos registros guardan **moneda nativa**; los viejos solo muestran equivalente USD. "
+        "Con **`patch_028`** los nuevos registros guardan **moneda nativa**. "
+        "Los que quedaron sin `monto_moneda` pero salieron de cuenta **VES**/**USDT** muestran **Bs**/**USDT** **estimados** con la tasa del día (revisá que la caja tenga **moneda de cuenta** bien definida). "
         "Otros egresos (p. ej. compras al contado) no aparecen acá."
     )
-    by_cat_mm = _gastos_op_por_categoria_multimoneda(sb, dsl, r_fut, _cmap_dash)
+    by_cat_mm = _gastos_op_por_categoria_multimoneda(sb, dsl, r_fut, _cmap_dash, t=t)
     by_cat_usd_sort: dict[str, float] = {}
     try:
         mr_s = (
@@ -4913,8 +4957,8 @@ def _pdf_resumen_ejecutivo_bytes(
         )
 
     cmap_pdf = _caja_map_por_id(sb)
-    ing_m_pdf, egr_m_pdf = _flow_ingreso_egreso_por_moneda(sb, dsl, r_fut, cmap_pdf)
-    by_cat_mm_pdf = _gastos_op_por_categoria_multimoneda(sb, dsl, r_fut, cmap_pdf)
+    ing_m_pdf, egr_m_pdf = _flow_ingreso_egreso_por_moneda(sb, dsl, r_fut, cmap_pdf, t=t)
+    by_cat_mm_pdf = _gastos_op_por_categoria_multimoneda(sb, dsl, r_fut, cmap_pdf, t=t)
 
     sum_in = sum_out = 0.0
     try:
@@ -5903,7 +5947,7 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
     total_salidas_op_usd = compras_period_usd + gastos_op_period_usd
 
     _cmap_kpi = _caja_map_por_id(sb)
-    go_mm_kpi = _gastos_op_por_categoria_multimoneda(sb, dsl_mov, r_fut, _cmap_kpi)
+    go_mm_kpi = _gastos_op_por_categoria_multimoneda(sb, dsl_mov, r_fut, _cmap_kpi, t=t)
     go_ag_kpi = _gastos_op_totales_por_moneda(go_mm_kpi)
     go_kpi_main, go_kpi_foot = _fmt_multimon_bucket_line(go_ag_kpi, legacy_suffix="registros viejos")
     _go_kpi_sub_bits: list[str] = []
@@ -9115,7 +9159,18 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
         desc = st.text_input("Descripción / detalle", key="gasto_op_desc", placeholder="Ej.: Alquiler enero local principal")
         cid = st.selectbox("Caja de donde sale el dinero", options=caja_ids, format_func=caja_fmt, key="gasto_op_caja")
         acc = cmap_full.get(str(cid), {}) or {}
-        mon_cuenta = str(acc.get("moneda_cuenta") or "USD").strip().upper()
+        _mc_raw = acc.get("moneda_cuenta")
+        if _mc_raw is None or not str(_mc_raw).strip():
+            st.warning(
+                "Esta caja **no tiene moneda de cuenta** definida en **Cajas y bancos**. "
+                "El formulario tratará la cuenta como **USD** y **no** guardará el monto en **bolívares** en el movimiento. "
+                "Editá la caja y elegí **VES**, **USD** o **USDT**."
+            )
+        mon_cuenta = str(_mc_raw or "USD").strip().upper()
+        if mon_cuenta not in ("VES", "USD", "USDT"):
+            st.warning(
+                f"Moneda de cuenta **{mon_cuenta}** no estándar; usá **VES**, **USD** o **USDT** en la ficha de la caja para cobros y gastos coherentes."
+            )
         monto_usd_calc = 0.01
         p_mon: str | None = None
         p_mm: float | None = None
@@ -9194,13 +9249,14 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
                 if err is not None:
                     err_s = _error_msg_from_supabase_exc(err)
                     low = err_s.lower()
-                    if "p_moneda" in low or "p_monto_moneda" in low or "42883" in low:
+                    if "p_moneda" in low or "p_monto_moneda" in low:
                         payload.pop("p_moneda", None)
                         payload.pop("p_monto_moneda", None)
                         err = _try_reg(payload)
                         if err is None:
                             st.warning(
-                                "Gasto guardado **sin** moneda nativa en BD. Ejecutá **`supabase/patch_028_mov_caja_moneda_nativa_y_correccion.sql`**."
+                                "Gasto guardado **sin** moneda nativa en BD. Ejecutá **`supabase/patch_028_mov_caja_moneda_nativa_y_correccion.sql`** "
+                                "o revisá que la firma del RPC en Supabase incluya `p_moneda` y `p_monto_moneda`."
                             )
                     if err is not None:
                         err_s = _error_msg_from_supabase_exc(err)
