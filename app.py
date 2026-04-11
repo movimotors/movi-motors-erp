@@ -663,18 +663,42 @@ def _movi_ui_theme_css_block() -> str:
     margin-bottom: 0.85rem;
     background: rgba(0, 0, 0, 0.2);
   }}
+  div.movi-mod-nav-outer [data-testid="stHorizontalBlock"] {{
+    flex-wrap: nowrap !important;
+    align-items: stretch !important;
+    overflow-x: auto !important;
+    gap: 0.35rem !important;
+    padding-bottom: 2px;
+    scrollbar-width: thin;
+  }}
+  div.movi-mod-nav-outer [data-testid="column"] {{
+    flex-shrink: 0 !important;
+    min-width: 0 !important;
+  }}
   div.movi-mod-nav-outer [data-testid="column"] button {{
     width: 100%;
+    min-height: 2.75rem !important;
+  }}
+  div.movi-mod-nav-outer button[kind="primary"],
+  div.movi-mod-nav-outer button[kind="secondary"] {{
+    white-space: nowrap !important;
+    line-height: 1.2 !important;
+    font-size: 0.88rem !important;
+  }}
+  div.movi-mod-nav-outer button[kind="primary"] p,
+  div.movi-mod-nav-outer button[kind="secondary"] p {{
+    white-space: nowrap !important;
   }}
   div.movi-mod-nav-outer button[kind="secondary"] {{
     background: rgba(15, 23, 42, 0.55) !important;
     border: 1px solid rgba(94, 234, 212, 0.45) !important;
     color: {lbl} !important;
-    font-size: 0.98rem !important;
     font-weight: 600 !important;
     border-radius: 12px !important;
-    padding-top: 0.55rem !important;
-    padding-bottom: 0.55rem !important;
+    padding-left: 0.65rem !important;
+    padding-right: 0.65rem !important;
+    padding-top: 0.5rem !important;
+    padding-bottom: 0.5rem !important;
   }}
   div.movi-mod-nav-outer button[kind="secondary"]:hover {{
     border-color: rgba(34, 211, 238, 0.8) !important;
@@ -685,10 +709,11 @@ def _movi_ui_theme_css_block() -> str:
     color: #0f172a !important;
     border: none !important;
     font-weight: 800 !important;
-    font-size: 0.98rem !important;
     border-radius: 12px !important;
-    padding-top: 0.55rem !important;
-    padding-bottom: 0.55rem !important;
+    padding-left: 0.65rem !important;
+    padding-right: 0.65rem !important;
+    padding-top: 0.5rem !important;
+    padding-bottom: 0.5rem !important;
     box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12) inset;
   }}
   div.movi-mod-nav-outer button[kind="primary"]:hover {{
@@ -1264,6 +1289,11 @@ def movi_nav_options_for_role(rol: str) -> list[str]:
     return opts
 
 
+def _movi_nav_column_weights(opts: list[str]) -> list[int]:
+    """Pesos para st.columns: más ancho en etiquetas largas → una sola línea sin romper palabras."""
+    return [max(12, len(opt) + 10) for opt in opts]
+
+
 def render_movi_main_module_nav(opts: list[str]) -> None:
     """Barra horizontal de módulos (píldoras con icono); estilo acorde al panel principal."""
     if len(opts) <= 1:
@@ -1272,7 +1302,7 @@ def render_movi_main_module_nav(opts: list[str]) -> None:
     if st.session_state.get("movi_mod") not in opts:
         st.session_state["movi_mod"] = opts[0]
     st.markdown('<div class="movi-mod-nav-outer">', unsafe_allow_html=True)
-    cols = st.columns(len(opts))
+    cols = st.columns(_movi_nav_column_weights(opts))
     for i, opt in enumerate(opts):
         ic = MOVI_MOD_ICONS.get(opt, "▪")
         active = st.session_state["movi_mod"] == opt
