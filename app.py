@@ -4637,6 +4637,106 @@ def _gastos_op_por_categoria_multimoneda(
     return {c: dict(v) for c, v in out.items()}
 
 
+def _gasto_op_bucket_solo_monto_cargado(
+    row: dict[str, Any], caja_by_id: dict[str, dict[str, Any]]
+) -> tuple[str | None, float | None]:
+    """Solo si en la fila hay monto_moneda > 0: bucket VES/USD/USDT y monto (sin tasas ni monto_usd)."""
+    mm = row.get("monto_moneda")
+    if mm is None or str(mm).strip() == "":
+        return None, None
+    try:
+        mmf = float(mm)
+    except (TypeError, ValueError):
+        return None, None
+    if mmf <= 0:
+        return None, None
+    cid = str(row.get("caja_id") or "")
+    cj = caja_by_id.get(cid) or {}
+    cmon_raw = str(cj.get("moneda_cuenta") or "").strip().upper()
+    cmon = "VES" if cmon_raw in ("VES", "BS") else cmon_raw
+    rmon = str(row.get("moneda") or "").strip().upper()
+    bk = rmon or cmon or "USD"
+    if bk not in ("VES", "USD", "USDT"):
+        bk = "USD"
+    return bk, mmf
+
+
+def _gastos_op_por_categoria_solo_cargado(
+    sb: Client, dsl: str, r_fut: str, caja_by_id: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, float]]:
+    """Gastos con categoría: suma solo montos guardados en monto_moneda (por moneda)."""
+    out: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    try:
+        mr = (
+            sb.table("movimientos_caja")
+            .select("categoria_gasto,moneda,monto_moneda,caja_id")
+            .gte("created_at", dsl)
+            .lte("created_at", r_fut)
+            .eq("tipo", "Egreso")
+            .execute()
+        )
+        for row in mr.data or []:
+            cg = row.get("categoria_gasto")
+            if cg is None or not str(cg).strip():
+                continue
+            bk, amt = _gasto_op_bucket_solo_monto_cargado(row, caja_by_id)
+            if bk is None or amt is None:
+                continue
+            out[str(cg).strip()][bk] += amt
+    except Exception:
+        return {}
+    return {c: dict(v) for c, v in out.items()}
+
+
+def _gastos_op_totales_solo_cargado(
+    sb: Client, dsl: str, r_fut: str, caja_by_id: dict[str, dict[str, Any]]
+) -> tuple[dict[str, float], int, int]:
+    """Totales VES/USD/USDT sumando solo monto_moneda; (n_mov_con_monto_moneda, n_mov_categoría_sin_monto_moneda)."""
+    tot: dict[str, float] = defaultdict(float)
+    n_ok = 0
+    n_sin = 0
+    try:
+        mr = (
+            sb.table("movimientos_caja")
+            .select("categoria_gasto,moneda,monto_moneda,caja_id")
+            .gte("created_at", dsl)
+            .lte("created_at", r_fut)
+            .eq("tipo", "Egreso")
+            .execute()
+        )
+        for row in mr.data or []:
+            cg = row.get("categoria_gasto")
+            if cg is None or not str(cg).strip():
+                continue
+            bk, amt = _gasto_op_bucket_solo_monto_cargado(row, caja_by_id)
+            if bk is None or amt is None:
+                n_sin += 1
+                continue
+            n_ok += 1
+            tot[bk] += amt
+    except Exception:
+        pass
+    return dict(tot), n_ok, n_sin
+
+
+def _fmt_linea_gastos_solo_cargados(tot: dict[str, float]) -> str:
+    parts: list[str] = []
+    for bk, pref in (("VES", "Bs"), ("USD", "US$"), ("USDT", "USDT")):
+        v = float(tot.get(bk) or 0)
+        if abs(v) >= 0.005:
+            parts.append(f"{pref} {v:,.2f}")
+    return " · ".join(parts) if parts else ""
+
+
+def _tarjeta_gasto_cat_solo_cargados(cat: str, sub: dict[str, float]) -> None:
+    lab = cat if len(cat) <= 44 else cat[:41] + "…"
+    main = _fmt_linea_gastos_solo_cargados(sub)
+    if not main:
+        _dash_mercado_card(lab, "—", foot="Sin monto en moneda guardado en BD")
+    else:
+        _dash_mercado_card(lab, main, foot="Suma de lo cargado (monto_moneda)")
+
+
 def _fmt_dash_bucket_label(bk: str) -> str:
     return {
         "VES": "Bs",
@@ -4806,12 +4906,13 @@ def render_dashboard_resumen_cuentas_flujo_y_detalle(
 
     st.markdown("##### Qué se gastó (gastos operativos por categoría)")
     st.caption(
-        "Solo egresos cargados en **Gastos operativos** con **categoría** (`categoria_gasto`; **`patch_025`**). "
-        "Con **`patch_028`** los nuevos registros pueden guardar **moneda nativa** en BD. "
-        "Sin `monto_moneda`, verás solo **equiv. USD** (`monto_usd`); **no** inferimos Bs desde tasas en este panel. "
-        "Otros egresos (p. ej. compras al contado) no aparecen acá."
+        "Solo egresos con **categoría** (**`patch_025`**). "
+        "Aquí se **suman solo los montos que están guardados en BD** (`monto_moneda` por moneda: Bs, US$, USDT). "
+        "**No** se convierte con tasas: si falta `monto_moneda`, la tarjeta muestra **—** hasta que corrijas el movimiento. "
+        "Otros egresos (compras al contado, etc.) no entran."
     )
     by_cat_mm = _gastos_op_por_categoria_multimoneda(sb, dsl, r_fut, _cmap_dash)
+    by_cat_solo = _gastos_op_por_categoria_solo_cargado(sb, dsl, r_fut, _cmap_dash)
     by_cat_usd_sort: dict[str, float] = {}
     try:
         mr_s = (
@@ -4842,8 +4943,8 @@ def render_dashboard_resumen_cuentas_flujo_y_detalle(
             for j in range(3):
                 with cols[j]:
                     if j < len(chunk):
-                        cat, subd = chunk[j]
-                        _tarjeta_gasto_cat_multimon(cat, subd)
+                        cat, _ = chunk[j]
+                        _tarjeta_gasto_cat_solo_cargados(cat, by_cat_solo.get(cat, {}))
 
     st.markdown("##### Qué se compró (compras a proveedores en el período)")
     st.caption("Suma en **USD** de **compras** registradas en el rango, agrupada por **proveedor** (mercancía / inventario).")
@@ -4937,7 +5038,9 @@ def _pdf_resumen_ejecutivo_bytes(
 
     cmap_pdf = _caja_map_por_id(sb)
     ing_m_pdf, egr_m_pdf = _flow_ingreso_egreso_por_moneda(sb, dsl, r_fut, cmap_pdf)
-    by_cat_mm_pdf = _gastos_op_por_categoria_multimoneda(sb, dsl, r_fut, cmap_pdf)
+    by_cat_solo_pdf = _gastos_op_por_categoria_solo_cargado(sb, dsl, r_fut, cmap_pdf)
+    go_pdf_tot, _, _ = _gastos_op_totales_solo_cargado(sb, dsl, r_fut, cmap_pdf)
+    _gop_pdf_txt = _fmt_linea_gastos_solo_cargados(go_pdf_tot) or "—"
 
     sum_in = sum_out = 0.0
     try:
@@ -4983,22 +5086,10 @@ def _pdf_resumen_ejecutivo_bytes(
         pass
     rows_gasto: list[list[str]] = []
     for cat, usdtot in sorted(by_cat.items(), key=lambda x: -x[1])[:20]:
-        sub = by_cat_mm_pdf.get(cat, {})
-        parts: list[str] = []
-        for bk in ("VES", "USD", "USDT"):
-            v = float(sub.get(bk) or 0)
-            if abs(v) >= 0.005:
-                parts.append(f"{_fmt_dash_bucket_label(bk)} {_round_money_2(v):,.2f}")
-        v_vm = float(sub.get("VES_MOTOR_USD") or 0)
-        if abs(v_vm) >= 0.005:
-            parts.append(f"VES equiv. US$ {_round_money_2(v_vm):,.2f}")
-        v_ut = float(sub.get("USDT_MOTOR_USD") or 0)
-        if abs(v_ut) >= 0.005:
-            parts.append(f"USDT equiv. US$ {_round_money_2(v_ut):,.2f}")
-        ueq = float(sub.get("USD_equiv") or 0)
-        if abs(ueq) >= 0.005:
-            parts.append(f"Equiv. USD {_round_money_2(ueq):,.2f}")
-        det = " · ".join(parts) if parts else f"US$ {_round_money_2(usdtot):,.2f}"
+        sub_solo = by_cat_solo_pdf.get(cat, {})
+        det = _fmt_linea_gastos_solo_cargados(sub_solo)
+        if not det:
+            det = "— (sin monto en moneda en BD)"
         rows_gasto.append([xml_esc(cat), xml_esc(det)])
 
     by_prov: dict[str, float] = {}
@@ -5119,10 +5210,12 @@ def _pdf_resumen_ejecutivo_bytes(
         ["SKU activos", str(int(n_sku))],
         ["Liquidez total (USD equiv.)", f"{liquidez_total_usd:,.2f}"],
         ["Compras a proveedores (USD)", f"{compras_periodo_usd:,.2f}"],
-        ["Gastos operativos categorizados (USD)", f"{gastos_op_periodo_usd:,.2f}"],
-        ["Total salidas (compras + gastos op.)", f"{total_salidas_usd:,.2f}"],
+        ["Gastos operativos (suma monto_moneda en BD)", _gop_pdf_txt],
+        ["Total salidas motor (compras USD + Σ gastos monto_usd)", f"{total_salidas_usd:,.2f}"],
     ]
-    story.append(_tbl([[xml_esc(a), b] for a, b in kpi_data], ["Concepto", "USD"], [tw * 0.62, tw * 0.38]))
+    story.append(
+        _tbl([[xml_esc(a), xml_esc(str(b))] for a, b in kpi_data], ["Concepto", "Valor"], [tw * 0.62, tw * 0.38])
+    )
     story.append(Spacer(1, 4 * mm))
 
     if t:
@@ -5932,15 +6025,18 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
     total_salidas_op_usd = compras_period_usd + gastos_op_period_usd
 
     _cmap_kpi = _caja_map_por_id(sb)
-    go_mm_kpi = _gastos_op_por_categoria_multimoneda(sb, dsl_mov, r_fut, _cmap_kpi)
-    go_ag_kpi = _gastos_op_totales_por_moneda(go_mm_kpi)
-    go_kpi_main, go_kpi_foot = _fmt_multimon_bucket_line(go_ag_kpi, legacy_suffix="otros")
+    go_tot_carg, n_go_moneda, n_go_sin_moneda = _gastos_op_totales_solo_cargado(
+        sb, dsl_mov, r_fut, _cmap_kpi
+    )
+    go_kpi_main = _fmt_linea_gastos_solo_cargados(go_tot_carg) or "—"
     _go_kpi_sub_bits: list[str] = []
-    if go_kpi_foot:
-        _go_kpi_sub_bits.append(go_kpi_foot)
     if n_gastos_op_movs:
-        _go_kpi_sub_bits.append(f"{n_gastos_op_movs} mov. con categoría")
-    else:
+        _go_kpi_sub_bits.append(f"{n_gastos_op_movs} gasto(s) con categoría en el período")
+    if n_go_moneda:
+        _go_kpi_sub_bits.append(f"{n_go_moneda} con monto en moneda guardado (suma arriba)")
+    if n_go_sin_moneda and n_gastos_op_movs:
+        _go_kpi_sub_bits.append(f"{n_go_sin_moneda} sin monto en moneda en BD (no sumados)")
+    if not n_gastos_op_movs:
         _go_kpi_sub_bits.append("Registrá en Gastos operativos")
     go_kpi_sub = " · ".join(_go_kpi_sub_bits) if _go_kpi_sub_bits else None
 
@@ -6036,9 +6132,8 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
 
         st.markdown("##### Compras, gastos operativos y flujo (mismo período)")
         st.caption(
-            "**Gastos operativos** = egresos de caja con **categoría** (módulo **Gastos operativos**; requiere **`patch_025`** en Supabase). "
-            "Si no aplicaste el patch o no categorizás, aquí puede figurar **0** aunque haya otros egresos. "
-            "**Ventas** y **salidas** se muestran por separado; no se restan en un solo número (mezclan conceptos distintos y otros cobros/egresos no entran acá)."
+            "**Gastos operativos:** suma **solo** lo que está guardado en **`monto_moneda`** (Bs, US$, USDT) en cada movimiento con categoría — **sin** convertir con tasas. "
+            "Si un gasto no tiene ese dato, **no** entra en el total hasta que lo corrijas. **Compras** siguen en USD de documentos. Requiere **`patch_025`**."
         )
         s1, s2, s3 = st.columns(3)
         with s1:
@@ -6050,7 +6145,7 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
             )
         with s2:
             _dash_kpi_card(
-                "Gastos operativos",
+                "Gastos operativos (lo cargado en BD)",
                 go_kpi_main,
                 None,
                 go_kpi_sub,
@@ -6063,7 +6158,7 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
                 "Compras + gastos op. (periodo)",
                 _total_kpi_val,
                 None,
-                "Compras en USD (documentos); gastos con moneda de cuenta o monto nativo en BD.",
+                "Compras en USD; gastos operativos = suma de `monto_moneda` por moneda (sin tasas).",
             )
 
         st.markdown("##### Seguimiento: Bs → USD / USDT (bitácora de tesorería)")
@@ -9283,13 +9378,18 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
                     _movi_bump_form_nonce("gasto_op_form_nonce")
                     st.rerun()
 
-    rows_eg, tiene_cat = _movi_fetch_egresos_caja_recientes(sb, limit=50)
+    rows_eg, tiene_cat = _movi_fetch_egresos_caja_recientes(sb, limit=200)
     editable = [
         r
         for r in rows_eg
         if not r.get("venta_id") and not r.get("compra_id") and r.get("id")
     ]
     with st.expander("✏️ Corregir un egreso manual (monto o texto)", expanded=False):
+        _flash_corr = st.session_state.pop("flash_gasto_op_correccion", None)
+        if isinstance(_flash_corr, dict) and _flash_corr.get("ok"):
+            st.success(str(_flash_corr.get("msg") or "Cambios guardados."))
+        elif isinstance(_flash_corr, dict) and not _flash_corr.get("ok"):
+            st.error(str(_flash_corr.get("msg") or "No se pudo guardar."))
         st.caption(
             "Solo movimientos **sin** venta ni compra ligada. "
             "En cuentas **VES** / **USDT** cargás el **monto en la moneda del banco**; el ERP calcula el **equiv. USD** (`monto_usd`) que usa el **motor de saldos** (igual que al dar de alta un gasto). "
@@ -9308,13 +9408,14 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
 
             pick = st.selectbox("Elegí el movimiento", options=id_opts, format_func=_fmt_ed, key="gasto_op_edit_pick")
             er = next(x for x in editable if str(x.get("id")) == pick)
+            _fk = str(pick).replace("-", "")[:32]
             ecaja = cmap_full.get(str(er.get("caja_id") or ""), {})
             emon_raw = str(ecaja.get("moneda_cuenta") or "USD").strip().upper()
             emon = "VES" if emon_raw in ("VES", "BS") else emon_raw
             _musd_er = float(er.get("monto_usd") or 0.01)
             _mm_er = er.get("monto_moneda")
             _mm_f = float(_mm_er) if _mm_er is not None and str(_mm_er).strip() != "" else 0.0
-            with st.form("f_gasto_op_corregir"):
+            with st.form(f"f_gasto_op_corregir_{_fk}"):
                 st.markdown(f"**Cuenta:** {emon} · {_caja_etiqueta_lista(ecaja) if ecaja else '—'}")
                 if emon == "VES" and _mm_f <= 0:
                     st.warning(
@@ -9340,14 +9441,14 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
                         min_value=0.01,
                         value=float(_round_money_2(_sug_bs)),
                         format="%.2f",
-                        key="gasto_op_edit_bs",
+                        key=f"gasto_op_edit_bs_{_fk}",
                     )
                     tasa_bs_in = st.number_input(
                         "Tasa Bs por 1 USD (para calcular el equiv. interno `monto_usd`)",
                         min_value=0.01,
                         value=float(_tb0),
                         format="%.4f",
-                        key="gasto_op_edit_tasa_bs",
+                        key=f"gasto_op_edit_tasa_bs_{_fk}",
                         help="Mismo criterio que al registrar un gasto en Bs: Bs ÷ esta tasa = valor que guarda el motor de saldos en USD.",
                     )
                     if float(tasa_bs_in) <= 0:
@@ -9370,14 +9471,14 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
                         min_value=0.0001,
                         value=float(_round_money_2(_sug_ut)),
                         format="%.4f",
-                        key="gasto_op_edit_ut",
+                        key=f"gasto_op_edit_ut_{_fk}",
                     )
                     t_ut_in = st.number_input(
                         "Tasa USDT por 1 USD",
                         min_value=0.0000001,
                         value=float(t_ut0),
                         format="%.6f",
-                        key="gasto_op_edit_tasa_ut",
+                        key=f"gasto_op_edit_tasa_ut_{_fk}",
                     )
                     if float(t_ut_in) <= 0:
                         nu = _musd_er
@@ -9395,24 +9496,28 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
                         min_value=0.01,
                         value=float(_round_money_2(_musd_er)),
                         format="%.2f",
-                        key="gasto_op_edit_usd",
+                        key=f"gasto_op_edit_usd_{_fk}",
                     )
                     upd_nat = st.checkbox(
                         "Guardar también en columnas moneda / monto_moneda (USD)",
                         value=True,
-                        key="gasto_op_edit_upd_nat",
+                        key=f"gasto_op_edit_upd_nat_{_fk}",
                     )
                     if upd_nat:
                         p_mon_e, p_mm_e = "USD", float(nu)
-                nc = st.text_input("Concepto", value=str(er.get("concepto") or ""), key="gasto_op_edit_conc")
-                nr = st.text_input("Referencia", value=str(er.get("referencia") or ""), key="gasto_op_edit_ref")
+                nc = st.text_input("Concepto", value=str(er.get("concepto") or ""), key=f"gasto_op_edit_conc_{_fk}")
+                nr = st.text_input("Referencia", value=str(er.get("referencia") or ""), key=f"gasto_op_edit_ref_{_fk}")
                 ncat = st.text_input(
                     "Categoría (vacío = quitar categoría)",
                     value=str(er.get("categoria_gasto") or ""),
-                    key="gasto_op_edit_cat",
+                    key=f"gasto_op_edit_cat_{_fk}",
                 )
                 if st.form_submit_button("Guardar corrección"):
-                    if nu <= 0:
+                    if not (erp_uid or "").strip():
+                        st.error("Sesión sin usuario ERP; no se puede guardar.")
+                    elif not (nc or "").strip():
+                        st.error("El **concepto** no puede quedar vacío (lo exige la base de datos).")
+                    elif nu <= 0:
                         st.error("El equivalente USD calculado debe ser mayor que cero (revisá monto y tasa).")
                     else:
                         _rpc_mon = (p_mon_e or None) if upd_nat else None
@@ -9430,15 +9535,18 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
                         }
                         try:
                             sb.rpc("corregir_movimiento_caja_manual_erp", pl_e).execute()
-                            st.success("Movimiento actualizado.")
+                            st.session_state["flash_gasto_op_correccion"] = {
+                                "ok": True,
+                                "msg": "Movimiento actualizado y guardado en base de datos.",
+                            }
                             st.rerun()
                         except Exception as ex:
                             _em = _error_msg_from_supabase_exc(ex)
-                            st.error(
-                                f"{_em} · Si dice que **no encuentra la función** en el schema cache, ejecutá en Supabase "
-                                f"**`supabase/patch_029_corregir_movimiento_fn_recreate.sql`** (recrea el RPC y avisa a PostgREST). "
-                                f"También podés **Reload schema** en Ajustes del proyecto → API."
-                            )
+                            st.session_state["flash_gasto_op_correccion"] = {
+                                "ok": False,
+                                "msg": f"{_em} · Si falta el RPC: **`patch_029_corregir_movimiento_fn_recreate.sql`** en Supabase y **Reload schema** (API).",
+                            }
+                            st.rerun()
 
     if not tiene_cat:
         st.caption(
