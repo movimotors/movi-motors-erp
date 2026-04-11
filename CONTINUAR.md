@@ -7,6 +7,11 @@
 
 En Streamlit Cloud, los logs mostraban que la app clona **`erp2movi`**. Por eso, para que lo que ves en local sea igual a la nube, hay que hacer `push` a **`movimotors/erp2movi`**.
 
+### Último cambio en repo (abril 2026)
+
+- **Refactor Reportes:** el módulo **Reportes** quedó en `movi/modules/reportes/` (pestañas en `tab_*.py`, orquestación en `layout.py`, dependencias en `deps.py`). `app.py` solo delega con `render_module_reportes` + `ReportesModuleDeps` (mismo patrón que Cajas).
+- **Push hecho** a **`erp2movi/main`** y **`origin/main`** (commit `d4ef5a7` en adelante). Si la URL `.streamlit.app` no refleja el cambio: **Manage app → Reboot / Redeploy**.
+
 ### Feature reciente: fotos por producto + catálogo imprimible
 
 - **Código**: agregado módulo **`Catálogo`** en `app.py`
@@ -24,6 +29,19 @@ En Streamlit Cloud, los logs mostraban que la app clona **`erp2movi`**. Por eso,
 bucket = "movi-productos"
 ```
 
+### Checklist Secrets (Streamlit Cloud)
+
+En **Settings → Secrets** de la app, replicar lo que tenés en local (ver `.streamlit/secrets.toml.example`). Mínimo:
+
+| Bloque | Qué va | Notas |
+|--------|--------|--------|
+| `[connections.supabase]` | `SUPABASE_URL`, `SUPABASE_KEY` | La clave debe ser **service_role** (como indica el propio `app.py`). |
+| `[auth]` (opcional) | `SESSION_SIGNING_KEY` | Si no está, la app puede derivar la firma de la clave de Supabase. |
+| `[catalogo]` (opcional) | `bucket`, `storage_fotos` / `enabled` | Fotos en Storage; el HTML del catálogo puede seguir sin fotos en nube si apagás subida. |
+| `[auto_backup]` (opcional) | `enabled`, `storage_bucket`, `retain_days` | Respaldo automático; requiere bucket y tabla `erp_kv` según patches del proyecto. |
+
+Tras editar Secrets, Streamlit suele **reiniciar** la app sola; si no, **Reboot** manual.
+
 ### Después de cambiar código (nube al día)
 
 1. **Push** al repositorio que Streamlit Cloud tiene conectado (suele ser **`erp2movi`**; si solo empujás a **`movi-motors-erp`**, la URL `.streamlit.app` no verá esos commits hasta que empujes al otro remoto o cambies el repo en Cloud).
@@ -31,12 +49,13 @@ bucket = "movi-productos"
 
 ### Qué falta / próximos pasos
 
-1) Asegurar que **Streamlit Cloud** esté desplegando desde `movimotors/erp2movi` y que tenga los **Secrets** correctos.
-2) Subir el código al repo **`movimotors/erp2movi`** (si aún no está):
+1) En Streamlit Cloud: confirmar que el repo conectado sea **`movimotors/erp2movi`** y que **Secrets** coincidan con la checklist de arriba.
+2) Si hacés cambios nuevos y querés subirlos:
 
 ```powershell
 cd "c:\Proyectos IA\Movi"
 git remote -v
+git push origin main
 git push erp2movi main
 ```
 
@@ -52,4 +71,3 @@ Si aparece `Could not resolve host: github.com`, es un problema de red/DNS/proxy
 - probar otra red (hotspot),
 - revisar VPN/proxy,
 - reintentar el `git push`.
-
