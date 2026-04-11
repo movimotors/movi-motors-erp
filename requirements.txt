@@ -1,5 +1,5 @@
 streamlit>=1.31.0
-supabase>=2.4.0
+supabase>=2.7.4
 pandas>=2.0.0
 plotly>=5.18.0
 bcrypt>=4.0.0
@@ -7,5 +7,5 @@ extra-streamlit-components>=0.1.71
 openpyxl>=3.1.0
 reportlab>=4.0.0
 
-# Opcional (Streamlit docs): conexión st.connection + Supabase
+# Opcional (Streamlit docs): conexiÃ³n st.connection + Supabase
 # st-supabase-connection>=2.0.0

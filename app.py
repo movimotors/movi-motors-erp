@@ -541,20 +541,39 @@ def gate_user_login(sb: Client, cm: Any | None) -> dict[str, Any] | None:
 
 @st.cache_resource
 def get_supabase() -> Client:
-    import httpx
     from supabase import create_client
-    from supabase.lib.client_options import ClientOptions
 
     u = st.secrets["connections"]["supabase"]["SUPABASE_URL"]
     k = st.secrets["connections"]["supabase"]["SUPABASE_KEY"]
-    # Streamlit Cloud y Supabase: timeouts amplios; reintentos en movi.net_retry / KPIs.
-    # Usar .replace() desde defaults: ClientOptions(solo timeouts) puede romper .storage en Auth.
-    _timeout = httpx.Timeout(connect=20.0, read=180.0, write=60.0, pool=30.0)
-    _opts = ClientOptions().replace(
-        postgrest_client_timeout=_timeout,
-        storage_client_timeout=_timeout,
-    )
-    return create_client(str(u), str(k), options=_opts)
+    url, key = str(u), str(k)
+
+    def _client_sin_timeout_extra() -> Client:
+        return create_client(url, key)
+
+    # Timeouts largos Cloud <-> Supabase; la API de ClientOptions cambia entre supabase-py (p. ej. sin .replace).
+    try:
+        import httpx
+        from supabase.lib.client_options import ClientOptions
+
+        _timeout = httpx.Timeout(connect=20.0, read=180.0, write=60.0, pool=30.0)
+        _base = ClientOptions()
+        _replace = getattr(_base, "replace", None)
+        if callable(_replace):
+            _opts = _replace(
+                postgrest_client_timeout=_timeout,
+                storage_client_timeout=_timeout,
+            )
+        else:
+            from gotrue._sync.storage import SyncMemoryStorage
+
+            _opts = ClientOptions(
+                storage=SyncMemoryStorage(),
+                postgrest_client_timeout=_timeout,
+                storage_client_timeout=_timeout,
+            )
+        return create_client(url, key, options=_opts)
+    except Exception:
+        return _client_sin_timeout_extra()
 
 
 def latest_tasas(sb: Client) -> dict[str, Any] | None:
