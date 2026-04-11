@@ -645,6 +645,55 @@ def _movi_ui_theme_css_block() -> str:
   }}
   .stApp a {{ color: {link}; }}
   .stApp [data-testid="stHeader"] {{ background-color: transparent; }}
+  .main .block-container div[data-testid="stWidgetLabel"] p,
+  .main .block-container [data-baseweb="form-heading"] label {{
+    font-size: 1.08rem !important;
+    font-weight: 700 !important;
+    color: {dec1} !important;
+    letter-spacing: 0.03em;
+  }}
+  .main .block-container .stTabs [data-baseweb="tab"] {{
+    font-size: 1.06rem !important;
+    font-weight: 600 !important;
+  }}
+  div.movi-mod-nav-outer {{
+    border: 1px solid rgba(94, 234, 212, 0.38);
+    border-radius: 16px;
+    padding: 10px 12px 14px 12px;
+    margin-bottom: 0.85rem;
+    background: rgba(0, 0, 0, 0.2);
+  }}
+  div.movi-mod-nav-outer [data-testid="column"] button {{
+    width: 100%;
+  }}
+  div.movi-mod-nav-outer button[kind="secondary"] {{
+    background: rgba(15, 23, 42, 0.55) !important;
+    border: 1px solid rgba(94, 234, 212, 0.45) !important;
+    color: {lbl} !important;
+    font-size: 0.98rem !important;
+    font-weight: 600 !important;
+    border-radius: 12px !important;
+    padding-top: 0.55rem !important;
+    padding-bottom: 0.55rem !important;
+  }}
+  div.movi-mod-nav-outer button[kind="secondary"]:hover {{
+    border-color: rgba(34, 211, 238, 0.8) !important;
+    background: rgba(30, 41, 59, 0.9) !important;
+  }}
+  div.movi-mod-nav-outer button[kind="primary"] {{
+    background: linear-gradient(135deg, #5eead4 0%, #22d3ee 52%, #38bdf8 100%) !important;
+    color: #0f172a !important;
+    border: none !important;
+    font-weight: 800 !important;
+    font-size: 0.98rem !important;
+    border-radius: 12px !important;
+    padding-top: 0.55rem !important;
+    padding-bottom: 0.55rem !important;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12) inset;
+  }}
+  div.movi-mod-nav-outer button[kind="primary"]:hover {{
+    filter: brightness(1.06);
+  }}
 </style>
 """.format(
         **t
@@ -1179,6 +1228,66 @@ def role_can(rol: str, module: str) -> bool:
     if rol == "almacen":
         return module in {"inventario", "catalogo"}
     return False
+
+
+MOVI_MOD_ICONS: dict[str, str] = {
+    "Dashboard": "📊",
+    "Inventario": "📦",
+    "Ventas / CXC": "🧾",
+    "Compras / CXP": "📥",
+    "Cajas y bancos": "🏦",
+    "Gastos operativos": "💸",
+    "Reportes": "📈",
+    "Mantenimiento": "🛠️",
+}
+
+
+def movi_nav_options_for_role(rol: str) -> list[str]:
+    opts: list[str] = []
+    if role_can(rol, "dashboard"):
+        opts.append("Dashboard")
+    if role_can(rol, "inventario"):
+        opts.append("Inventario")
+    if role_can(rol, "ventas"):
+        opts.append("Ventas / CXC")
+    if role_can(rol, "compras"):
+        opts.append("Compras / CXP")
+    if role_can(rol, "cajas"):
+        opts.append("Cajas y bancos")
+        opts.append("Gastos operativos")
+    if role_can(rol, "reportes"):
+        opts.append("Reportes")
+    elif role_can(rol, "catalogo"):
+        opts.append("Reportes")
+    if rol == "superuser":
+        opts.append("Mantenimiento")
+    return opts
+
+
+def render_movi_main_module_nav(opts: list[str]) -> None:
+    """Barra horizontal de módulos (píldoras con icono); estilo acorde al panel principal."""
+    if len(opts) <= 1:
+        return
+    st.session_state.setdefault("movi_mod", opts[0])
+    if st.session_state.get("movi_mod") not in opts:
+        st.session_state["movi_mod"] = opts[0]
+    st.markdown('<div class="movi-mod-nav-outer">', unsafe_allow_html=True)
+    cols = st.columns(len(opts))
+    for i, opt in enumerate(opts):
+        ic = MOVI_MOD_ICONS.get(opt, "▪")
+        active = st.session_state["movi_mod"] == opt
+        key = f"movi_nav_{i}_{abs(hash(opt)) % 10_000_000}"
+        with cols[i]:
+            if st.button(
+                f"{ic} {opt}",
+                key=key,
+                type="primary" if active else "secondary",
+                use_container_width=True,
+            ):
+                if st.session_state["movi_mod"] != opt:
+                    st.session_state["movi_mod"] = opt
+                    st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def latest_tasas(sb: Client) -> dict[str, Any] | None:
@@ -5916,6 +6025,445 @@ def _dashboard_seccion_cambios_tesoreria(
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def _dashboard_kpis_periodo(sb: Client, d_a: date, d_b: date) -> dict[str, Any]:
+    """Ventas, margen, stock, liquidez, compras, gastos op. y bitácora en [d_a, d_b]."""
+    n_days = max(1, (d_b - d_a).days + 1)
+    d_prev_b = d_a - timedelta(days=1)
+    d_prev_a = d_prev_b - timedelta(days=n_days - 1)
+    r_fut = f"{d_b.isoformat()}T23:59:59"
+    rows_cambios_bitacora = _cambios_tesoreria_en_rango(sb, d_a, r_fut)
+    v_cur = (
+        sb.table("ventas")
+        .select("id, total_usd, fecha")
+        .gte("fecha", str(d_a))
+        .lte("fecha", r_fut)
+        .execute()
+    )
+    v_prev = (
+        sb.table("ventas")
+        .select("total_usd")
+        .gte("fecha", str(d_prev_a))
+        .lte("fecha", f"{d_prev_b.isoformat()}T23:59:59")
+        .execute()
+    )
+    df_vc = pd.DataFrame(v_cur.data or [])
+    ventas_usd = float(pd.to_numeric(df_vc["total_usd"], errors="coerce").fillna(0).sum()) if not df_vc.empty else 0.0
+    ventas_prev = float(
+        pd.to_numeric(pd.DataFrame(v_prev.data or [])["total_usd"], errors="coerce").fillna(0).sum()
+    ) if (v_prev.data or []) else 0.0
+    vids = [str(x["id"]) for x in (v_cur.data or [])]
+    margen_usd = 0.0
+    if vids:
+        det = (
+            sb.table("ventas_detalles")
+            .select("producto_id, cantidad, precio_unitario_usd")
+            .in_("venta_id", vids)
+            .execute()
+        )
+        det_rows = det.data or []
+        pmap = {
+            str(p["id"]): p
+            for p in (sb.table("productos").select("id, costo_usd").execute().data or [])
+        }
+        for row in det_rows:
+            pid = str(row["producto_id"])
+            costo = float(pmap.get(pid, {}).get("costo_usd") or 0)
+            cant = float(row["cantidad"])
+            pu = float(row["precio_unitario_usd"])
+            margen_usd += (pu - costo) * cant
+    vids_prev = [
+        str(x["id"])
+        for x in (
+            sb.table("ventas")
+            .select("id")
+            .gte("fecha", str(d_prev_a))
+            .lte("fecha", f"{d_prev_b.isoformat()}T23:59:59")
+            .execute()
+            .data
+            or []
+        )
+    ]
+    margen_prev = 0.0
+    if vids_prev:
+        detp = (
+            sb.table("ventas_detalles")
+            .select("producto_id, cantidad, precio_unitario_usd")
+            .in_("venta_id", vids_prev)
+            .execute()
+        )
+        pmap2 = {
+            str(p["id"]): p
+            for p in (sb.table("productos").select("id, costo_usd").execute().data or [])
+        }
+        for row in detp.data or []:
+            pid = str(row["producto_id"])
+            costo = float(pmap2.get(pid, {}).get("costo_usd") or 0)
+            cant = float(row["cantidad"])
+            pu = float(row["precio_unitario_usd"])
+            margen_prev += (pu - costo) * cant
+    prods = sb.table("productos").select("stock_actual, activo").eq("activo", True).execute()
+    unidades_stock = float(sum(float(p.get("stock_actual") or 0) for p in (prods.data or [])))
+    n_sku = len(prods.data or [])
+    try:
+        bal = sb.table("v_balance_consolidado_usd").select("total_usd").execute()
+        liquidez = float((bal.data or [{}])[0].get("total_usd") or 0)
+    except Exception:
+        liquidez = 0.0
+    dsl_mov = f"{d_a.isoformat()}T00:00:00"
+    try:
+        cr_p = sb.table("compras").select("total_usd").gte("fecha", str(d_a)).lte("fecha", r_fut).execute()
+        compras_period_usd = sum(float(x.get("total_usd") or 0) for x in (cr_p.data or []))
+    except Exception:
+        compras_period_usd = 0.0
+    gastos_op_period_usd = 0.0
+    n_gastos_op_movs = 0
+    try:
+        mr_go = (
+            sb.table("movimientos_caja")
+            .select("monto_usd,categoria_gasto")
+            .gte("created_at", dsl_mov)
+            .lte("created_at", r_fut)
+            .eq("tipo", "Egreso")
+            .execute()
+        )
+        for row in mr_go.data or []:
+            cg = row.get("categoria_gasto")
+            if cg is not None and str(cg).strip():
+                gastos_op_period_usd += float(row.get("monto_usd") or 0)
+                n_gastos_op_movs += 1
+    except Exception:
+        gastos_op_period_usd = 0.0
+        n_gastos_op_movs = 0
+    total_salidas_op_usd = compras_period_usd + gastos_op_period_usd
+    _cmap_kpi = _caja_map_por_id(sb)
+    go_tot_carg, n_go_moneda, n_go_sin_moneda = _gastos_op_totales_solo_cargado(sb, dsl_mov, r_fut, _cmap_kpi)
+    go_kpi_main = _fmt_linea_gastos_solo_cargados(go_tot_carg) or "—"
+    _go_kpi_sub_bits: list[str] = []
+    if n_gastos_op_movs:
+        _go_kpi_sub_bits.append(f"{n_gastos_op_movs} gasto(s) con categoría en el período")
+    if n_go_moneda:
+        _go_kpi_sub_bits.append(f"{n_go_moneda} con monto en moneda guardado (suma arriba)")
+    if n_go_sin_moneda and n_gastos_op_movs:
+        _go_kpi_sub_bits.append(f"{n_go_sin_moneda} sin monto en moneda en BD (no sumados)")
+    if not n_gastos_op_movs:
+        _go_kpi_sub_bits.append("Registrá en Gastos operativos")
+    go_kpi_sub = " · ".join(_go_kpi_sub_bits) if _go_kpi_sub_bits else None
+    return {
+        "r_fut": r_fut,
+        "dsl_mov": dsl_mov,
+        "rows_cambios_bitacora": rows_cambios_bitacora,
+        "ventas_usd": ventas_usd,
+        "ventas_prev": ventas_prev,
+        "margen_usd": margen_usd,
+        "margen_prev": margen_prev,
+        "vids": vids,
+        "unidades_stock": unidades_stock,
+        "n_sku": n_sku,
+        "liquidez": liquidez,
+        "compras_period_usd": compras_period_usd,
+        "gastos_op_period_usd": gastos_op_period_usd,
+        "total_salidas_op_usd": total_salidas_op_usd,
+        "n_gastos_op_movs": n_gastos_op_movs,
+        "go_tot_carg": go_tot_carg,
+        "n_go_moneda": n_go_moneda,
+        "n_go_sin_moneda": n_go_sin_moneda,
+        "go_kpi_main": go_kpi_main,
+        "go_kpi_sub": go_kpi_sub,
+    }
+
+
+def panel_resumen_ejecutivo_periodo_ui(
+    sb: Client,
+    t: dict[str, Any] | None,
+    d_a: date,
+    d_b: date,
+    k: dict[str, Any],
+    *,
+    pdf_download_key: str,
+) -> None:
+    """Contenido del resumen ejecutivo (antes en Dashboard): KPIs, PDF, cuentas, gráficos."""
+    r_fut = str(k["r_fut"])
+    rows_cambios_bitacora = k["rows_cambios_bitacora"]
+    ventas_usd = float(k["ventas_usd"])
+    ventas_prev = float(k["ventas_prev"])
+    margen_usd = float(k["margen_usd"])
+    margen_prev = float(k["margen_prev"])
+    unidades_stock = float(k["unidades_stock"])
+    n_sku = int(k["n_sku"])
+    liquidez = float(k["liquidez"])
+    compras_period_usd = float(k["compras_period_usd"])
+    gastos_op_period_usd = float(k["gastos_op_period_usd"])
+    total_salidas_op_usd = float(k["total_salidas_op_usd"])
+    go_kpi_main = k["go_kpi_main"]
+    go_kpi_sub = k["go_kpi_sub"]
+
+    render_dashboard_mercado_live_tarjetas(t)
+    try:
+        _pdf_re_sum = _pdf_resumen_ejecutivo_bytes(
+            sb,
+            t,
+            d_a,
+            d_b,
+            r_fut,
+            ventas_usd=ventas_usd,
+            margen_bruto_usd=margen_usd,
+            unidades_stock=unidades_stock,
+            n_sku=int(n_sku),
+            liquidez_total_usd=liquidez,
+            compras_periodo_usd=compras_period_usd,
+            gastos_op_periodo_usd=gastos_op_period_usd,
+            total_salidas_usd=total_salidas_op_usd,
+            bitacora_rows=list(rows_cambios_bitacora or []),
+        )
+        _ts_res = datetime.now(ZoneInfo("America/Caracas")).strftime("%Y%m%d_%H%M")
+        st.download_button(
+            label=f"Descargar PDF — resumen ejecutivo ({_ts_res})",
+            data=_pdf_re_sum,
+            file_name=f"resumen_ejecutivo_{_ts_res}.pdf",
+            mime="application/pdf",
+            key=pdf_download_key,
+            help="Incluye KPIs, cuentas, movimientos, gastos por categoría, compras por proveedor y bitácora. Listo para imprimir.",
+        )
+    except Exception as ex_pdf:
+        st.caption(f"No se pudo preparar el PDF del resumen ({ex_pdf}). ¿Tenés **reportlab** instalado?")
+    st.divider()
+    st.markdown("##### Caja y cambios (bitácora)")
+    st.caption(
+        "Vista gerencial: saldos por cuenta y registro de cambios VES→USD/USDT. "
+        "Usá **Registrar cambio ahora** en el aviso de VES del **Dashboard** para abrir el formulario prellenado."
+    )
+    _dashboard_seccion_cambios_tesoreria(
+        sb, t=t, d_a=d_a, d_b=d_b, r_fut=r_fut, rows_raw=rows_cambios_bitacora, key_suffix="rep_re"
+    )
+    st.divider()
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        _dash_kpi_card(
+            "Ventas totales (USD)",
+            f"US$ {ventas_usd:,.2f}",
+            _dash_trend_pct(ventas_usd, ventas_prev),
+            f"Período {d_a} → {d_b}",
+        )
+    with k2:
+        _dash_kpi_card(
+            "Margen bruto (USD)",
+            f"US$ {margen_usd:,.2f}",
+            _dash_trend_pct(margen_usd, margen_prev),
+            "Sobre costo de productos vendidos",
+        )
+    with k3:
+        _dash_kpi_card(
+            "Unidades en stock",
+            f"{unidades_stock:,.0f}",
+            None,
+            f"{n_sku} SKU activos",
+        )
+    with k4:
+        _dash_kpi_card(
+            "Liquidez total",
+            f"US$ {liquidez:,.2f}",
+            None,
+            "Saldos en cajas / bancos / wallets",
+        )
+    st.divider()
+    render_dashboard_resumen_cuentas_flujo_y_detalle(sb, d_a, r_fut, bitacora_rows=rows_cambios_bitacora, t=t)
+    st.divider()
+    st.markdown("##### Compras, gastos operativos y flujo (mismo período)")
+    st.caption(
+        "**Gastos operativos:** suma **solo** montos en moneda de cuenta en BD (**`monto_bs` / `monto_usdt` / `monto_usd_caja`** con **`patch_030`**, o `monto_moneda`) — **sin** convertir con tasas. "
+        "Si un gasto no tiene ese dato, **no** entra en el total hasta que lo corrijas. **Compras** siguen en USD de documentos. Requiere **`patch_025`**."
+    )
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        _dash_kpi_card(
+            "Compras a proveedores (USD)",
+            f"US$ {compras_period_usd:,.2f}",
+            None,
+            "Mercancía en el período",
+        )
+    with s2:
+        _dash_kpi_card("Gastos operativos (lo cargado en BD)", go_kpi_main, None, go_kpi_sub)
+    with s3:
+        _total_kpi_val = f"Compras (docs): US$ {compras_period_usd:,.2f} · Gastos op.: {go_kpi_main}"
+        _dash_kpi_card(
+            "Compras + gastos op. (periodo)",
+            _total_kpi_val,
+            None,
+            "Compras en USD; gastos operativos = suma por moneda de lo guardado en BD (columnas nativas o `monto_moneda`).",
+        )
+    st.markdown("##### Seguimiento: Bs → USD / USDT (bitácora de tesorería)")
+    if rows_cambios_bitacora:
+        _sum_bs = sum(float(r.get("monto_ves") or 0) for r in rows_cambios_bitacora)
+        _sum_usd = sum(float(r.get("monto_usd_obtenido") or 0) for r in rows_cambios_bitacora)
+        _t_ut_d = float(_nf(t.get("tasa_usdt")) or 1.0) if t else 1.0
+        if _t_ut_d <= 0:
+            _t_ut_d = 1.0
+        _sum_usdt_ref = _sum_usd * _t_ut_d
+        st.success(
+            f"En este período registraste **{len(rows_cambios_bitacora)}** cambio(s): **{_sum_bs:,.2f} Bs** "
+            f"que **destinaste al cambio** a moneda más estable (equiv. **US$ {_round_money_2(_sum_usd):,.2f}** al pactado; **≈ {_round_money_2(_sum_usdt_ref):,.2f} USDT** ref. "
+            f"con tasa USDT/USD **{_t_ut_d:,.6f}** del día). "
+            "Si esos registros llevan **movimientos de caja**, esos bolívares **ya no están** en la cuenta VES: el valor quedó en **USD**, **USDT** o dólares físicos según la caja destino. "
+            "Detalle y tabla en **Caja, cobros y tasas** (Dashboard)."
+        )
+        b1, b2, b3, b4 = st.columns(4)
+        with b1:
+            st.metric("Operaciones (bitácora)", len(rows_cambios_bitacora))
+        with b2:
+            st.metric("Bs en cambios (suma)", f"{_sum_bs:,.2f}")
+        with b3:
+            st.metric("Equiv. USD pactado (suma)", f"{_round_money_2(_sum_usd):,.2f}")
+        with b4:
+            st.metric("≈ USDT ref. día (suma)", f"{_round_money_2(_sum_usdt_ref):,.2f}")
+        st.caption(
+            "**¿Por qué abajo no ves el cambio en el gráfico de barras?** Los bloques **Origen de la liquidez** y **Compras por categoría** "
+            "no leen la bitácora: el primero muestra **saldos actuales** (los Bs ya convertidos **bajan** en VES y **suben** en USD/USDT si aplicaste movimientos); el segundo, **compras a proveedores**. "
+            "El gráfico de abajo resume solo los **equiv. USD** anotados en **bitácora** en el período."
+        )
+        _df_bt = pd.DataFrame(
+            [
+                {
+                    "Operación": f"#{i + 1} · {str(r.get('fecha') or '')[:16]}",
+                    "Equiv. USD (pactado)": _round_money_2(r.get("monto_usd_obtenido")),
+                    "Bs usados": _round_money_2(r.get("monto_ves")),
+                }
+                for i, r in enumerate(rows_cambios_bitacora)
+            ]
+        )
+        fig_bt = px.bar(
+            _df_bt,
+            x="Operación",
+            y="Equiv. USD (pactado)",
+            hover_data={"Bs usados": ":,.2f"},
+            labels={"Equiv. USD (pactado)": "Equiv. USD (bitácora)", "Operación": ""},
+        )
+        fig_bt.update_traces(texttemplate="%{y:,.2f} USD", textposition="outside")
+        _plotly_apply_dash_theme(fig_bt, title="Tus cambios Bs → moneda estable (equiv. USD en bitácora)")
+        fig_bt.update_layout(height=300, showlegend=False)
+        st.plotly_chart(fig_bt, use_container_width=True)
+    else:
+        st.info(
+            "No hay **registros de bitácora** (Bs → USD / USDT / efectivo dólar) en el rango **Desde/Hasta**. "
+            "Si pasaste Bs a **USDT**, **Zelle** (caja USD) o **dólares en efectivo**, registrá el cambio en **Dashboard → Caja, cobros y tasas → Registrar cambio (bitácora)** "
+            "para que quede claro que esos bolívares **salieron** de VES y el valor quedó en la cuenta destino (con movimientos de caja si corresponde)."
+        )
+    row2a, row2b = st.columns([1.15, 1])
+    with row2a:
+        st.markdown('<div class="dash-bento">', unsafe_allow_html=True)
+        st.markdown("**Origen de la liquidez** (USD por tipo de caja)")
+        _caj_liq = _cajas_fetch_rows(sb, solo_activas=True)
+        caj_df = pd.DataFrame(
+            [
+                {
+                    "nombre": r.get("nombre"),
+                    "tipo": r.get("tipo"),
+                    "saldo_actual_usd": r.get("saldo_actual_usd"),
+                    "entidad": r.get("entidad") or "",
+                }
+                for r in _caj_liq
+            ]
+        )
+        if caj_df.empty:
+            st.caption("No hay cajas activas.")
+        else:
+            caj_df["origen"] = caj_df.apply(
+                lambda r: _dash_liquidity_bucket(
+                    tipo=str(r.get("tipo", "")),
+                    nombre=str(r.get("nombre", "")),
+                    entidad=str(r.get("entidad", "") or ""),
+                ),
+                axis=1,
+            )
+            caj_df["saldo_actual_usd"] = pd.to_numeric(caj_df["saldo_actual_usd"], errors="coerce").fillna(0)
+            agg_l = caj_df.groupby("origen", as_index=False)["saldo_actual_usd"].sum()
+            order = ["Caja fuerte", "Bancos nacionales", "Binance (crypto)", "Otros"]
+            agg_l["origen"] = pd.Categorical(agg_l["origen"], categories=order, ordered=True)
+            agg_l = agg_l.sort_values("origen")
+            agg_l = agg_l[agg_l["saldo_actual_usd"] > 0]
+            if agg_l.empty:
+                st.info(
+                    "**Sin barras:** no hay **saldo positivo** en cajas activas para graficar (o todo está en cero). "
+                    "Si registraste un cambio con **movimientos de caja**, los saldos ya deberían reflejar egreso de Bs e ingreso en USD/USDT."
+                )
+            else:
+                colors = ["#00e5ff", "#ff9100", "#b388ff", "#78909c"]
+                fig_liq = go.Figure()
+                for idx, (_, row) in enumerate(agg_l.iterrows()):
+                    fig_liq.add_trace(
+                        go.Bar(
+                            name=str(row["origen"]),
+                            x=["Liquidez"],
+                            y=[float(row["saldo_actual_usd"])],
+                            marker_color=colors[idx % len(colors)],
+                            text=[f"{float(row['saldo_actual_usd']):,.2f}"],
+                            textposition="inside",
+                            hovertemplate="%{fullData.name}: %{y:,.2f} USD<extra></extra>",
+                        )
+                    )
+                fig_liq.update_layout(
+                    barmode="stack",
+                    showlegend=True,
+                    legend=dict(orientation="h", yanchor="top", y=-0.2, x=0),
+                )
+                _plotly_apply_dash_theme(fig_liq, title="Composición por origen")
+                fig_liq.update_layout(hoverlabel=dict(bgcolor="#1a1f2e", font_size=12), height=320)
+                st.plotly_chart(fig_liq, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+    with row2b:
+        st.markdown('<div class="dash-bento">', unsafe_allow_html=True)
+        st.markdown("**Compras por categoría** (USD en el período · proxy de gasto / abastecimiento)")
+        cids = [
+            str(x["id"])
+            for x in (
+                sb.table("compras")
+                .select("id")
+                .gte("fecha", str(d_a))
+                .lte("fecha", r_fut)
+                .execute()
+                .data
+                or []
+            )
+        ]
+        if not cids:
+            st.info(
+                "**Sin compras en el rango:** no registraste **compras a proveedores** entre las fechas elegidas. "
+                "Eso es independiente de la **bitácora** (cambio Bs→USD/USDT)."
+            )
+        else:
+            cdet = sb.table("compras_detalles").select("producto_id, subtotal_usd").in_("compra_id", cids).execute()
+            cdf = pd.DataFrame(cdet.data or [])
+            if cdf.empty:
+                st.caption("Sin líneas de compra.")
+            else:
+                plist = sb.table("productos").select("id, categoria_id, categorias(nombre)").execute().data or []
+                id_cat: dict[str, str] = {}
+                for p in plist:
+                    cid = str(p["id"])
+                    cat = p.get("categorias")
+                    if isinstance(cat, list) and cat:
+                        cat = cat[0]
+                    if isinstance(cat, dict) and cat.get("nombre"):
+                        id_cat[cid] = str(cat["nombre"])
+                    else:
+                        id_cat[cid] = "Sin categoría"
+                cdf["categoria"] = cdf["producto_id"].astype(str).map(lambda x: id_cat.get(x, "Sin categoría"))
+                cdf["subtotal_usd"] = pd.to_numeric(cdf["subtotal_usd"], errors="coerce").fillna(0)
+                gcat = cdf.groupby("categoria", as_index=False)["subtotal_usd"].sum()
+                fig_d = px.pie(
+                    gcat,
+                    names="categoria",
+                    values="subtotal_usd",
+                    hole=0.52,
+                    color_discrete_sequence=px.colors.sequential.Teal_r,
+                )
+                fig_d.update_traces(
+                    textposition="inside", textinfo="percent+label", hovertemplate="%{label}<br>%{value:,.2f} USD<extra></extra>"
+                )
+                _plotly_apply_dash_theme(fig_d, title="Distribución (donut)")
+                st.plotly_chart(fig_d, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
 def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
     """Panel ejecutivo estilo Bento (dark + acentos cian/naranja). Streamlit + Plotly."""
     h1, h2, h3 = st.columns([2.2, 2.2, 1.6])
@@ -6011,437 +6559,49 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
                 "Recomendación operativa: convertí el remanente en VES a una cuenta estable (USD/USDT/Zelle) y registralo en la bitácora para que los saldos del panel reflejen la realidad."
             )
 
-    n_days = max(1, (d_b - d_a).days + 1)
-    d_prev_b = d_a - timedelta(days=1)
-    d_prev_a = d_prev_b - timedelta(days=n_days - 1)
-
-    r_fut = f"{d_b.isoformat()}T23:59:59"
-
-    rows_cambios_bitacora = _cambios_tesoreria_en_rango(sb, d_a, r_fut)
-
-    # --- KPIs datos ---
-    v_cur = (
-        sb.table("ventas")
-        .select("id, total_usd, fecha")
-        .gte("fecha", str(d_a))
-        .lte("fecha", r_fut)
-        .execute()
-    )
-    v_prev = (
-        sb.table("ventas")
-        .select("total_usd")
-        .gte("fecha", str(d_prev_a))
-        .lte("fecha", f"{d_prev_b.isoformat()}T23:59:59")
-        .execute()
-    )
-    df_vc = pd.DataFrame(v_cur.data or [])
-    ventas_usd = float(pd.to_numeric(df_vc["total_usd"], errors="coerce").fillna(0).sum()) if not df_vc.empty else 0.0
-    ventas_prev = float(
-        pd.to_numeric(pd.DataFrame(v_prev.data or [])["total_usd"], errors="coerce").fillna(0).sum()
-    ) if (v_prev.data or []) else 0.0
-
-    vids = [str(x["id"]) for x in (v_cur.data or [])]
-    margen_usd = 0.0
-    if vids:
-        det = (
-            sb.table("ventas_detalles")
-            .select("producto_id, cantidad, precio_unitario_usd")
-            .in_("venta_id", vids)
-            .execute()
-        )
-        det_rows = det.data or []
-        pmap = {
-            str(p["id"]): p
-            for p in (sb.table("productos").select("id, costo_usd").execute().data or [])
-        }
-        for row in det_rows:
-            pid = str(row["producto_id"])
-            costo = float(pmap.get(pid, {}).get("costo_usd") or 0)
-            cant = float(row["cantidad"])
-            pu = float(row["precio_unitario_usd"])
-            margen_usd += (pu - costo) * cant
-
-    vids_prev = [
-        str(x["id"])
-        for x in (
-            sb.table("ventas")
-            .select("id")
-            .gte("fecha", str(d_prev_a))
-            .lte("fecha", f"{d_prev_b.isoformat()}T23:59:59")
-            .execute()
-            .data
-            or []
-        )
-    ]
-    margen_prev = 0.0
-    if vids_prev:
-        detp = (
-            sb.table("ventas_detalles")
-            .select("producto_id, cantidad, precio_unitario_usd")
-            .in_("venta_id", vids_prev)
-            .execute()
-        )
-        pmap2 = {
-            str(p["id"]): p
-            for p in (sb.table("productos").select("id, costo_usd").execute().data or [])
-        }
-        for row in detp.data or []:
-            pid = str(row["producto_id"])
-            costo = float(pmap2.get(pid, {}).get("costo_usd") or 0)
-            cant = float(row["cantidad"])
-            pu = float(row["precio_unitario_usd"])
-            margen_prev += (pu - costo) * cant
-
-    prods = sb.table("productos").select("stock_actual, activo").eq("activo", True).execute()
-    unidades_stock = float(
-        sum(float(p.get("stock_actual") or 0) for p in (prods.data or []))
-    )
-    n_sku = len(prods.data or [])
-
-    try:
-        bal = sb.table("v_balance_consolidado_usd").select("total_usd").execute()
-        liquidez = float((bal.data or [{}])[0].get("total_usd") or 0)
-    except Exception:
-        liquidez = 0.0
-
-    dsl_mov = f"{d_a.isoformat()}T00:00:00"
-    try:
-        cr_p = sb.table("compras").select("total_usd").gte("fecha", str(d_a)).lte("fecha", r_fut).execute()
-        compras_period_usd = sum(float(x.get("total_usd") or 0) for x in (cr_p.data or []))
-    except Exception:
-        compras_period_usd = 0.0
-
-    gastos_op_period_usd = 0.0
-    n_gastos_op_movs = 0
-    try:
-        mr_go = (
-            sb.table("movimientos_caja")
-            .select("monto_usd,categoria_gasto")
-            .gte("created_at", dsl_mov)
-            .lte("created_at", r_fut)
-            .eq("tipo", "Egreso")
-            .execute()
-        )
-        for row in mr_go.data or []:
-            cg = row.get("categoria_gasto")
-            if cg is not None and str(cg).strip():
-                gastos_op_period_usd += float(row.get("monto_usd") or 0)
-                n_gastos_op_movs += 1
-    except Exception:
-        gastos_op_period_usd = 0.0
-        n_gastos_op_movs = 0
-
-    total_salidas_op_usd = compras_period_usd + gastos_op_period_usd
-
-    _cmap_kpi = _caja_map_por_id(sb)
-    go_tot_carg, n_go_moneda, n_go_sin_moneda = _gastos_op_totales_solo_cargado(
-        sb, dsl_mov, r_fut, _cmap_kpi
-    )
-    go_kpi_main = _fmt_linea_gastos_solo_cargados(go_tot_carg) or "—"
-    _go_kpi_sub_bits: list[str] = []
-    if n_gastos_op_movs:
-        _go_kpi_sub_bits.append(f"{n_gastos_op_movs} gasto(s) con categoría en el período")
-    if n_go_moneda:
-        _go_kpi_sub_bits.append(f"{n_go_moneda} con monto en moneda guardado (suma arriba)")
-    if n_go_sin_moneda and n_gastos_op_movs:
-        _go_kpi_sub_bits.append(f"{n_go_sin_moneda} sin monto en moneda en BD (no sumados)")
-    if not n_gastos_op_movs:
-        _go_kpi_sub_bits.append("Registrá en Gastos operativos")
-    go_kpi_sub = " · ".join(_go_kpi_sub_bits) if _go_kpi_sub_bits else None
+    k_dash = _dashboard_kpis_periodo(sb, d_a, d_b)
+    r_fut = k_dash["r_fut"]
+    dsl_mov = k_dash["dsl_mov"]
+    rows_cambios_bitacora = k_dash["rows_cambios_bitacora"]
+    ventas_usd = k_dash["ventas_usd"]
+    ventas_prev = k_dash["ventas_prev"]
+    margen_usd = k_dash["margen_usd"]
+    margen_prev = k_dash["margen_prev"]
+    vids = k_dash["vids"]
+    unidades_stock = k_dash["unidades_stock"]
+    n_sku = k_dash["n_sku"]
+    liquidez = k_dash["liquidez"]
+    compras_period_usd = k_dash["compras_period_usd"]
+    gastos_op_period_usd = k_dash["gastos_op_period_usd"]
+    total_salidas_op_usd = k_dash["total_salidas_op_usd"]
+    n_gastos_op_movs = k_dash["n_gastos_op_movs"]
+    go_tot_carg = k_dash["go_tot_carg"]
+    n_go_moneda = k_dash["n_go_moneda"]
+    n_go_sin_moneda = k_dash["n_go_sin_moneda"]
+    go_kpi_main = k_dash["go_kpi_main"]
+    go_kpi_sub = k_dash["go_kpi_sub"]
 
     with st.expander("Información del panel", expanded=False, key="modinfo_exp_dashboard"):
         st.markdown(
-            "**Cómo recorrer el dashboard:** 1) Elegí **Desde / Hasta** arriba. 2) Pestaña **Resumen** → mercado en vivo, KPIs, **tarjetas por cuenta / ingresos‑egresos / gastos por categoría / compras por proveedor**, totales de compras‑gastos, bitácora y gráficos. "
-            "3) **Inventario** → semáforo y valor (el **Buscar** de arriba filtra la tabla). 4) **Caja** → flujo, cobros por moneda, bitácora, tasas y últimos movimientos. "
+            "**Cómo recorrer el dashboard:** 1) Elegí **Desde / Hasta** arriba. 2) Pestaña **Mercado en vivo** → cotizaciones. "
+            "El **resumen ejecutivo completo** (KPIs, PDF, cuentas, gráficos) está en **Reportes → Resumen ejecutivo**. "
+            "3) **Inventario y stock** → semáforo y valor (el **Buscar** de arriba filtra la tabla). 4) **Caja, cobros y tasas** → flujo, cobros por moneda, bitácora, tasas y últimos movimientos. "
             "**Usuarios** del ERP están en **Mantenimiento** (superusuario)."
         )
-    tab_d_res, tab_d_inv, tab_d_caja = st.tabs(
+    tab_d_mercado, tab_d_inv, tab_d_caja = st.tabs(
         [
-            "Resumen ejecutivo",
+            "Mercado en vivo",
             "Inventario y stock",
             "Caja, cobros y tasas",
         ]
     )
 
-    with tab_d_res:
+    with tab_d_mercado:
         render_dashboard_mercado_live_tarjetas(t)
-        try:
-            _pdf_re_sum = _pdf_resumen_ejecutivo_bytes(
-                sb,
-                t,
-                d_a,
-                d_b,
-                r_fut,
-                ventas_usd=ventas_usd,
-                margen_bruto_usd=margen_usd,
-                unidades_stock=unidades_stock,
-                n_sku=int(n_sku),
-                liquidez_total_usd=liquidez,
-                compras_periodo_usd=compras_period_usd,
-                gastos_op_periodo_usd=gastos_op_period_usd,
-                total_salidas_usd=total_salidas_op_usd,
-                bitacora_rows=list(rows_cambios_bitacora or []),
-            )
-            _ts_res = datetime.now(ZoneInfo("America/Caracas")).strftime("%Y%m%d_%H%M")
-            st.download_button(
-                label=f"Descargar PDF — resumen ejecutivo ({_ts_res})",
-                data=_pdf_re_sum,
-                file_name=f"resumen_ejecutivo_{_ts_res}.pdf",
-                mime="application/pdf",
-                key="dash_resumen_pdf_dl",
-                help="Incluye KPIs, cuentas, movimientos, gastos por categoría, compras por proveedor y bitácora. Listo para imprimir.",
-            )
-        except Exception as ex_pdf:
-            st.caption(f"No se pudo preparar el PDF del resumen ({ex_pdf}). ¿Tenés **reportlab** instalado?")
-        st.divider()
-        st.markdown("##### Caja y cambios (bitácora)")
-        st.caption(
-            "Vista gerencial: saldos por cuenta y registro de cambios VES→USD/USDT. "
-            "Usá **Registrar cambio ahora** en el aviso de VES para abrir el formulario prellenado."
+        st.info(
+            "**Resumen ejecutivo** (KPIs, PDF imprimible, cuentas, flujo y gráficos del período): abrí el módulo **Reportes** "
+            "y la pestaña **Resumen ejecutivo**. Allí elegís **Desde / Hasta** propios del reporte."
         )
-        _dashboard_seccion_cambios_tesoreria(
-            sb, t=t, d_a=d_a, d_b=d_b, r_fut=r_fut, rows_raw=rows_cambios_bitacora, key_suffix="res"
-        )
-        st.divider()
-        k1, k2, k3, k4 = st.columns(4)
-        with k1:
-            _dash_kpi_card(
-                "Ventas totales (USD)",
-                f"US$ {ventas_usd:,.2f}",
-                _dash_trend_pct(ventas_usd, ventas_prev),
-                f"Período {d_a} → {d_b}",
-            )
-        with k2:
-            _dash_kpi_card(
-                "Margen bruto (USD)",
-                f"US$ {margen_usd:,.2f}",
-                _dash_trend_pct(margen_usd, margen_prev),
-                "Sobre costo de productos vendidos",
-            )
-        with k3:
-            _dash_kpi_card(
-                "Unidades en stock",
-                f"{unidades_stock:,.0f}",
-                None,
-                f"{n_sku} SKU activos",
-            )
-        with k4:
-            _dash_kpi_card(
-                "Liquidez total",
-                f"US$ {liquidez:,.2f}",
-                None,
-                "Saldos en cajas / bancos / wallets",
-            )
-
-        st.divider()
-        render_dashboard_resumen_cuentas_flujo_y_detalle(
-            sb, d_a, r_fut, bitacora_rows=rows_cambios_bitacora, t=t
-        )
-        st.divider()
-
-        st.markdown("##### Compras, gastos operativos y flujo (mismo período)")
-        st.caption(
-            "**Gastos operativos:** suma **solo** montos en moneda de cuenta en BD (**`monto_bs` / `monto_usdt` / `monto_usd_caja`** con **`patch_030`**, o `monto_moneda`) — **sin** convertir con tasas. "
-            "Si un gasto no tiene ese dato, **no** entra en el total hasta que lo corrijas. **Compras** siguen en USD de documentos. Requiere **`patch_025`**."
-        )
-        s1, s2, s3 = st.columns(3)
-        with s1:
-            _dash_kpi_card(
-                "Compras a proveedores (USD)",
-                f"US$ {compras_period_usd:,.2f}",
-                None,
-                "Mercancía en el período",
-            )
-        with s2:
-            _dash_kpi_card(
-                "Gastos operativos (lo cargado en BD)",
-                go_kpi_main,
-                None,
-                go_kpi_sub,
-            )
-        with s3:
-            _total_kpi_val = (
-                f"Compras (docs): US$ {compras_period_usd:,.2f} · Gastos op.: {go_kpi_main}"
-            )
-            _dash_kpi_card(
-                "Compras + gastos op. (periodo)",
-                _total_kpi_val,
-                None,
-                "Compras en USD; gastos operativos = suma por moneda de lo guardado en BD (columnas nativas o `monto_moneda`).",
-            )
-
-        st.markdown("##### Seguimiento: Bs → USD / USDT (bitácora de tesorería)")
-        if rows_cambios_bitacora:
-            _sum_bs = sum(float(r.get("monto_ves") or 0) for r in rows_cambios_bitacora)
-            _sum_usd = sum(float(r.get("monto_usd_obtenido") or 0) for r in rows_cambios_bitacora)
-            _t_ut_d = float(_nf(t.get("tasa_usdt")) or 1.0) if t else 1.0
-            if _t_ut_d <= 0:
-                _t_ut_d = 1.0
-            _sum_usdt_ref = _sum_usd * _t_ut_d
-            st.success(
-                f"En este período registraste **{len(rows_cambios_bitacora)}** cambio(s): **{_sum_bs:,.2f} Bs** "
-                f"que **destinaste al cambio** a moneda más estable (equiv. **US$ {_round_money_2(_sum_usd):,.2f}** al pactado; **≈ {_round_money_2(_sum_usdt_ref):,.2f} USDT** ref. "
-                f"con tasa USDT/USD **{_t_ut_d:,.6f}** del día). "
-                "Si esos registros llevan **movimientos de caja**, esos bolívares **ya no están** en la cuenta VES: el valor quedó en **USD**, **USDT** o dólares físicos según la caja destino. "
-                "Detalle y tabla en **Caja, cobros y tasas**."
-            )
-            b1, b2, b3, b4 = st.columns(4)
-            with b1:
-                st.metric("Operaciones (bitácora)", len(rows_cambios_bitacora))
-            with b2:
-                st.metric("Bs en cambios (suma)", f"{_sum_bs:,.2f}")
-            with b3:
-                st.metric("Equiv. USD pactado (suma)", f"{_round_money_2(_sum_usd):,.2f}")
-            with b4:
-                st.metric("≈ USDT ref. día (suma)", f"{_round_money_2(_sum_usdt_ref):,.2f}")
-
-            st.caption(
-                "**¿Por qué abajo no ves el cambio en el gráfico de barras?** Los bloques **Origen de la liquidez** y **Compras por categoría** "
-                "no leen la bitácora: el primero muestra **saldos actuales** (los Bs ya convertidos **bajan** en VES y **suben** en USD/USDT si aplicaste movimientos); el segundo, **compras a proveedores**. "
-                "El gráfico de abajo resume solo los **equiv. USD** anotados en **bitácora** en el período."
-            )
-            _df_bt = pd.DataFrame(
-                [
-                    {
-                        "Operación": f"#{i + 1} · {str(r.get('fecha') or '')[:16]}",
-                        "Equiv. USD (pactado)": _round_money_2(r.get("monto_usd_obtenido")),
-                        "Bs usados": _round_money_2(r.get("monto_ves")),
-                    }
-                    for i, r in enumerate(rows_cambios_bitacora)
-                ]
-            )
-            fig_bt = px.bar(
-                _df_bt,
-                x="Operación",
-                y="Equiv. USD (pactado)",
-                hover_data={"Bs usados": ":,.2f"},
-                labels={"Equiv. USD (pactado)": "Equiv. USD (bitácora)", "Operación": ""},
-            )
-            fig_bt.update_traces(texttemplate="%{y:,.2f} USD", textposition="outside")
-            _plotly_apply_dash_theme(fig_bt, title="Tus cambios Bs → moneda estable (equiv. USD en bitácora)")
-            fig_bt.update_layout(height=300, showlegend=False)
-            st.plotly_chart(fig_bt, use_container_width=True)
-        else:
-            st.info(
-                "No hay **registros de bitácora** (Bs → USD / USDT / efectivo dólar) en el rango **Desde/Hasta**. "
-                "Si pasaste Bs a **USDT**, **Zelle** (caja USD) o **dólares en efectivo**, registrá el cambio en **Caja, cobros y tasas → Registrar cambio (bitácora)** "
-                "para que quede claro que esos bolívares **salieron** de VES y el valor quedó en la cuenta destino (con movimientos de caja si corresponde)."
-            )
-
-        row2a, row2b = st.columns([1.15, 1])
-        with row2a:
-            st.markdown('<div class="dash-bento">', unsafe_allow_html=True)
-            st.markdown("**Origen de la liquidez** (USD por tipo de caja)")
-            _caj_liq = _cajas_fetch_rows(sb, solo_activas=True)
-            caj_df = pd.DataFrame(
-                [
-                    {
-                        "nombre": r.get("nombre"),
-                        "tipo": r.get("tipo"),
-                        "saldo_actual_usd": r.get("saldo_actual_usd"),
-                        "entidad": r.get("entidad") or "",
-                    }
-                    for r in _caj_liq
-                ]
-            )
-            if caj_df.empty:
-                st.caption("No hay cajas activas.")
-            else:
-                caj_df["origen"] = caj_df.apply(
-                    lambda r: _dash_liquidity_bucket(
-                        tipo=str(r.get("tipo", "")),
-                        nombre=str(r.get("nombre", "")),
-                        entidad=str(r.get("entidad", "") or ""),
-                    ),
-                    axis=1,
-                )
-                caj_df["saldo_actual_usd"] = pd.to_numeric(caj_df["saldo_actual_usd"], errors="coerce").fillna(0)
-                agg_l = caj_df.groupby("origen", as_index=False)["saldo_actual_usd"].sum()
-                order = ["Caja fuerte", "Bancos nacionales", "Binance (crypto)", "Otros"]
-                agg_l["origen"] = pd.Categorical(agg_l["origen"], categories=order, ordered=True)
-                agg_l = agg_l.sort_values("origen")
-                agg_l = agg_l[agg_l["saldo_actual_usd"] > 0]
-                if agg_l.empty:
-                    st.info(
-                        "**Sin barras:** no hay **saldo positivo** en cajas activas para graficar (o todo está en cero). "
-                        "Si registraste un cambio con **movimientos de caja**, los saldos ya deberían reflejar egreso de Bs e ingreso en USD/USDT."
-                    )
-                else:
-                    colors = ["#00e5ff", "#ff9100", "#b388ff", "#78909c"]
-                    fig_liq = go.Figure()
-                    for idx, (_, row) in enumerate(agg_l.iterrows()):
-                        fig_liq.add_trace(
-                            go.Bar(
-                                name=str(row["origen"]),
-                                x=["Liquidez"],
-                                y=[float(row["saldo_actual_usd"])],
-                                marker_color=colors[idx % len(colors)],
-                                text=[f"{float(row['saldo_actual_usd']):,.2f}"],
-                                textposition="inside",
-                                hovertemplate="%{fullData.name}: %{y:,.2f} USD<extra></extra>",
-                            )
-                        )
-                    fig_liq.update_layout(
-                        barmode="stack",
-                        showlegend=True,
-                        legend=dict(orientation="h", yanchor="top", y=-0.2, x=0),
-                    )
-                    _plotly_apply_dash_theme(fig_liq, title="Composición por origen")
-                    fig_liq.update_layout(hoverlabel=dict(bgcolor="#1a1f2e", font_size=12), height=320)
-                    st.plotly_chart(fig_liq, use_container_width=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        with row2b:
-            st.markdown('<div class="dash-bento">', unsafe_allow_html=True)
-            st.markdown("**Compras por categoría** (USD en el período · proxy de gasto / abastecimiento)")
-            cids = [
-                str(x["id"])
-                for x in (
-                    sb.table("compras")
-                    .select("id")
-                    .gte("fecha", str(d_a))
-                    .lte("fecha", r_fut)
-                    .execute()
-                    .data
-                    or []
-                )
-            ]
-            if not cids:
-                st.info(
-                    "**Sin compras en el rango:** no registraste **compras a proveedores** entre las fechas elegidas. "
-                    "Eso es independiente de la **bitácora** (cambio Bs→USD/USDT)."
-                )
-            else:
-                cdet = sb.table("compras_detalles").select("producto_id, subtotal_usd").in_("compra_id", cids).execute()
-                cdf = pd.DataFrame(cdet.data or [])
-                if cdf.empty:
-                    st.caption("Sin líneas de compra.")
-                else:
-                    plist = sb.table("productos").select("id, categoria_id, categorias(nombre)").execute().data or []
-                    id_cat: dict[str, str] = {}
-                    for p in plist:
-                        cid = str(p["id"])
-                        cat = p.get("categorias")
-                        if isinstance(cat, list) and cat:
-                            cat = cat[0]
-                        if isinstance(cat, dict) and cat.get("nombre"):
-                            id_cat[cid] = str(cat["nombre"])
-                        else:
-                            id_cat[cid] = "Sin categoría"
-                    cdf["categoria"] = cdf["producto_id"].astype(str).map(lambda x: id_cat.get(x, "Sin categoría"))
-                    cdf["subtotal_usd"] = pd.to_numeric(cdf["subtotal_usd"], errors="coerce").fillna(0)
-                    gcat = cdf.groupby("categoria", as_index=False)["subtotal_usd"].sum()
-                    fig_d = px.pie(
-                        gcat,
-                        names="categoria",
-                        values="subtotal_usd",
-                        hole=0.52,
-                        color_discrete_sequence=px.colors.sequential.Teal_r,
-                    )
-                    fig_d.update_traces(textposition="inside", textinfo="percent+label", hovertemplate="%{label}<br>%{value:,.2f} USD<extra></extra>")
-                    _plotly_apply_dash_theme(fig_d, title="Distribución (donut)")
-                    st.plotly_chart(fig_d, use_container_width=True)
-            st.markdown("</div>", unsafe_allow_html=True)
 
     pinv = (
         sb.table("productos")
@@ -10655,8 +10815,9 @@ def module_reportes(sb: Client, erp_uid: str, t: dict[str, Any] | None, rol: str
         )
 
     if can_fin:
-        tab_inv, tab_caja, tab_ven, tab_comp, tab_cartera, tab_cat = st.tabs(
+        tab_re, tab_inv, tab_caja, tab_ven, tab_comp, tab_cartera, tab_cat = st.tabs(
             [
+                "Resumen ejecutivo",
                 "Inventario",
                 "Caja",
                 "Ventas",
@@ -10669,6 +10830,34 @@ def module_reportes(sb: Client, erp_uid: str, t: dict[str, Any] | None, rol: str
         tab_cat = st.tabs(["Catálogo"])[0]
 
     if can_fin:
+        with tab_re:
+            st.markdown("#### Resumen ejecutivo")
+            st.caption(
+                "KPIs, PDF imprimible, cuentas, flujo multimoneda y gráficos del período. "
+                "Las fechas de abajo son **solo** para este reporte (independientes del Dashboard)."
+            )
+            rc1, rc2 = st.columns(2)
+            with rc1:
+                d_re_a = st.date_input(
+                    "Desde",
+                    value=date.today() - timedelta(days=30),
+                    key="rep_res_ej_desde",
+                )
+            with rc2:
+                d_re_b = st.date_input("Hasta", value=date.today(), key="rep_res_ej_hasta")
+            if d_re_b < d_re_a:
+                st.error("La fecha *Hasta* debe ser ≥ *Desde*.")
+            else:
+                k_rep = _dashboard_kpis_periodo(sb, d_re_a, d_re_b)
+                panel_resumen_ejecutivo_periodo_ui(
+                    sb,
+                    t,
+                    d_re_a,
+                    d_re_b,
+                    k_rep,
+                    pdf_download_key="rep_resumen_ejecutivo_pdf_dl",
+                )
+
         with tab_inv:
             st.markdown("#### Listado de repuestos y productos")
             st.caption(
@@ -11778,32 +11967,25 @@ def main() -> None:
         if st.button("Cerrar sesión", key="movi_sidebar_logout", use_container_width=True):
             _logout()
             st.rerun()
-        st.caption("Cotizaciones **en vivo**: **Dashboard → Resumen ejecutivo** (tarjetas arriba del todo).")
+        st.caption("Cotizaciones **en vivo**: **Dashboard → Mercado en vivo** · **Resumen ejecutivo** en **Reportes**.")
         render_cambiar_mi_password(sb, erp_uid)
         render_sidebar_calculadora()
-        opts: list[str] = []
-        if role_can(rol, "dashboard"):
-            opts.append("Dashboard")
-        if role_can(rol, "inventario"):
-            opts.append("Inventario")
-        if role_can(rol, "ventas"):
-            opts.append("Ventas / CXC")
-        if role_can(rol, "compras"):
-            opts.append("Compras / CXP")
-        if role_can(rol, "cajas"):
-            opts.append("Cajas y bancos")
-            opts.append("Gastos operativos")
-        if role_can(rol, "reportes"):
-            opts.append("Reportes")
-        elif role_can(rol, "catalogo"):
-            opts.append("Reportes")
-        if rol == "superuser":
-            opts.append("Mantenimiento")
-        if not opts:
-            st.error("Tu rol no tiene módulos asignados. Pide al superusuario que revise tu cuenta.")
-            st.caption("Podés **Cerrar sesión** con el botón de arriba (debajo de tu nombre).")
-            st.stop()
-        mod = st.radio("Módulo", opts, label_visibility="collapsed")
+        st.markdown('<p class="sb-block-title">Navegación</p>', unsafe_allow_html=True)
+        st.caption("Elegí el módulo en la **barra superior** (íconos).")
+
+    opts = movi_nav_options_for_role(rol)
+    if not opts:
+        st.error("Tu rol no tiene módulos asignados. Pide al superusuario que revise tu cuenta.")
+        st.caption("Podés **Cerrar sesión** con el botón de arriba (debajo de tu nombre).")
+        st.stop()
+    st.session_state.setdefault("movi_mod", opts[0])
+    if st.session_state.get("movi_mod") not in opts:
+        st.session_state["movi_mod"] = opts[0]
+    if len(opts) > 1:
+        render_movi_main_module_nav(opts)
+    else:
+        st.session_state["movi_mod"] = opts[0]
+    mod = str(st.session_state["movi_mod"])
 
     if mod == "Dashboard" and role_can(rol, "dashboard"):
         module_dashboard(sb, t)
