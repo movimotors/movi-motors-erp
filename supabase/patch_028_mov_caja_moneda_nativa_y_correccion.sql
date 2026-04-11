@@ -99,6 +99,7 @@ GRANT EXECUTE ON FUNCTION public.registrar_movimiento_caja_erp(UUID, UUID, TEXT,
 
 -- -----------------------------------------------------------------------------
 -- Corregir movimiento manual (sin venta_id ni compra_id): ajusta saldo y fila.
+-- Si PostgREST no encuentra el RPC: ejecutá también patch_029_corregir_movimiento_fn_recreate.sql
 -- -----------------------------------------------------------------------------
 DROP FUNCTION IF EXISTS public.corregir_movimiento_caja_manual_erp(UUID, UUID, NUMERIC, TEXT, TEXT, TEXT, TEXT, NUMERIC);
 DROP FUNCTION IF EXISTS public.corregir_movimiento_caja_manual_erp(UUID, UUID, NUMERIC, TEXT, TEXT, TEXT, BOOLEAN, TEXT, NUMERIC);

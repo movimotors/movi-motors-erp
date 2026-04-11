@@ -9316,7 +9316,7 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
         st.caption(
             "Solo movimientos **sin** venta ni compra ligada. "
             "En cuentas **VES** / **USDT** cargás el **monto en la moneda del banco**; el ERP calcula el **equiv. USD** (`monto_usd`) que usa el **motor de saldos** (igual que al dar de alta un gasto). "
-            "En cuenta **USD** el monto es directamente en dólares. Requiere **`patch_028`**."
+            "En cuenta **USD** el monto es directamente en dólares. Requiere **`patch_028`** en Supabase; si falla *schema cache*, ejecutá **`patch_029_corregir_movimiento_fn_recreate.sql`**."
         )
         if not editable:
             st.info("No hay egresos editables en los últimos registros, o falta columna **id** en la consulta.")
@@ -9438,6 +9438,8 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
                     if nu <= 0:
                         st.error("El equivalente USD calculado debe ser mayor que cero (revisá monto y tasa).")
                     else:
+                        _rpc_mon = (p_mon_e or None) if upd_nat else None
+                        _rpc_mm = float(p_mm_e) if upd_nat and p_mm_e is not None else None
                         pl_e: dict[str, Any] = {
                             "p_usuario_id": erp_uid,
                             "p_movimiento_id": pick,
@@ -9446,17 +9448,19 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
                             "p_referencia": (nr or "").strip(),
                             "p_categoria_gasto": (ncat or "").strip() or None,
                             "p_actualizar_moneda_nativa": bool(upd_nat),
+                            "p_moneda": _rpc_mon,
+                            "p_monto_moneda": _rpc_mm,
                         }
-                        if upd_nat and p_mon_e and p_mm_e is not None:
-                            pl_e["p_moneda"] = p_mon_e
-                            pl_e["p_monto_moneda"] = float(p_mm_e)
                         try:
                             sb.rpc("corregir_movimiento_caja_manual_erp", pl_e).execute()
                             st.success("Movimiento actualizado.")
                             st.rerun()
                         except Exception as ex:
+                            _em = _error_msg_from_supabase_exc(ex)
                             st.error(
-                                f"{_error_msg_from_supabase_exc(ex)} · Si falla el RPC, ejecutá **`patch_028`** en Supabase."
+                                f"{_em} · Si dice que **no encuentra la función** en el schema cache, ejecutá en Supabase "
+                                f"**`supabase/patch_029_corregir_movimiento_fn_recreate.sql`** (recrea el RPC y avisa a PostgREST). "
+                                f"También podés **Reload schema** en Ajustes del proyecto → API."
                             )
 
     if not tiene_cat:
