@@ -9314,8 +9314,9 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
     ]
     with st.expander("✏️ Corregir un egreso manual (monto o texto)", expanded=False):
         st.caption(
-            "Solo movimientos **sin** venta ni compra ligada. Ajustá el **equivalente USD** del saldo y, si aplica, el **monto en moneda de la cuenta**. "
-            "Requiere **`patch_028`**."
+            "Solo movimientos **sin** venta ni compra ligada. "
+            "En cuentas **VES** / **USDT** cargás el **monto en la moneda del banco**; el ERP calcula el **equiv. USD** (`monto_usd`) que usa el **motor de saldos** (igual que al dar de alta un gasto). "
+            "En cuenta **USD** el monto es directamente en dólares. Requiere **`patch_028`**."
         )
         if not editable:
             st.info("No hay egresos editables en los últimos registros, o falta columna **id** en la consulta.")
@@ -9331,40 +9332,101 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
             pick = st.selectbox("Elegí el movimiento", options=id_opts, format_func=_fmt_ed, key="gasto_op_edit_pick")
             er = next(x for x in editable if str(x.get("id")) == pick)
             ecaja = cmap_full.get(str(er.get("caja_id") or ""), {})
-            emon = str(ecaja.get("moneda_cuenta") or "USD").strip().upper()
+            emon_raw = str(ecaja.get("moneda_cuenta") or "USD").strip().upper()
+            emon = "VES" if emon_raw in ("VES", "BS") else emon_raw
+            _musd_er = float(er.get("monto_usd") or 0.01)
+            _mm_er = er.get("monto_moneda")
+            _mm_f = float(_mm_er) if _mm_er is not None and str(_mm_er).strip() != "" else 0.0
             with st.form("f_gasto_op_corregir"):
-                nu = st.number_input(
-                    "Nuevo equivalente USD (obligatorio para saldo)",
-                    min_value=0.01,
-                    value=float(_round_money_2(er.get("monto_usd") or 0.01)),
-                    format="%.2f",
-                    key="gasto_op_edit_usd",
-                )
-                st.caption(f"Cuenta: **{emon}** · {_caja_etiqueta_lista(ecaja) if ecaja else '—'}")
-                upd_nat = st.checkbox(
-                    "Actualizar también monto en moneda nativa",
-                    value=bool(er.get("monto_moneda")),
-                    key="gasto_op_edit_upd_nat",
-                )
+                st.markdown(f"**Cuenta:** {emon} · {_caja_etiqueta_lista(ecaja) if ecaja else '—'}")
+                if emon == "VES" and _mm_f <= 0:
+                    st.warning(
+                        "Este movimiento **no tiene Bs guardados** en BD (`monto_moneda` vacío). "
+                        "Cargá abajo el **monto real en bolívares** que salió del banco y la **tasa** con la que querés valorar en el sistema."
+                    )
+
+                nu: float
                 p_mon_e: str | None = None
                 p_mm_e: float | None = None
-                if upd_nat:
-                    if emon == "VES":
-                        cur_bs = float(er.get("monto_moneda") or 0) or 0.01
-                        nv = st.number_input("Monto en Bs", min_value=0.01, value=max(0.01, cur_bs), format="%.2f")
-                        p_mon_e, p_mm_e = "VES", float(nv)
-                    elif emon == "USDT":
-                        cur_ut = float(er.get("monto_moneda") or 0) or 0.0001
-                        nv = st.number_input("Monto en USDT", min_value=0.0001, value=max(0.0001, cur_ut), format="%.4f")
-                        p_mon_e, p_mm_e = "USDT", float(nv)
+                upd_nat: bool
+
+                if emon == "VES":
+                    try:
+                        _tb0 = float(_tasa_bs_para_documento(t, usar_bcv=False)) if t else 0.0
+                    except (ValueError, TypeError):
+                        _tb0 = float(_nf(t.get("tasa_bs")) or 0) if t else 0.0
+                    if _tb0 <= 0:
+                        _tb0 = 300.0
+                    _sug_bs = _mm_f if _mm_f > 0 else max(0.01, _musd_er * _tb0)
+                    m_bs_in = st.number_input(
+                        "Monto en bolívares (Bs) — lo que salió de la cuenta",
+                        min_value=0.01,
+                        value=float(_round_money_2(_sug_bs)),
+                        format="%.2f",
+                        key="gasto_op_edit_bs",
+                    )
+                    tasa_bs_in = st.number_input(
+                        "Tasa Bs por 1 USD (para calcular el equiv. interno `monto_usd`)",
+                        min_value=0.01,
+                        value=float(_tb0),
+                        format="%.4f",
+                        key="gasto_op_edit_tasa_bs",
+                        help="Mismo criterio que al registrar un gasto en Bs: Bs ÷ esta tasa = valor que guarda el motor de saldos en USD.",
+                    )
+                    if float(tasa_bs_in) <= 0:
+                        nu = _musd_er
                     else:
-                        nv = st.number_input(
-                            "Monto en USD",
-                            min_value=0.01,
-                            value=max(0.01, float(er.get("monto_moneda") or nu)),
-                            format="%.2f",
-                        )
-                        p_mon_e, p_mm_e = "USD", float(nv)
+                        nu = float(m_bs_in) / float(tasa_bs_in)
+                    st.caption(
+                        f"En base se guardará: **moneda** = VES, **monto_moneda** = {_round_money_2(m_bs_in):,.2f} Bs, "
+                        f"**monto_usd** = US$ {_round_money_2(nu):,.2f} (equiv. para saldos)."
+                    )
+                    upd_nat = True
+                    p_mon_e, p_mm_e = "VES", float(m_bs_in)
+                elif emon == "USDT":
+                    t_ut0 = float(_nf(t.get("tasa_usdt")) or 1.0) if t else 1.0
+                    if t_ut0 <= 0:
+                        t_ut0 = 1.0
+                    _sug_ut = _mm_f if _mm_f > 0 else max(0.0001, _musd_er * t_ut0)
+                    m_ut_in = st.number_input(
+                        "Monto en USDT",
+                        min_value=0.0001,
+                        value=float(_round_money_2(_sug_ut)),
+                        format="%.4f",
+                        key="gasto_op_edit_ut",
+                    )
+                    t_ut_in = st.number_input(
+                        "Tasa USDT por 1 USD",
+                        min_value=0.0000001,
+                        value=float(t_ut0),
+                        format="%.6f",
+                        key="gasto_op_edit_tasa_ut",
+                    )
+                    if float(t_ut_in) <= 0:
+                        nu = _musd_er
+                    else:
+                        nu = float(m_ut_in) / float(t_ut_in)
+                    st.caption(
+                        f"En base: **moneda** = USDT, **monto_moneda** = {_round_money_2(m_ut_in):,.4f} USDT, "
+                        f"**monto_usd** = US$ {_round_money_2(nu):,.2f}."
+                    )
+                    upd_nat = True
+                    p_mon_e, p_mm_e = "USDT", float(m_ut_in)
+                else:
+                    nu = st.number_input(
+                        "Monto en USD (cuenta en dólares)",
+                        min_value=0.01,
+                        value=float(_round_money_2(_musd_er)),
+                        format="%.2f",
+                        key="gasto_op_edit_usd",
+                    )
+                    upd_nat = st.checkbox(
+                        "Guardar también en columnas moneda / monto_moneda (USD)",
+                        value=True,
+                        key="gasto_op_edit_upd_nat",
+                    )
+                    if upd_nat:
+                        p_mon_e, p_mm_e = "USD", float(nu)
                 nc = st.text_input("Concepto", value=str(er.get("concepto") or ""), key="gasto_op_edit_conc")
                 nr = st.text_input("Referencia", value=str(er.get("referencia") or ""), key="gasto_op_edit_ref")
                 ncat = st.text_input(
@@ -9373,26 +9435,29 @@ def module_gastos_operativos(sb: Client, erp_uid: str, t: dict[str, Any] | None)
                     key="gasto_op_edit_cat",
                 )
                 if st.form_submit_button("Guardar corrección"):
-                    pl_e: dict[str, Any] = {
-                        "p_usuario_id": erp_uid,
-                        "p_movimiento_id": pick,
-                        "p_monto_usd": float(nu),
-                        "p_concepto": (nc or "").strip(),
-                        "p_referencia": (nr or "").strip(),
-                        "p_categoria_gasto": (ncat or "").strip() or None,
-                        "p_actualizar_moneda_nativa": bool(upd_nat),
-                    }
-                    if upd_nat and p_mon_e and p_mm_e is not None:
-                        pl_e["p_moneda"] = p_mon_e
-                        pl_e["p_monto_moneda"] = float(p_mm_e)
-                    try:
-                        sb.rpc("corregir_movimiento_caja_manual_erp", pl_e).execute()
-                        st.success("Movimiento actualizado.")
-                        st.rerun()
-                    except Exception as ex:
-                        st.error(
-                            f"{_error_msg_from_supabase_exc(ex)} · Si falla el RPC, ejecutá **`patch_028`** en Supabase."
-                        )
+                    if nu <= 0:
+                        st.error("El equivalente USD calculado debe ser mayor que cero (revisá monto y tasa).")
+                    else:
+                        pl_e: dict[str, Any] = {
+                            "p_usuario_id": erp_uid,
+                            "p_movimiento_id": pick,
+                            "p_monto_usd": float(nu),
+                            "p_concepto": (nc or "").strip(),
+                            "p_referencia": (nr or "").strip(),
+                            "p_categoria_gasto": (ncat or "").strip() or None,
+                            "p_actualizar_moneda_nativa": bool(upd_nat),
+                        }
+                        if upd_nat and p_mon_e and p_mm_e is not None:
+                            pl_e["p_moneda"] = p_mon_e
+                            pl_e["p_monto_moneda"] = float(p_mm_e)
+                        try:
+                            sb.rpc("corregir_movimiento_caja_manual_erp", pl_e).execute()
+                            st.success("Movimiento actualizado.")
+                            st.rerun()
+                        except Exception as ex:
+                            st.error(
+                                f"{_error_msg_from_supabase_exc(ex)} · Si falla el RPC, ejecutá **`patch_028`** en Supabase."
+                            )
 
     if not tiene_cat:
         st.caption(
