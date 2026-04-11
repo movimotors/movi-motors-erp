@@ -9,6 +9,26 @@ from typing import Any
 import pandas as pd
 from supabase import Client
 
+from movi.net_retry import run_transient_http_retry
+
+_ID_CHUNK = 200
+
+
+def _productos_costo_por_ids(sb: Client, producto_ids: set[str]) -> dict[str, dict[str, Any]]:
+    """Solo costos de los IDs pedidos (evita descargar toda la tabla `productos` en cada KPI)."""
+    out: dict[str, dict[str, Any]] = {}
+    ids = sorted(producto_ids)
+    if not ids:
+        return out
+    for i in range(0, len(ids), _ID_CHUNK):
+        chunk = ids[i : i + _ID_CHUNK]
+        r = run_transient_http_retry(
+            lambda c=chunk: sb.table("productos").select("id, costo_usd").in_("id", c).execute()
+        )
+        for p in r.data or []:
+            out[str(p["id"])] = p
+    return out
+
 
 def compute_dashboard_kpis_periodo(
     sb: Client,
@@ -29,19 +49,23 @@ def compute_dashboard_kpis_periodo(
     d_prev_a = d_prev_b - timedelta(days=n_days - 1)
     r_fut = f"{d_b.isoformat()}T23:59:59"
     rows_cambios_bitacora = cambios_tesoreria_en_rango(sb, d_a, r_fut)
-    v_cur = (
-        sb.table("ventas")
-        .select("id, total_usd, fecha")
-        .gte("fecha", str(d_a))
-        .lte("fecha", r_fut)
-        .execute()
+    v_cur = run_transient_http_retry(
+        lambda: (
+            sb.table("ventas")
+            .select("id, total_usd, fecha")
+            .gte("fecha", str(d_a))
+            .lte("fecha", r_fut)
+            .execute()
+        )
     )
-    v_prev = (
-        sb.table("ventas")
-        .select("total_usd")
-        .gte("fecha", str(d_prev_a))
-        .lte("fecha", f"{d_prev_b.isoformat()}T23:59:59")
-        .execute()
+    v_prev = run_transient_http_retry(
+        lambda: (
+            sb.table("ventas")
+            .select("total_usd")
+            .gte("fecha", str(d_prev_a))
+            .lte("fecha", f"{d_prev_b.isoformat()}T23:59:59")
+            .execute()
+        )
     )
     df_vc = pd.DataFrame(v_cur.data or [])
     ventas_usd = float(pd.to_numeric(df_vc["total_usd"], errors="coerce").fillna(0).sum()) if not df_vc.empty else 0.0
@@ -51,17 +75,19 @@ def compute_dashboard_kpis_periodo(
     vids = [str(x["id"]) for x in (v_cur.data or [])]
     margen_usd = 0.0
     if vids:
-        det = (
-            sb.table("ventas_detalles")
-            .select("producto_id, cantidad, precio_unitario_usd")
-            .in_("venta_id", vids)
-            .execute()
+        det = run_transient_http_retry(
+            lambda: (
+                sb.table("ventas_detalles")
+                .select("producto_id, cantidad, precio_unitario_usd")
+                .in_("venta_id", vids)
+                .execute()
+            )
         )
         det_rows = det.data or []
-        pmap = {
-            str(p["id"]): p
-            for p in (sb.table("productos").select("id, costo_usd").execute().data or [])
-        }
+        pmap = _productos_costo_por_ids(
+            sb,
+            {str(row["producto_id"]) for row in det_rows if row.get("producto_id") is not None},
+        )
         for row in det_rows:
             pid = str(row["producto_id"])
             costo = float(pmap.get(pid, {}).get("costo_usd") or 0)
@@ -71,57 +97,75 @@ def compute_dashboard_kpis_periodo(
     vids_prev = [
         str(x["id"])
         for x in (
-            sb.table("ventas")
-            .select("id")
-            .gte("fecha", str(d_prev_a))
-            .lte("fecha", f"{d_prev_b.isoformat()}T23:59:59")
-            .execute()
-            .data
+            run_transient_http_retry(
+                lambda: (
+                    sb.table("ventas")
+                    .select("id")
+                    .gte("fecha", str(d_prev_a))
+                    .lte("fecha", f"{d_prev_b.isoformat()}T23:59:59")
+                    .execute()
+                )
+            ).data
             or []
         )
     ]
     margen_prev = 0.0
     if vids_prev:
-        detp = (
-            sb.table("ventas_detalles")
-            .select("producto_id, cantidad, precio_unitario_usd")
-            .in_("venta_id", vids_prev)
-            .execute()
+        detp = run_transient_http_retry(
+            lambda: (
+                sb.table("ventas_detalles")
+                .select("producto_id, cantidad, precio_unitario_usd")
+                .in_("venta_id", vids_prev)
+                .execute()
+            )
         )
-        pmap2 = {
-            str(p["id"]): p
-            for p in (sb.table("productos").select("id, costo_usd").execute().data or [])
-        }
-        for row in detp.data or []:
+        detp_rows = detp.data or []
+        pmap2 = _productos_costo_por_ids(
+            sb,
+            {str(row["producto_id"]) for row in detp_rows if row.get("producto_id") is not None},
+        )
+        for row in detp_rows:
             pid = str(row["producto_id"])
             costo = float(pmap2.get(pid, {}).get("costo_usd") or 0)
             cant = float(row["cantidad"])
             pu = float(row["precio_unitario_usd"])
             margen_prev += (pu - costo) * cant
-    prods = sb.table("productos").select("stock_actual, activo").eq("activo", True).execute()
+    prods = run_transient_http_retry(
+        lambda: sb.table("productos").select("stock_actual, activo").eq("activo", True).execute()
+    )
     unidades_stock = float(sum(float(p.get("stock_actual") or 0) for p in (prods.data or [])))
     n_sku = len(prods.data or [])
     try:
-        bal = sb.table("v_balance_consolidado_usd").select("total_usd").execute()
+        bal = run_transient_http_retry(
+            lambda: sb.table("v_balance_consolidado_usd").select("total_usd").execute()
+        )
         liquidez = float((bal.data or [{}])[0].get("total_usd") or 0)
     except Exception:
         liquidez = 0.0
     dsl_mov = f"{d_a.isoformat()}T00:00:00"
     try:
-        cr_p = sb.table("compras").select("total_usd").gte("fecha", str(d_a)).lte("fecha", r_fut).execute()
+        cr_p = run_transient_http_retry(
+            lambda: sb.table("compras")
+            .select("total_usd")
+            .gte("fecha", str(d_a))
+            .lte("fecha", r_fut)
+            .execute()
+        )
         compras_period_usd = sum(float(x.get("total_usd") or 0) for x in (cr_p.data or []))
     except Exception:
         compras_period_usd = 0.0
     gastos_op_period_usd = 0.0
     n_gastos_op_movs = 0
     try:
-        mr_go = (
-            sb.table("movimientos_caja")
-            .select("monto_usd,categoria_gasto")
-            .gte("created_at", dsl_mov)
-            .lte("created_at", r_fut)
-            .eq("tipo", "Egreso")
-            .execute()
+        mr_go = run_transient_http_retry(
+            lambda: (
+                sb.table("movimientos_caja")
+                .select("monto_usd,categoria_gasto")
+                .gte("created_at", dsl_mov)
+                .lte("created_at", r_fut)
+                .eq("tipo", "Egreso")
+                .execute()
+            )
         )
         for row in mr_go.data or []:
             cg = row.get("categoria_gasto")
