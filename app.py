@@ -4642,9 +4642,9 @@ def _fmt_dash_bucket_label(bk: str) -> str:
         "VES": "Bs",
         "USD": "US$",
         "USDT": "USDT",
-        "VES_MOTOR_USD": "Egreso cuenta Bs (equiv. interno ERP, US$)",
-        "USDT_MOTOR_USD": "Egreso cuenta USDT (equiv. interno ERP, US$)",
-        "USD_equiv": "Cuenta US$ o sin moneda en caja (equiv. USD)",
+        "VES_MOTOR_USD": "Cuenta Bs (VES)",
+        "USDT_MOTOR_USD": "Cuenta USDT",
+        "USD_equiv": "Equiv. USD",
     }.get(bk, bk)
 
 
@@ -4657,7 +4657,10 @@ def _markdown_lineas_flujo_caja(d: dict[str, float]) -> str:
         v = float(d.get(bk) or 0)
         if abs(v) >= 0.005:
             lab = _fmt_dash_bucket_label(bk)
-            lines.append(f"- **{lab}:** {_round_money_2(v):,.2f}")
+            if bk in ("VES_MOTOR_USD", "USDT_MOTOR_USD"):
+                lines.append(f"- **{lab}:** equiv. US$ {_round_money_2(v):,.2f}")
+            else:
+                lines.append(f"- **{lab}:** {_round_money_2(v):,.2f}")
     for bk, v in sorted(d.items()):
         if bk in order:
             continue
@@ -4678,7 +4681,7 @@ def _gastos_op_totales_por_moneda(by_cat_mm: dict[str, dict[str, float]]) -> dic
 def _fmt_multimon_bucket_line(
     d: dict[str, float], *, legacy_suffix: str = "registros viejos"
 ) -> tuple[str, str | None]:
-    """Nativos VES/USD/USDT; egresos sin monto nativo según moneda de cuenta; pie con USD_equiv mezclado."""
+    """Línea compacta: moneda nativa o moneda de cuenta (VES/USDT/USD) + cifra; pie solo si hay mezcla."""
     parts_vis: list[str] = []
     for bk in ("VES", "USD", "USDT"):
         v = float(d.get(bk) or 0)
@@ -4686,35 +4689,18 @@ def _fmt_multimon_bucket_line(
             parts_vis.append(f"{_fmt_dash_bucket_label(bk)} {_round_money_2(v):,.2f}")
     v_vm = float(d.get("VES_MOTOR_USD") or 0)
     if abs(v_vm) >= 0.005:
-        parts_vis.append(
-            f"Salida cuenta bolívares — equiv. interno ERP US$ {_round_money_2(v_vm):,.2f} "
-            f"(no es pago en US$ en efectivo; falta monto en Bs en el movimiento)"
-        )
+        parts_vis.append(f"VES · equiv. US$ {_round_money_2(v_vm):,.2f}")
     v_ut = float(d.get("USDT_MOTOR_USD") or 0)
     if abs(v_ut) >= 0.005:
-        parts_vis.append(
-            f"Salida cuenta USDT — equiv. interno ERP US$ {_round_money_2(v_ut):,.2f} "
-            f"(falta monto USDT en el movimiento)"
-        )
+        parts_vis.append(f"USDT · equiv. US$ {_round_money_2(v_ut):,.2f}")
     ueq = float(d.get("USD_equiv") or 0)
     if parts_vis:
-        extras: list[str] = []
-        if abs(v_vm) >= 0.005:
-            extras.append(
-                "Para ver el monto exacto en Bs, corregí el egreso en Gastos operativos "
-                "(o que el alta guarde monto_moneda con patch_028)."
-            )
+        foot: str | None = None
         if abs(ueq) >= 0.005:
-            extras.append(
-                f"Más equiv. USD ({legacy_suffix}, cuenta US$ o sin moneda en caja): US$ {_round_money_2(ueq):,.2f}"
-            )
-        foot = " ".join(extras) if extras else None
+            foot = f"+ US$ {_round_money_2(ueq):,.2f} ({legacy_suffix})"
         return " · ".join(parts_vis), foot
     main = f"US$ {_round_money_2(ueq):,.2f}" if abs(ueq) >= 0.005 else "—"
-    foot = (
-        "Solo equivalente en sistema (sin moneda nativa guardada)" if abs(ueq) >= 0.005 else None
-    )
-    return main, foot
+    return main, None
 
 
 def _tarjeta_gasto_cat_multimon(cat: str, sub: dict[str, float]) -> None:
@@ -5005,10 +4991,10 @@ def _pdf_resumen_ejecutivo_bytes(
                 parts.append(f"{_fmt_dash_bucket_label(bk)} {_round_money_2(v):,.2f}")
         v_vm = float(sub.get("VES_MOTOR_USD") or 0)
         if abs(v_vm) >= 0.005:
-            parts.append(f"Cuenta Bs (equiv. ERP USD) {_round_money_2(v_vm):,.2f}")
+            parts.append(f"VES equiv. US$ {_round_money_2(v_vm):,.2f}")
         v_ut = float(sub.get("USDT_MOTOR_USD") or 0)
         if abs(v_ut) >= 0.005:
-            parts.append(f"Cuenta USDT (equiv. ERP USD) {_round_money_2(v_ut):,.2f}")
+            parts.append(f"USDT equiv. US$ {_round_money_2(v_ut):,.2f}")
         ueq = float(sub.get("USD_equiv") or 0)
         if abs(ueq) >= 0.005:
             parts.append(f"Equiv. USD {_round_money_2(ueq):,.2f}")
@@ -5948,7 +5934,7 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
     _cmap_kpi = _caja_map_por_id(sb)
     go_mm_kpi = _gastos_op_por_categoria_multimoneda(sb, dsl_mov, r_fut, _cmap_kpi)
     go_ag_kpi = _gastos_op_totales_por_moneda(go_mm_kpi)
-    go_kpi_main, go_kpi_foot = _fmt_multimon_bucket_line(go_ag_kpi, legacy_suffix="registros viejos")
+    go_kpi_main, go_kpi_foot = _fmt_multimon_bucket_line(go_ag_kpi, legacy_suffix="otros")
     _go_kpi_sub_bits: list[str] = []
     if go_kpi_foot:
         _go_kpi_sub_bits.append(go_kpi_foot)
@@ -5956,8 +5942,6 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
         _go_kpi_sub_bits.append(f"{n_gastos_op_movs} mov. con categoría")
     else:
         _go_kpi_sub_bits.append("Registrá en Gastos operativos")
-    if gastos_op_period_usd >= 0.005:
-        _go_kpi_sub_bits.append(f"Equiv. motor (Σ monto_usd): US$ {gastos_op_period_usd:,.2f}")
     go_kpi_sub = " · ".join(_go_kpi_sub_bits) if _go_kpi_sub_bits else None
 
     with st.expander("Información del panel", expanded=False, key="modinfo_exp_dashboard"):
@@ -6079,8 +6063,7 @@ def module_dashboard(sb: Client, t: dict[str, Any] | None) -> None:
                 "Compras + gastos op. (periodo)",
                 _total_kpi_val,
                 None,
-                "Sin unificar monedas: compras en **USD** de documentos; gastos en la **moneda nativa** del movimiento si está en BD, "
-                "si no en **equiv. USD** ya guardado al registrar. Este bloque **no** aplica tasas del día.",
+                "Compras en USD (documentos); gastos con moneda de cuenta o monto nativo en BD.",
             )
 
         st.markdown("##### Seguimiento: Bs → USD / USDT (bitácora de tesorería)")
@@ -9132,15 +9115,9 @@ def _gasto_op_fmt_monto_tabla(r: dict[str, Any], cmap: dict[str, dict[str, Any]]
     cmon_raw = str(cj.get("moneda_cuenta") or "").strip().upper()
     cmon = "VES" if cmon_raw in ("VES", "BS") else cmon_raw
     if cmon == "VES":
-        return (
-            f"Cuenta bolívares — equiv. interno ERP US$ {_round_money_2(musd):,.2f} "
-            f"(no indica dólares en efectivo; falta monto Bs en el movimiento)"
-        )
+        return f"VES · equiv. US$ {_round_money_2(musd):,.2f}"
     if cmon == "USDT":
-        return (
-            f"Cuenta USDT — equiv. interno ERP US$ {_round_money_2(musd):,.2f} "
-            f"(falta monto USDT en el movimiento)"
-        )
+        return f"USDT · equiv. US$ {_round_money_2(musd):,.2f}"
     return f"US$ {_round_money_2(musd):,.2f}"
 
 
