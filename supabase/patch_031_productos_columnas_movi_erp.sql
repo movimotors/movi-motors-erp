@@ -80,7 +80,7 @@ CREATE TRIGGER trg_productos_sync_precios_movi_erp
   BEFORE INSERT OR UPDATE OF precio_costo, costo_usd, precio_venta_detal, precio_v_usd
   ON public.productos
   FOR EACH ROW
-  EXECUTE PROCEDURE public.productos_sync_precios_movi_erp();
+  EXECUTE FUNCTION public.productos_sync_precios_movi_erp();
 
 COMMENT ON FUNCTION public.productos_sync_precios_movi_erp() IS
   'PATCH 031: alinea precio_costo↔costo_usd y precio_venta_detal↔precio_v_usd en cada escritura.';
