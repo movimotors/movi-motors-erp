@@ -1,6 +1,6 @@
 # Continuar — Movi Import / web Lovable
 
-**Ubicación de este archivo:** raíz del repositorio (`continuar.md`).
+**Ubicación de este archivo:** raíz del repositorio (`CONTINUAR.md`).
 
 ## Retomar en Cursor
 
