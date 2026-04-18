@@ -5,6 +5,8 @@ UBICACIÓN EN EL REPOSITORIO
   Carpeta: movi import/
   Archivo: referencia-proyecto-web-movi.txt
 
+  Punto de entrada en la raíz del repo: continuar.md
+
 ================================================================================
 PALABRA CLAVE / ETIQUETA PARA RETOMAR EN CURSOR O EN OTRO CHAT
 ================================================================================
