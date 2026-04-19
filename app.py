@@ -6900,7 +6900,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
             st.rerun()
 
 
-def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
+def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None, rol: str) -> None:
     _modulo_titulo_info(
         "Ventas y CXC",
         key="ventas",
@@ -6928,7 +6928,8 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
             st.caption(str(_okb.get("extra")).strip())
         st.info(
             "**Para no duplicar:** no vuelvas a pulsar **Registrar venta** si ya ves este aviso. "
-            "Si te equivocaste, **Mantenimiento → Anular venta** (superusuario)."
+            "Si te equivocaste, usá **Anular venta** más abajo en este módulo (administrador) "
+            "o **Mantenimiento → Anular venta** (superusuario)."
         )
         if st.button("Ocultar aviso y seguir", key="venta_ok_banner_dismiss"):
             del st.session_state["venta_ok_banner"]
@@ -7658,6 +7659,52 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
                     }
                 )
             st.dataframe(pd.DataFrame(dfvh), use_container_width=True, hide_index=True)
+
+    if rol in ("admin", "superuser"):
+        st.divider()
+        with st.expander("Anular venta (corregir error de carga)", expanded=False):
+            st.warning(
+                "Solo si la venta se registró **mal**. Se revierten los **movimientos de caja** de esa venta, "
+                "se **restaura el stock** (incluye kits y seriales de motor si aplica) y se **elimina** la venta y su CXC. "
+                "Requiere en Supabase **`patch_020`** y, si usás seriales en motores, **`patch_023`**."
+            )
+            try:
+                rv_a = (
+                    sb.table("ventas")
+                    .select("id,numero,cliente,fecha,total_usd,forma_pago")
+                    .order("fecha", desc=True)
+                    .limit(100)
+                    .execute()
+                )
+                vrows_a = rv_a.data or []
+            except Exception as e:
+                st.error(str(e))
+                vrows_a = []
+            if not vrows_a:
+                st.info("No hay ventas en la base.")
+            else:
+                v_opts_a: dict[str, str] = {}
+                for x in vrows_a:
+                    lab = (
+                        f"Venta #{x.get('numero')} — {str(x.get('cliente') or '')[:36]} — "
+                        f"US$ {x.get('total_usd')} — {str(x.get('fecha') or '')[:16]} — {x.get('forma_pago')}"
+                    )
+                    v_opts_a[lab] = str(x["id"])
+                pick_a = st.selectbox("Venta a anular", options=list(v_opts_a.keys()), key="ventas_mod_anul_sel")
+                conf_a = st.text_input("Escribí **ANULAR_VENTA** para confirmar", key="ventas_mod_anul_conf")
+                if st.button("Anular venta seleccionada", key="ventas_mod_anul_btn"):
+                    if conf_a.strip() != "ANULAR_VENTA":
+                        st.error("Confirmación incorrecta.")
+                    else:
+                        try:
+                            sb.rpc(
+                                "anular_venta_erp",
+                                {"p_usuario_id": erp_uid, "p_venta_id": v_opts_a[pick_a]},
+                            ).execute()
+                            st.success("Venta anulada. Revisá caja y stock.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(_error_msg_from_supabase_exc(e))
 
     st.divider()
     st.caption(
@@ -8891,7 +8938,8 @@ def panel_anular_venta_compra_mantenimiento(sb: Client, erp_uid: str) -> None:
         "Usá esto solo si registraste **mal** una venta o compra. "
         "Se revierten los **movimientos de caja** ligados al documento, se ajusta el **stock** (y el **costo** en compras) y se elimina el registro. "
         "Si **borraste la venta a mano**, el cobro puede haber quedado en caja sin venta: en ese caso usá **Movimientos de caja huérfanos de venta** (más abajo). "
-        "Hace falta ejecutar en Supabase **`supabase/patch_020_anular_venta_compra.sql`**."
+        "Hace falta ejecutar en Supabase **`supabase/patch_020_anular_venta_compra.sql`**. "
+        "Los usuarios **administrador** también pueden anular desde **Ventas / CXC → Anular venta**."
     )
     t_an1, t_an2 = st.tabs(["Anular venta", "Anular compra"])
     with t_an1:
@@ -9236,7 +9284,7 @@ def main() -> None:
     elif mod == "Inventario" and role_can(rol, "inventario"):
         module_inventario(sb, erp_uid, t)
     elif mod == "Ventas / CXC" and role_can(rol, "ventas"):
-        module_ventas(sb, erp_uid, t)
+        module_ventas(sb, erp_uid, t, rol)
     elif mod == "Compras / CXP" and role_can(rol, "compras"):
         module_compras(sb, erp_uid, t)
     elif mod == "Cajas y bancos" and role_can(rol, "cajas"):
