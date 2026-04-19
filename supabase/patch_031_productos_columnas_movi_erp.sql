@@ -1,8 +1,8 @@
 -- =============================================================================
--- PATCH 031 — Alinear tabla public.productos con el modelo Laravel movi-erp
+-- PATCH 031 — Columnas extendidas en public.productos
 --   (nombre_producto, modelo, marca_id, precio_costo, precio_venta_detal).
 -- Ejecutar UNA VEZ en Supabase SQL Editor.
--- Mantiene costo_usd / precio_v_usd en sync vía trigger (Streamlit + movi-erp).
+-- Mantiene costo_usd / precio_v_usd en sync vía trigger (columnas duplicadas alineadas).
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------
@@ -23,11 +23,11 @@ ALTER TABLE public.productos
 ALTER TABLE public.productos
   ADD COLUMN IF NOT EXISTS precio_venta_detal NUMERIC(14, 2);
 
-COMMENT ON COLUMN public.productos.nombre_producto IS 'Nombre corto / título (UI movi-erp; opcional si se usa solo descripcion)';
+COMMENT ON COLUMN public.productos.nombre_producto IS 'Nombre corto / título (UI; opcional si se usa solo descripcion)';
 COMMENT ON COLUMN public.productos.modelo IS 'Modelo de parte o referencia comercial';
 COMMENT ON COLUMN public.productos.marca_id IS 'FK a marcas (catálogo); opcional; marca_producto sigue siendo texto libre';
-COMMENT ON COLUMN public.productos.precio_costo IS 'Costo en USD (paridad con movi-erp); sincronizado con costo_usd';
-COMMENT ON COLUMN public.productos.precio_venta_detal IS 'Precio venta detalle USD (movi-erp); sincronizado con precio_v_usd';
+COMMENT ON COLUMN public.productos.precio_costo IS 'Costo en USD; sincronizado con costo_usd';
+COMMENT ON COLUMN public.productos.precio_venta_detal IS 'Precio venta detalle USD; sincronizado con precio_v_usd';
 
 CREATE INDEX IF NOT EXISTS idx_productos_marca_id
   ON public.productos (marca_id)

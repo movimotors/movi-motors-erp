@@ -1,14 +1,14 @@
--- Promover tu usuario a administrador del ERP (movi-erp / Streamlit).
+-- Promover tu usuario a administrador del ERP Movi (Streamlit).
 -- En Supabase el CHECK `erp_users_rol_check` solo permite:
 --   'superuser' | 'admin' | 'vendedor' | 'almacen'
--- NO usar 'administrador' (no está en el CHECK). En Laravel eso se mapea desde 'admin'.
+-- NO usar 'administrador' (no está en el CHECK): en esta base el valor válido es exactamente **admin**.
 --
 -- Ejecutá en SQL Editor. Reemplazá el usuario antes de correr.
 UPDATE public.erp_users
 SET rol = 'admin'
 WHERE username = 'CAMBIAR_POR_TU_USUARIO';
 
--- Almacén (mismo nombre en BD y en Laravel):
+-- Almacén (rol en BD):
 -- UPDATE public.erp_users SET rol = 'almacen' WHERE username = 'CAMBIAR_POR_TU_USUARIO';
 
 -- Verificación:
