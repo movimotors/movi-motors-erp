@@ -12,6 +12,7 @@ import plotly.express as px
 import streamlit as st
 from supabase import Client
 
+from movi.producto_busqueda import coincide_busqueda_tokens
 from movi.rbac import role_can
 
 
@@ -244,10 +245,18 @@ def render_module_dashboard(sb: Client, t: dict[str, Any] | None, *, deps: Dashb
             else:
                 dfi_show = dfi_inv.copy()
                 if q_search and q_search.strip():
-                    qs = q_search.strip().lower()
-                    mask = dfi_show["Producto"].str.lower().str.contains(qs, na=False) | dfi_show[
-                        "Código"
-                    ].str.lower().str.contains(qs, na=False)
+                    q_raw = q_search.strip()
+
+                    def _dash_inv_row_blob(r: pd.Series) -> str:
+                        return " ".join(
+                            str(r.get(c) or "")
+                            for c in ("Producto", "Código", "Categoría", "Semáforo", "Stock", "Mín.")
+                        ).lower()
+
+                    mask = dfi_show.apply(
+                        lambda r, qr=q_raw: coincide_busqueda_tokens(_dash_inv_row_blob(r), qr),
+                        axis=1,
+                    )
                     dfi_show = dfi_show[mask]
                 if dfi_show.empty:
                     st.info("Ningún producto coincide con la búsqueda. Probá otro texto o vaciá el buscador.")

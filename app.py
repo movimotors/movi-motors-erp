@@ -61,6 +61,7 @@ from movi.modules.compras import ComprasModuleDeps, render_module_compras
 from movi.modules.gastos_operativos import GastosOperativosModuleDeps, render_module_gastos_operativos
 from movi.modules.cajas import CajasModuleDeps, render_module_cajas
 from movi.modules.reportes import ReportesModuleDeps, render_module_reportes
+from movi.producto_busqueda import filtrar_productos_por_busqueda
 
 _PAGE_ICON: str = brand_logo_file() or "⚙️"
 st.set_page_config(
@@ -90,7 +91,7 @@ def _movi_bump_form_nonce(name: str) -> None:
 
 def _movi_reset_venta_form_fields() -> None:
     """Quita el estado de widgets del formulario de venta (incl. cobros y líneas de producto)."""
-    _movi_ss_pop_key_prefixes("vp_", "vq_", "vpu_", "vcb_", "vca_", "vsrl_")
+    _movi_ss_pop_key_prefixes("vp_", "vp_q_", "vq_", "vpu_", "vcb_", "vca_", "vsrl_")
     _movi_ss_pop_keys(
         "venta_doc_tasa_bs",
         "venta_tasa_bs_override",
@@ -197,7 +198,7 @@ def _movi_reset_venta_session_nueva(plist: list[dict[str, Any]], id_to_price: di
 
 
 def _movi_reset_compra_form_fields() -> None:
-    _movi_ss_pop_key_prefixes("cp_", "cq_", "ccu_")
+    _movi_ss_pop_key_prefixes("cp_", "cp_q_", "cq_", "ccu_")
     _movi_ss_pop_keys(
         "forma_compra",
         "caja_compra",
@@ -1972,140 +1973,6 @@ def _reporte_tabla_a_excel(df: pd.DataFrame, *, nombre_hoja: str = "Datos") -> b
 def _reporte_tabla_a_csv(df: pd.DataFrame) -> bytes:
     """CSV con BOM para que Excel en Windows abra bien las tildes."""
     return df.to_csv(index=False).encode("utf-8-sig")
-
-
-def _md_celda_ia(x: Any, *, max_len: int = 320) -> str:
-    """Texto seguro para tablas Markdown (evita `|` y saltos de línea que rompen la tabla)."""
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        s = ""
-    else:
-        s = str(x).replace("\r\n", " ").replace("\n", " ").replace("|", "·").strip()
-    if len(s) > max_len:
-        s = s[: max_len - 1] + "…"
-    return s or "—"
-
-
-def inventario_activos_markdown_ia(sb: Client, _t: dict[str, Any] | None) -> str:
-    """
-    Documento Markdown: solo productos **activos**, con stock y precio de venta **solo en USD**.
-    Pensado para subirlo a un asistente / IA que consulte disponibilidad.
-    """
-    try:
-        cats_list = (sb.table("categorias").select("id,nombre").order("nombre").execute().data or [])
-    except Exception:
-        cats_list = []
-    id_to_n, _, _ = _categoria_maps_from_rows(cats_list)
-    df = _inv_enrich_compat_columns(_normalize_productos_inventario_df(_fetch_productos_inventario_df(sb)))
-    if df.empty:
-        now_vz = datetime.now(ZoneInfo("America/Caracas"))
-        return "\n".join(
-            [
-                "# Inventario Movi Motors — consulta de disponibilidad y precios",
-                "",
-                f"- **Generado (Caracas):** {now_vz.strftime('%Y-%m-%d %H:%M')} ({now_vz.tzname()})",
-                "",
-                "## Productos activos",
-                "",
-                "*No hay productos en la base.*",
-                "",
-            ]
-        )
-    if "categoria_id" in df.columns:
-        df["categoria"] = df["categoria_id"].apply(
-            lambda x: id_to_n.get(str(x).strip(), "")
-            if x is not None and not (isinstance(x, float) and pd.isna(x)) and str(x).strip()
-            else ""
-        )
-    else:
-        df["categoria"] = ""
-
-    if "activo" not in df.columns:
-        activos = df.iloc[0:0]
-    else:
-        activos = df.loc[df["activo"] == True].copy()  # noqa: E712
-
-    now_vz = datetime.now(ZoneInfo("America/Caracas"))
-
-    lines: list[str] = [
-        "# Inventario Movi Motors — consulta de disponibilidad y precios",
-        "",
-        f"- **Generado (Caracas):** {now_vz.strftime('%Y-%m-%d %H:%M')} ({now_vz.tzname()})",
-        "- **Alcance:** solo productos marcados como **activos** en el ERP.",
-        "- **Moneda de precios:** solo **USD** (dólares), según `precio_v_usd` en el maestro.",
-        "",
-        "## Cómo usar este archivo",
-        "",
-        "Cada fila es un producto. **Stock** = unidades disponibles según el sistema (ventas bajan, compras suben). "
-        "**Precio venta (USD)** es el valor de venta cargado en el ERP.",
-        "",
-    ]
-
-    n = len(activos)
-    if n == 0:
-        lines.extend(["## Productos activos", "", "*No hay productos activos en la base.*", ""])
-        return "\n".join(lines)
-
-    con_stock = sum(1 for _, r in activos.iterrows() if _inv_stock_int(r.get("stock_actual")) > 0)
-    sin_stock = n - con_stock
-    lines.extend(
-        [
-            "## Resumen",
-            "",
-            f"- **Productos activos:** {n}",
-            f"- **Con stock > 0:** {con_stock}",
-            f"- **Sin unidades (stock 0):** {sin_stock}",
-            "",
-            "## Detalle (tabla)",
-            "",
-            "| Código | OEM | Descripción | Categoría | Marca rep. | Cond. | Stock | Mín. | ¿Bajo mín.? | Precio venta USD | Ubicación | Vehículos compat. | Años | Kit | Disponibilidad |",
-            "| --- | --- | --- | --- | --- | --- | ---: | ---: | --- | ---: | --- | --- | --- | --- | --- |",
-        ]
-    )
-
-    activos = activos.assign(
-        _cs=activos["categoria"].fillna("").map(lambda x: str(x).casefold()),
-        _ds=activos["descripcion"].fillna("").map(lambda x: str(x).casefold()),
-    )
-    activos = activos.sort_values(["_cs", "_ds"]).drop(columns=["_cs", "_ds"])
-
-    for _, r in activos.iterrows():
-        st_i = _inv_stock_int(r.get("stock_actual"))
-        smin = _inv_stock_int(r.get("stock_minimo"))
-        bajo = "sí" if st_i <= smin and smin > 0 else "no"
-        if st_i <= 0:
-            disp = "Sin unidades"
-        elif st_i <= smin and smin > 0:
-            disp = f"En stock ({st_i}) — atención: en o bajo mínimo ({smin})"
-        else:
-            disp = f"En stock ({st_i} uds.)"
-        try:
-            pv_usd = float(r.get("precio_v_usd") or 0)
-        except (TypeError, ValueError):
-            pv_usd = 0.0
-        es_kit = r.get("es_compuesto")
-        kit_txt = "sí" if es_kit else "no"
-
-        row_cells = [
-            _md_celda_ia(r.get("codigo"), max_len=48),
-            _md_celda_ia(r.get("sku_oem"), max_len=64),
-            _md_celda_ia(r.get("descripcion"), max_len=280),
-            _md_celda_ia(r.get("categoria"), max_len=64),
-            _md_celda_ia(r.get("marca_producto"), max_len=48),
-            _md_celda_ia(r.get("condicion"), max_len=12),
-            str(st_i),
-            str(smin),
-            bajo,
-            f"{pv_usd:,.2f}",
-            _md_celda_ia(r.get("ubicacion"), max_len=120),
-            _md_celda_ia(r.get("vehiculos_compat"), max_len=200),
-            _md_celda_ia(r.get("años_compat"), max_len=80),
-            kit_txt,
-            _md_celda_ia(disp, max_len=120),
-        ]
-        lines.append("| " + " | ".join(row_cells) + " |")
-
-    lines.append("")
-    return "\n".join(lines)
 
 
 def _pdf_inventario_col_widths_for_keys(keys: list[str], total_w: float) -> list[float]:
@@ -5824,25 +5691,44 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                         f"(menos de {_max_ficha}) para usar esta ficha."
                     )
                 else:
-                    _labels: dict[str, str] = {}
-                    for _, _r in df_view.iterrows():
-                        _cod = _export_cell_txt(_r.get("codigo")) or "—"
-                        _desc = _export_cell_txt(_r.get("descripcion")) or "—"
-                        _lid = str(_r.get("id") or "").strip()
-                        if not _lid:
-                            continue
-                        _lab = f"{_cod} · {_desc[:48]}" + ("" if len(_desc) <= 48 else "…")
-                        if _lab in _labels:
-                            _lab = f"{_lab} [{_lid[:8]}]"
-                        _labels[_lab] = _lid
-                    _pick_labs = sorted(_labels.keys(), key=str.casefold)
-                    _sel_lab = st.selectbox(
-                        "Elegí el producto a editar",
-                        options=["—"] + _pick_labs,
-                        index=0,
-                        key="inv_ficha_producto_pick",
-                        help="El listado respeta búsqueda y categoría. Cambiá acá de ítem sin guardar el formulario.",
+                    _ref_ficha = st.text_input(
+                        "Buscar en este listado (código, OEM, descripción, compat…)",
+                        key="inv_ficha_refine_q",
+                        placeholder="Varias palabras: deben aparecer todas (igual que el buscador principal)",
+                        help="Filtra además del resultado ya acotado arriba por *Buscar* y *Solo categoría*.",
                     )
+                    _rqf = (_ref_ficha or "").strip()
+                    if _rqf and not df_view.empty:
+                        _m_rf = df_view.apply(lambda r: _inv_row_matches_query(r, _rqf), axis=1)
+                        df_ficha = df_view.loc[_m_rf]
+                    else:
+                        df_ficha = df_view
+                    _labels: dict[str, str] = {}
+                    _sel_lab = "—"
+                    if df_ficha.empty:
+                        st.info(
+                            "Ningún producto coincide con el filtro de esta pestaña. "
+                            "Vacía el campo **Buscar en este listado** o ajustá el texto."
+                        )
+                    else:
+                        for _, _r in df_ficha.iterrows():
+                            _cod = _export_cell_txt(_r.get("codigo")) or "—"
+                            _desc = _export_cell_txt(_r.get("descripcion")) or "—"
+                            _lid = str(_r.get("id") or "").strip()
+                            if not _lid:
+                                continue
+                            _lab = f"{_cod} · {_desc[:48]}" + ("" if len(_desc) <= 48 else "…")
+                            if _lab in _labels:
+                                _lab = f"{_lab} [{_lid[:8]}]"
+                            _labels[_lab] = _lid
+                        _pick_labs = sorted(_labels.keys(), key=str.casefold)
+                        _sel_lab = st.selectbox(
+                            "Elegí el producto a editar",
+                            options=["—"] + _pick_labs,
+                            index=0,
+                            key="inv_ficha_producto_pick",
+                            help="Listado asistido: filtrá con el campo de búsqueda de arriba dentro de esta pestaña.",
+                        )
                     if _sel_lab != "—" and _sel_lab in _labels:
                         _pid = _labels[_sel_lab]
                         _row = df_view[df_view["id"].astype(str) == _pid]
@@ -6448,7 +6334,10 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
             try:
                 _pxk = (
                     sb.table("productos")
-                    .select("id,descripcion,stock_actual,es_compuesto,activo")
+                    .select(
+                        "id,descripcion,codigo,sku_oem,marca_producto,compatibilidad,"
+                        "stock_actual,es_compuesto,activo"
+                    )
                     .eq("activo", True)
                     .order("descripcion")
                     .limit(3000)
@@ -6460,7 +6349,9 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                     try:
                         _pxk = (
                             sb.table("productos")
-                            .select("id,descripcion,stock_actual,activo")
+                            .select(
+                                "id,descripcion,codigo,sku_oem,marca_producto,compatibilidad,stock_actual,activo"
+                            )
                             .eq("activo", True)
                             .order("descripcion")
                             .limit(3000)
@@ -6482,8 +6373,17 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                         return ""
                     return str(opt.split(" ‖ ", 1)[-1]).strip()
 
+                _kit_q = st.text_input(
+                    "Buscar cabecera de kit (código, OEM, descripción…)",
+                    key="inv_kit_parent_q",
+                    placeholder="Varias palabras: deben aparecer todas",
+                )
+                _plk_f = filtrar_productos_por_busqueda(_plk, _kit_q)
+                if not _plk_f:
+                    st.caption("Sin coincidencias; mostrando los primeros ítems. Vacía o cambiá la búsqueda.")
+                    _plk_f = _plk[:400]
                 _lkp: dict[str, str] = {}
-                for _p in _plk:
+                for _p in _plk_f:
                     _i = str(_p.get("id") or "").strip()
                     if not _i:
                         continue
@@ -6491,7 +6391,14 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                     _suf = " (kit)" if _p.get("es_compuesto") else ""
                     _lkp[f"{_d}{_suf}"] = _i
                 _k_keys = sorted(_lkp.keys(), key=str.casefold)
-                _selk_lab = st.selectbox("Producto kit (cabecera)", options=_k_keys, key="inv_kit_parent_lab")
+                _prev_klab = st.session_state.get("inv_kit_parent_lab")
+                _ixk = _k_keys.index(str(_prev_klab)) if _prev_klab in _k_keys else 0
+                _selk_lab = st.selectbox(
+                    "Producto kit (cabecera)",
+                    options=_k_keys,
+                    index=_ixk,
+                    key="inv_kit_parent_lab",
+                )
                 _kid = _lkp[str(_selk_lab)]
                 _comp_pool = [p for p in _plk if str(p.get("id")) != _kid and not p.get("es_compuesto")]
                 if not _comp_pool:
@@ -6621,8 +6528,17 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
             if not _rows_z:
                 st.info("No hay productos que mostrar (o ninguno coincide con el filtro de kits).")
             else:
+                _zq_del = st.text_input(
+                    "Buscar en la lista (código, descripción…)",
+                    key="inv_del_prod_q",
+                    placeholder="Varias palabras: deben aparecer todas",
+                )
+                _rows_zf = filtrar_productos_por_busqueda(_rows_z, _zq_del)
+                if not _rows_zf:
+                    st.caption("Sin coincidencias; mostrando una muestra. Vacía la búsqueda.")
+                    _rows_zf = _rows_z[:500]
                 _lab_z: dict[str, str] = {}
-                for _rz in _rows_z:
+                for _rz in _rows_zf:
                     _iz = str(_rz.get("id") or "").strip()
                     if not _iz:
                         continue
@@ -6661,7 +6577,10 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
             try:
                 _pm = (
                     sb.table("productos")
-                    .select("id,codigo,descripcion,stock_actual,es_compuesto")
+                    .select(
+                        "id,codigo,descripcion,sku_oem,marca_producto,compatibilidad,"
+                        "stock_actual,es_compuesto"
+                    )
                     .eq("activo", True)
                     .order("descripcion")
                     .limit(2000)
@@ -6672,7 +6591,7 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                 try:
                     _pm = (
                         sb.table("productos")
-                        .select("id,codigo,descripcion,stock_actual")
+                        .select("id,codigo,descripcion,sku_oem,marca_producto,compatibilidad,stock_actual")
                         .eq("activo", True)
                         .order("descripcion")
                         .limit(2000)
@@ -6685,8 +6604,17 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
             if not _rows_m:
                 st.warning("No hay productos activos.")
             else:
+                _mq_mov = st.text_input(
+                    "Buscar producto (código, OEM, descripción…)",
+                    key="inv_mov_prod_q",
+                    placeholder="Varias palabras: deben aparecer todas",
+                )
+                _rows_mf = filtrar_productos_por_busqueda(_rows_m, _mq_mov)
+                if not _rows_mf:
+                    st.caption("Sin coincidencias; mostrando una muestra. Vacía la búsqueda.")
+                    _rows_mf = _rows_m[:500]
                 _lab_m: dict[str, str] = {}
-                for _rm in _rows_m:
+                for _rm in _rows_mf:
                     _im = str(_rm.get("id") or "").strip()
                     if not _im:
                         continue
@@ -6754,25 +6682,6 @@ def module_inventario(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> Non
                         st.dataframe(pd.DataFrame(_hist.data), use_container_width=True, hide_index=True)
                 except Exception:
                     pass
-
-    _ts_inv_md = _backup_file_timestamp()
-    with st.expander("Inventario activo en Markdown (.md) — para asistente / IA", expanded=False):
-        st.caption(
-            "Mismo contenido que en **Reportes → Inventario**: tabla en Markdown con **solo productos activos**, "
-            "stock, **precio en USD** y texto de **disponibilidad** por ítem."
-        )
-        try:
-            _md_inv = inventario_activos_markdown_ia(sb, t)
-            st.download_button(
-                label=f"Descargar — inventario_ia_{_ts_inv_md}.md",
-                data=_md_inv.encode("utf-8"),
-                file_name=f"inventario_ia_{_ts_inv_md}.md",
-                mime="text/markdown",
-                key="inv_dl_md_ia",
-                use_container_width=True,
-            )
-        except Exception as e:
-            st.error(str(e))
 
     st.caption(
         "CSV: obligatorias **codigo** (en import no hay autogenerado; ponelos vos), **descripcion**, **stock_actual**, "
@@ -7032,7 +6941,8 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
         prods = (
             sb.table("productos")
             .select(
-                "id,descripcion,precio_v_usd,stock_actual,es_compuesto,categoria_id,compatibilidad,categorias(nombre)"
+                "id,descripcion,codigo,sku_oem,marca_producto,precio_v_usd,stock_actual,"
+                "es_compuesto,categoria_id,compatibilidad,categorias(nombre)"
             )
             .eq("activo", True)
             .order("descripcion")
@@ -7042,7 +6952,10 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
         try:
             prods = (
                 sb.table("productos")
-                .select("id,descripcion,precio_v_usd,stock_actual,es_compuesto,compatibilidad")
+                .select(
+                    "id,descripcion,codigo,sku_oem,marca_producto,precio_v_usd,stock_actual,"
+                    "es_compuesto,compatibilidad"
+                )
                 .eq("activo", True)
                 .order("descripcion")
                 .execute()
@@ -7063,6 +6976,10 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
         c = p.get("categorias")
         if isinstance(c, dict):
             return str(c.get("nombre") or "").strip()
+        if isinstance(c, list) and c:
+            c0 = c[0]
+            if isinstance(c0, dict):
+                return str(c0.get("nombre") or "").strip()
         return ""
 
     def _venta_pide_seriales_motor(p: dict[str, Any]) -> bool:
@@ -7182,13 +7099,28 @@ def module_ventas(sb: Client, erp_uid: str, t: dict[str, Any] | None) -> None:
     new_lines: list[dict[str, Any]] = []
     for i, line in enumerate(st.session_state["venta_lines"]):
         c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
-        pid = c1.selectbox(
-            f"Producto {i+1}",
-            options=list(id_to_label.keys()),
-            format_func=lambda x: id_to_label[x],
-            key=f"vp_{i}",
-            index=list(id_to_label.keys()).index(line["producto_id"]) if line["producto_id"] in id_to_label else 0,
-        )
+        with c1:
+            _vq = st.text_input(
+                f"Buscar producto (línea {i + 1})",
+                key=f"vp_q_{i}",
+                placeholder="Código, OEM, descripción, marca, carro…",
+                label_visibility="collapsed",
+            )
+            _plist_line = filtrar_productos_por_busqueda(
+                plist, _vq, siempre_incluir_id=str(line.get("producto_id") or "")
+            )
+            _opt_v = [str(p["id"]) for p in _plist_line]
+            if not _opt_v:
+                _opt_v = [str(plist[0]["id"])]
+                st.caption("Sin coincidencias con la búsqueda; mostrando un ítem. Vacía el filtro o probá otras palabras.")
+            _ix_v = _opt_v.index(str(line["producto_id"])) if str(line["producto_id"]) in _opt_v else 0
+            pid = st.selectbox(
+                f"Producto {i+1}",
+                options=_opt_v,
+                format_func=lambda x, _m=id_to_label: _m.get(str(x), str(x)),
+                key=f"vp_{i}",
+                index=_ix_v,
+            )
         qty = c2.number_input(
             "Cant.",
             min_value=1,
@@ -8020,24 +7952,6 @@ def module_cajas(sb: Client, erp_uid: str) -> None:
 
 
 def panel_reportes_inventario_export(sb: Client, t: dict[str, Any] | None) -> None:
-    _ts_md = _backup_file_timestamp()
-    with st.expander("Markdown (.md) para asistente / IA — inventario activo", expanded=False):
-        st.caption(
-            "Archivo **.md** con productos **activos**: stock, **precio de venta solo en USD**, categoría y compatibilidad. "
-            "Sirve para subirlo a una IA que consulte disponibilidad y precios."
-        )
-        try:
-            _md_ia = inventario_activos_markdown_ia(sb, t)
-            st.download_button(
-                label=f"Descargar — inventario_ia_{_ts_md}.md",
-                data=_md_ia.encode("utf-8"),
-                file_name=f"inventario_ia_{_ts_md}.md",
-                mime="text/markdown",
-                key="rep_inv_dl_md_ia",
-                use_container_width=True,
-            )
-        except Exception as e:
-            st.error(str(e))
     if not t:
         st.warning("Registrá tasas en el **Dashboard** para que el reporte muestre referencias en Bs.")
         return
@@ -8451,7 +8365,7 @@ def panel_reportes_catalogo_fotos(sb: Client, erp_uid: str) -> None:
     try:
         prows = (
             sb.table("productos")
-            .select("id,codigo,descripcion,imagen_url,activo")
+            .select("id,codigo,descripcion,sku_oem,marca_producto,compatibilidad,imagen_url,activo")
             .order("descripcion")
             .limit(3000)
             .execute()
@@ -8465,23 +8379,47 @@ def panel_reportes_catalogo_fotos(sb: Client, erp_uid: str) -> None:
         st.warning("No hay productos en inventario.")
         return
 
-    labels: list[str] = []
-    id_by_label: dict[str, str] = {}
-    for p in prows:
+    def _cat_prod_label_row(p: dict[str, Any]) -> str:
         pid = str(p.get("id") or "").strip()
-        if not pid:
-            continue
         cod = (p.get("codigo") or "") or ""
         desc = (p.get("descripcion") or "") or ""
         lab = f"{desc[:70]} · {cod}".strip(" ·")
+        return lab or pid
+
+    _prev_pid_cat = ""
+    _psel_cat = st.session_state.get("cat_prod_sel")
+    if _psel_cat:
+        for _pc in prows:
+            if _cat_prod_label_row(_pc) == str(_psel_cat):
+                _prev_pid_cat = str(_pc.get("id") or "").strip()
+                break
+    _cat_q_fot = st.text_input(
+        "Buscar producto (código, OEM, descripción, marca…)",
+        key="cat_prod_q",
+        placeholder="Varias palabras: deben aparecer todas",
+    )
+    prows_f = filtrar_productos_por_busqueda(prows, _cat_q_fot, siempre_incluir_id=_prev_pid_cat or None)
+    if not prows_f:
+        st.caption("Sin coincidencias; mostrando una muestra. Vacía la búsqueda.")
+        prows_f = prows[:500]
+
+    labels: list[str] = []
+    id_by_label: dict[str, str] = {}
+    for p in prows_f:
+        pid = str(p.get("id") or "").strip()
+        if not pid:
+            continue
+        lab = _cat_prod_label_row(p)
         labels.append(lab)
         id_by_label[lab] = pid
     labels = sorted(set(labels), key=str.casefold)
+    _ix_cat = labels.index(str(_psel_cat)) if _psel_cat in labels else 0
     sel = st.selectbox(
         "Producto",
         options=labels,
+        index=_ix_cat,
         key="cat_prod_sel",
-        help="Sirve para el modo *uno* del HTML y, si hay subida de fotos, para ese producto. Escribí para filtrar.",
+        help="Buscá arriba por varias palabras; el desplegable se acota al resultado (mantiene el elegido si seguís en la misma ficha).",
     )
     pid = id_by_label.get(sel, "")
     if not pid:

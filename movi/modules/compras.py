@@ -10,6 +10,8 @@ from typing import Any
 import streamlit as st
 from supabase import Client
 
+from movi.producto_busqueda import filtrar_productos_por_busqueda
+
 
 @dataclass(frozen=True)
 class ComprasModuleDeps:
@@ -44,7 +46,9 @@ def render_module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None, *,
 
     prods = (
         sb.table("productos")
-        .select("id,descripcion,costo_usd")
+        .select(
+            "id,descripcion,costo_usd,codigo,sku_oem,marca_producto,categorias(nombre),compatibilidad"
+        )
         .eq("activo", True)
         .order("descripcion")
         .execute()
@@ -142,13 +146,28 @@ def render_module_compras(sb: Client, erp_uid: str, t: dict[str, Any] | None, *,
     new_lines: list[dict[str, Any]] = []
     for i, line in enumerate(st.session_state["compra_lines"]):
         c1, c2, c3 = st.columns([3, 1, 1])
-        pid = c1.selectbox(
-            f"Producto {i+1}",
-            options=list(id_to_label.keys()),
-            format_func=lambda x: id_to_label[x],
-            key=f"cp_{i}",
-            index=list(id_to_label.keys()).index(line["producto_id"]) if line["producto_id"] in id_to_label else 0,
-        )
+        with c1:
+            _cq = st.text_input(
+                f"Buscar producto (línea {i + 1})",
+                key=f"cp_q_{i}",
+                placeholder="Código, OEM, descripción, marca…",
+                label_visibility="collapsed",
+            )
+            _plf = filtrar_productos_por_busqueda(
+                plist, _cq, siempre_incluir_id=str(line.get("producto_id") or "")
+            )
+            _opt_c = [str(p["id"]) for p in _plf]
+            if not _opt_c:
+                _opt_c = [str(plist[0]["id"])]
+                st.caption("Sin coincidencias; mostrando un ítem. Vacía el filtro o probá otras palabras.")
+            _ix_c = _opt_c.index(str(line["producto_id"])) if str(line["producto_id"]) in _opt_c else 0
+            pid = st.selectbox(
+                f"Producto {i+1}",
+                options=_opt_c,
+                format_func=lambda x, _m=id_to_label: _m.get(str(x), str(x)),
+                key=f"cp_{i}",
+                index=_ix_c,
+            )
         qty = c2.number_input(
             "Cant.",
             min_value=1,
