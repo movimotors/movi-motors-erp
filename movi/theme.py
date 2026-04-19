@@ -579,11 +579,17 @@ def _movi_ui_theme_css_block() -> str:
     font-weight: 600 !important;
   }}
   div.movi-mod-nav-outer {{
+    position: sticky;
+    top: 0.35rem;
+    z-index: 50;
     border: 1px solid rgba(94, 234, 212, 0.38);
     border-radius: 16px;
     padding: 10px 12px 14px 12px;
     margin-bottom: 0.85rem;
-    background: rgba(0, 0, 0, 0.2);
+    background: rgba(15, 23, 42, 0.92);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
   }}
   div.movi-mod-nav-outer [data-testid="stHorizontalBlock"] {{
     flex-wrap: nowrap !important;

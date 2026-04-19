@@ -68,7 +68,8 @@ st.set_page_config(
     page_title="Movi Motor's Importadora · ERP",
     page_icon=_PAGE_ICON,
     layout="wide",
-    initial_sidebar_state="expanded",
+    # Barra lateral desplegable (no permanece abierta fijando el layout); módulos en zona principal.
+    initial_sidebar_state="collapsed",
 )
 
 render_movi_ui_theme_styles()
@@ -9262,8 +9263,6 @@ def main() -> None:
         st.caption("Cotizaciones **en vivo**: **Dashboard → Mercado en vivo** · **Resumen ejecutivo** en **Reportes**.")
         render_cambiar_mi_password(sb, erp_uid)
         render_sidebar_calculadora()
-        st.markdown('<p class="sb-block-title">Navegación</p>', unsafe_allow_html=True)
-        st.caption("Elegí el módulo en la **barra superior** (íconos).")
 
     opts = movi_nav_options_for_role(rol)
     if not opts:
@@ -9277,6 +9276,12 @@ def main() -> None:
         render_movi_main_module_nav(opts)
     else:
         st.session_state["movi_mod"] = opts[0]
+    st.caption(
+        "**Barra lateral:** abrila o cerrala con el menú o la flecha del **encabezado** (arriba a la izquierda): "
+        "tema, cerrar sesión, contraseña y calculadora. Los **módulos** siguen fijos arriba al desplazarte."
+        if len(opts) > 1
+        else "**Barra lateral:** abrila o cerrala desde el encabezado para tema, cerrar sesión y calculadora."
+    )
     mod = str(st.session_state["movi_mod"])
 
     if mod == "Dashboard" and role_can(rol, "dashboard"):
